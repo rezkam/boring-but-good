@@ -8,7 +8,13 @@ An [Agent Skills](https://agentskills.io) compatible skill for AI agents.
 
 ### Clawdhub
 
-Install from [clawdhub.com/rezkam/skanetrafiken](https://clawdhub.com/rezkam/skanetrafiken)
+```bash
+npx clawdhub@latest install skanetrafiken
+# or: pnpm dlx clawdhub@latest install skanetrafiken
+# or: bunx clawdhub@latest install skanetrafiken
+```
+
+Browse at [clawdhub.com/rezkam/skanetrafiken](https://clawdhub.com/rezkam/skanetrafiken)
 
 ### Claude Code
 
