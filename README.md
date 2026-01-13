@@ -5,71 +5,45 @@ Plan public transport journeys in Skåne, Sweden with real-time information.
 ## Installation
 
 ```bash
-# Copy to Claude skills directory
-cp -r skanetrafiken-skill ~/.claude/skills/skanetrafiken
-
-# Make scripts executable
-chmod +x ~/.claude/skills/skanetrafiken/*.sh
+git clone https://github.com/rezkam/skanetrafiken.git ~/.claude/skills/skanetrafiken
 ```
 
 ## Quick Start
 
-### 1. Find a stop
+```bash
+./trip.sh "Malmö C" "Lund C"
+./trip.sh "Kalendegatan 12C" "Malmö C" "09:00"
+./trip.sh "Malmö C" "København H" "tomorrow 18:00"
+```
+
+## Usage
 
 ```bash
-./search-location.sh "malmö c"
+./trip.sh <from> <to> [datetime] [mode]
 ```
 
-Output:
-```
-ID: 9021012080000000
-Name: Malmö C
-Type: STOP_AREA
-```
+| Argument | Description |
+|----------|-------------|
+| `from` | Origin - station name, address, or coordinates (lat#lon) |
+| `to` | Destination - station name, address, or coordinates |
+| `datetime` | Optional: "18:30", "tomorrow 09:00", "2026-01-15 09:00" |
+| `mode` | Optional: "depart" (default) or "arrive" |
 
-### 2. Plan a journey
+## Supported Locations
 
-**Travel now:**
-```bash
-./journey.sh 9021012080000000 STOP_AREA 9021012080040000 STOP_AREA
-```
-
-**Depart at 18:30:**
-```bash
-./journey.sh 9021012080000000 STOP_AREA 9021012080040000 STOP_AREA "18:30"
-```
-
-**Arrive by 09:00:**
-```bash
-./journey.sh 9021012080000000 STOP_AREA 9021012081000000 STOP_AREA "09:00" arrive
-```
-
-## Common Stop IDs
-
-| Stop | ID |
-|------|-----|
-| Malmö C | 9021012080000000 |
-| Malmö Hyllie | 9021012080040000 |
-| Malmö Triangeln | 9021012080100000 |
-| Malmö Annetorp | 9021012080350000 |
-| Lund C | 9021012081216000 |
-| Helsingborg C | 9021012074000000 |
-
-## Scripts
-
-| Script | Purpose |
-|--------|---------|
-| `search-location.sh` | Find stop IDs by name |
-| `journey.sh` | Plan trips with real-time info |
+- **Stations** - All bus/train stations in Skåne
+- **Addresses** - Street addresses in Skåne and Copenhagen
+- **Coordinates** - GPS as lat#lon (e.g., "55.605#13.003")
+- **Copenhagen** - Cross-border trips to/from Denmark
 
 ## Features
 
+- Single-call trip planning (no IDs needed)
 - Real-time delay information
 - Three time modes: now, depart at, arrive by
-- Walking directions with distances
 - Platform/track information
 - Disruption alerts
-- Multiple journey options
+- Cross-border support (Copenhagen)
 
 ## Documentation
 
