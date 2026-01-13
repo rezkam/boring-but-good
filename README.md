@@ -22,12 +22,6 @@ Browse at [clawdhub.com/rezkam/skanetrafiken](https://clawdhub.com/rezkam/skanet
 git clone https://github.com/rezkam/skanetrafiken.git ~/.claude/skills/skanetrafiken
 ```
 
-### Clawdbot
-
-```bash
-git clone https://github.com/rezkam/skanetrafiken.git ~/clawdbot/skills/skanetrafiken
-```
-
 ## Requirements
 
 - `curl` - HTTP requests
