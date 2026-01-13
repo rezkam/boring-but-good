@@ -2,11 +2,39 @@
 
 Plan public transport journeys in Skåne, Sweden with real-time information.
 
+An [Agent Skills](https://agentskills.io) compatible skill for AI agents.
+
 ## Installation
+
+### Claude Code
 
 ```bash
 git clone https://github.com/rezkam/skanetrafiken.git ~/.claude/skills/skanetrafiken
 ```
+
+### Clawdbot
+
+```bash
+git clone https://github.com/rezkam/skanetrafiken.git ~/clawd/skills/skanetrafiken
+```
+
+### Manual Installation
+
+Copy the skill directory to your agent's skills folder:
+
+```
+your-skills-directory/
+└── skanetrafiken/
+    ├── SKILL.md
+    ├── trip.sh
+    ├── journey.sh
+    └── search-location.sh
+```
+
+## Requirements
+
+- `curl` - HTTP requests
+- `jq` - JSON processing
 
 ## Quick Start
 
@@ -45,6 +73,21 @@ git clone https://github.com/rezkam/skanetrafiken.git ~/.claude/skills/skanetraf
 - Disruption alerts
 - Cross-border support (Copenhagen)
 
+## Skill Structure
+
+```
+skanetrafiken/
+├── SKILL.md              # Skill definition (agentskills.io format)
+├── README.md             # This file
+├── trip.sh               # Main script - single-call trip planning
+├── journey.sh            # Low-level journey planning with IDs
+└── search-location.sh    # Location search utility
+```
+
 ## Documentation
 
-See [SKILL.md](SKILL.md) for detailed usage instructions.
+See [SKILL.md](SKILL.md) for detailed usage instructions and examples.
+
+## License
+
+MIT
