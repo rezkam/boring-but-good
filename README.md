@@ -27,42 +27,18 @@ git clone https://github.com/rezkam/skanetrafiken.git ~/.claude/skills/skanetraf
 - `curl` - HTTP requests
 - `jq` - JSON processing
 
-## Usage
-
-```bash
-./trip.sh <from> <to> [datetime] [mode]
-```
-
-## Quick Examples
-
-```bash
-./trip.sh "Malmö C" "Lund C"
-./trip.sh "Kalendegatan 12, Malmö" "Emporia" "09:00"
-./trip.sh "Malmö C" "København H" "tomorrow 18:00" arrive
-```
-
-## Query Formatting (Important)
-
-| Location Type | Correct | Wrong |
-|--------------|---------|-------|
-| Landmarks/POIs | `"Emporia"` | `"Emporia, Malmö"` |
-| Street addresses | `"Storgatan 10, Malmö"` | `"Storgatan 10"` |
-| Central stations | `"Malmö C"` | `"Malmö"` |
-
-**Key rule**: Never append city names to landmarks or POIs - it returns wrong locations.
-
 ## Features
 
-- Single-call trip planning
-- Real-time delay information
-- Three modes: travel now, depart at, arrive by
-- Platform/track information
-- Disruption alerts
-- Cross-border Copenhagen support
+- **Single-call trip planning** - Get journey options with one command
+- **Real-time delays** - Shows actual departure times with delay indicators
+- **Flexible scheduling** - Travel now, depart at, or arrive by specific times
+- **Platform info** - Track and platform numbers for each leg
+- **Disruption alerts** - Service disruption warnings when available
+- **Cross-border support** - Copenhagen trips via Öresundståg
 
-## Documentation
+## Usage
 
-See [SKILL.md](SKILL.md) for complete usage guide and examples.
+See [SKILL.md](SKILL.md) for complete usage guide, query formatting rules, and examples.
 
 ## License
 
