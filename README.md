@@ -10,10 +10,6 @@ This is a monorepo containing various skills for AI agents like Claude Code. Eac
 
 Plan public transport journeys in Skåne, Sweden with real-time departure information, delays, and cross-border support to Copenhagen.
 
-- **Features**: Real-time delays, flexible scheduling, platform info, disruption alerts
-- **Requirements**: `curl`, `jq`
-- **License**: MIT
-
 ---
 
 ## Installation
