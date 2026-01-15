@@ -20,7 +20,7 @@ Plan public transport journeys in Skåne, Sweden with real-time departure inform
 Search for stations, addresses, or points of interest.
 
 ```bash
-./search-location.sh <query> [limit]
+./scripts/search-location.sh <query> [limit]
 ```
 
 | Argument | Description |
@@ -45,7 +45,7 @@ Search for stations, addresses, or points of interest.
 Plan a journey between two locations using their IDs.
 
 ```bash
-./journey.sh <from-id> <from-type> <to-id> <to-type> [datetime] [mode]
+./scripts/journey.sh <from-id> <from-type> <to-id> <to-type> [datetime] [mode]
 ```
 
 | Argument | Description |
@@ -82,7 +82,7 @@ When user wants options "around" a time, query 15-30 minutes earlier to show opt
 ```bash
 # User: "I want to travel around 15:00"
 # Query at 14:30 to get options spanning 14:30-16:00+
-./journey.sh ... "14:30" depart
+./scripts/journey.sh ... "14:30" depart
 ```
 
 ### Relative Time Calculations
@@ -247,8 +247,8 @@ Parse what the user wants:
 Search for origin and destination separately:
 
 ```bash
-./search-location.sh "Malmö C"
-./search-location.sh "Emporia"
+./scripts/search-location.sh "Malmö C"
+./scripts/search-location.sh "Emporia"
 ```
 
 ### Step 3: Validate Search Results
@@ -281,19 +281,19 @@ Which one did you mean?
 1. **Try with city name for addresses:**
    ```bash
    # If "Storgatan 10" fails, try:
-   ./search-location.sh "Storgatan 10, Malmö"
+   ./scripts/search-location.sh "Storgatan 10, Malmö"
    ```
 
 2. **Try official station names:**
    ```bash
    # If "Malmö station" fails, try:
-   ./search-location.sh "Malmö C"
+   ./scripts/search-location.sh "Malmö C"
    ```
 
 3. **Try landmark name only (without city):**
    ```bash
    # If "Emporia, Malmö" fails, try:
-   ./search-location.sh "Emporia"
+   ./scripts/search-location.sh "Emporia"
    ```
 
 4. **Use coordinates as last resort:**
@@ -314,7 +314,7 @@ Example:
 ```bash
 # Search returns: ID: 123, Type: ADDRESS, Coordinates: 55.605, 13.003
 # Use in journey as:
-./journey.sh "55.605#13.003" LOCATION 9021012080000000 STOP_AREA
+./scripts/journey.sh "55.605#13.003" LOCATION 9021012080000000 STOP_AREA
 ```
 
 ### Step 6: Execute Journey Search
@@ -322,7 +322,7 @@ Example:
 Once you have confirmed IDs/coordinates for both locations:
 
 ```bash
-./journey.sh <from-id> <from-type> <to-id> <to-type> [datetime] [mode]
+./scripts/journey.sh <from-id> <from-type> <to-id> <to-type> [datetime] [mode]
 ```
 
 ### Step 7: Format Response with Emojis
@@ -341,13 +341,13 @@ Use the landmark name WITHOUT city name.
 
 ```bash
 # CORRECT
-./search-location.sh "Emporia"
-./search-location.sh "Triangeln"
-./search-location.sh "Turning Torso"
+./scripts/search-location.sh "Emporia"
+./scripts/search-location.sh "Triangeln"
+./scripts/search-location.sh "Turning Torso"
 
 # WRONG - city name breaks POI search
-./search-location.sh "Emporia, Malmö"        # May return wrong location!
-./search-location.sh "Triangeln, Malmö"      # Unnecessary, may fail
+./scripts/search-location.sh "Emporia, Malmö"        # May return wrong location!
+./scripts/search-location.sh "Triangeln, Malmö"      # Unnecessary, may fail
 ```
 
 ### Street Addresses: Include City
@@ -356,12 +356,12 @@ Include city name for better accuracy.
 
 ```bash
 # CORRECT
-./search-location.sh "Kalendegatan 12, Malmö"
-./search-location.sh "Storgatan 25, Lund"
-./search-location.sh "Drottninggatan 5, Helsingborg"
+./scripts/search-location.sh "Kalendegatan 12, Malmö"
+./scripts/search-location.sh "Storgatan 25, Lund"
+./scripts/search-location.sh "Drottninggatan 5, Helsingborg"
 
 # RISKY - may be ambiguous
-./search-location.sh "Kalendegatan 12"       # Works if unambiguous
+./scripts/search-location.sh "Kalendegatan 12"       # Works if unambiguous
 ```
 
 ### Train Stations: Use Official Names
@@ -370,16 +370,16 @@ Use "C" suffix for central stations.
 
 ```bash
 # CORRECT
-./search-location.sh "Malmö C"
-./search-location.sh "Lund C"
-./search-location.sh "Helsingborg C"
-./search-location.sh "Malmö Hyllie"
-./search-location.sh "Malmö Triangeln"
+./scripts/search-location.sh "Malmö C"
+./scripts/search-location.sh "Lund C"
+./scripts/search-location.sh "Helsingborg C"
+./scripts/search-location.sh "Malmö Hyllie"
+./scripts/search-location.sh "Malmö Triangeln"
 
 # WRONG
-./search-location.sh "Malmö"                 # Ambiguous!
-./search-location.sh "Malmö Central"         # Not official name
-./search-location.sh "Lund station"          # Not official name
+./scripts/search-location.sh "Malmö"                 # Ambiguous!
+./scripts/search-location.sh "Malmö Central"         # Not official name
+./scripts/search-location.sh "Lund station"          # Not official name
 ```
 
 ### Copenhagen (Cross-border)
@@ -388,10 +388,10 @@ Use Danish names or common alternatives.
 
 ```bash
 # All work
-./search-location.sh "København H"
-./search-location.sh "Nørreport"
-./search-location.sh "Copenhagen Airport"
-./search-location.sh "Köpenhamn"
+./scripts/search-location.sh "København H"
+./scripts/search-location.sh "Nørreport"
+./scripts/search-location.sh "Copenhagen Airport"
+./scripts/search-location.sh "Köpenhamn"
 ```
 
 ---
@@ -403,9 +403,9 @@ Use Danish names or common alternatives.
 User: "How do I get from Malmö C to Lund C?"
 
 ```bash
-./search-location.sh "Malmö C"
-./search-location.sh "Lund C"
-./journey.sh 9021012080000000 STOP_AREA 9021012080040000 STOP_AREA
+./scripts/search-location.sh "Malmö C"
+./scripts/search-location.sh "Lund C"
+./scripts/journey.sh 9021012080000000 STOP_AREA 9021012080040000 STOP_AREA
 ```
 
 **Response:**
@@ -424,9 +424,9 @@ User: "How do I get from Malmö C to Lund C?"
 User: "I need to go from Kalendegatan 12 in Malmö to Emporia"
 
 ```bash
-./search-location.sh "Kalendegatan 12, Malmö"
-./search-location.sh "Emporia"
-./journey.sh "55.595#13.001" LOCATION "55.563#12.973" LOCATION
+./scripts/search-location.sh "Kalendegatan 12, Malmö"
+./scripts/search-location.sh "Emporia"
+./scripts/journey.sh "55.595#13.001" LOCATION "55.563#12.973" LOCATION
 ```
 
 **Response:**
@@ -449,9 +449,9 @@ User: "I need to go from Kalendegatan 12 in Malmö to Emporia"
 User: "I need to be at Copenhagen central by 18:00 tomorrow"
 
 ```bash
-./search-location.sh "Malmö C"
-./search-location.sh "København H"
-./journey.sh 9021012080000000 STOP_AREA 9921000008600626 STOP_AREA "tomorrow 18:00" arrive
+./scripts/search-location.sh "Malmö C"
+./scripts/search-location.sh "København H"
+./scripts/journey.sh 9021012080000000 STOP_AREA 9921000008600626 STOP_AREA "tomorrow 18:00" arrive
 ```
 
 **Response:**
@@ -473,7 +473,7 @@ User: "I want to travel to Lund around 15:00"
 
 ```bash
 # Query 30 min earlier to show options around 15:00
-./journey.sh 9021012080000000 STOP_AREA 9021012080040000 STOP_AREA "14:30"
+./scripts/journey.sh 9021012080000000 STOP_AREA 9021012080040000 STOP_AREA "14:30"
 ```
 
 **Response:**
@@ -501,7 +501,7 @@ User: "I want to leave in about an hour"
 
 ```bash
 # Current time: 13:00, so query for 14:00
-./journey.sh ... "14:00"
+./scripts/journey.sh ... "14:00"
 ```
 
 **Response:**
