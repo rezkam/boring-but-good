@@ -28,16 +28,24 @@ cp -r boring-but-good/skanetrafiken ~/.claude/skills/skanetrafiken
 
 ## Features
 
-- **Single-call trip planning** - Get journey options with one command
+- **Two-step workflow** - Search locations first, then plan journeys with confirmed IDs
+- **Smart disambiguation** - LLM can validate results and ask clarifying questions
 - **Real-time delays** - Shows actual departure times with delay indicators
 - **Flexible scheduling** - Travel now, depart at, or arrive by specific times
 - **Platform info** - Track and platform numbers for each leg
 - **Disruption alerts** - Service disruption warnings when available
-- **Cross-border support** - Copenhagen trips via Öresundståg
+- **Cross-border support** - Copenhagen trips via Öresundståg and Metro
+
+## Commands
+
+| Command | Purpose |
+|---------|---------|
+| `search-location.sh` | Find stations, addresses, or landmarks |
+| `journey.sh` | Plan a journey between two locations |
 
 ## Usage
 
-See [SKILL.md](SKILL.md) for complete usage guide, query formatting rules, and examples.
+See [SKILL.md](SKILL.md) for complete usage guide, LLM workflow, query formatting rules, and examples.
 
 ## License
 

@@ -281,6 +281,7 @@ format_type() {
         Train) echo "TRAIN" ;;
         TrainOresund) echo "ORESUND" ;;
         Tram) echo "TRAM" ;;
+        Metro) echo "METRO" ;;
         Ferry) echo "FERRY" ;;
         *) echo "OTHER" ;;
     esac

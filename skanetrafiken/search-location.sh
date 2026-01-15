@@ -1,6 +1,6 @@
 #!/bin/bash
 # Search Skånetrafiken stops/locations by name
-# Usage: ./search-location.sh <name>
+# Usage: ./search-location.sh <name> [limit]
 #
 # Returns: Point ID, Name, Type, Coordinates
 
@@ -10,12 +10,22 @@ set -euo pipefail
 trap 'rm -f /tmp/skanetrafiken_points_$$.json' EXIT
 
 QUERY="${1:-}"
+LIMIT="${2:-3}"
 
 if [ -z "$QUERY" ]; then
-    echo "Usage: $0 <location-name>"
+    echo "Usage: $0 <location-name> [limit]"
+    echo "  limit: Number of results to show (default: 3, max: 10)"
+    echo ""
     echo "Example: $0 \"malmö c\""
-    echo "Example: $0 \"lund station\""
+    echo "Example: $0 \"lund\" 5"
     exit 1
+fi
+
+# Validate and cap limit
+if ! [[ "$LIMIT" =~ ^[0-9]+$ ]] || [ "$LIMIT" -lt 1 ]; then
+    LIMIT=3
+elif [ "$LIMIT" -gt 10 ]; then
+    LIMIT=10
 fi
 
 # URL encode the query
@@ -63,7 +73,13 @@ echo "Found $POINT_COUNT location(s):"
 echo ""
 
 # Output formatted results
-echo "$RESPONSE" | jq -r '
-    .points[:10][] |
+echo "$RESPONSE" | jq -r --argjson limit "$LIMIT" '
+    .points[:$limit][] |
     "ID: \(.id2)\nName: \(.name)\nType: \(.type)\nArea: \(.area // "Skåne")\nCoordinates: \(.lat), \(.lon)\n\(if .outsideOperatingArea == true then "⚠️  Outside Skåne operating area\n" else "" end)---"
 '
+
+# Show if more results available
+SHOWN=$((LIMIT < POINT_COUNT ? LIMIT : POINT_COUNT))
+if [ "$POINT_COUNT" -gt "$SHOWN" ]; then
+    echo "(Showing $SHOWN of $POINT_COUNT results. Use: $0 \"$QUERY\" <limit> for more)"
+fi
