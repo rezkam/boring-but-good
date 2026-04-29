@@ -57,6 +57,7 @@ Add only when each one carries real weight. Most ADRs need none:
 - **Whole document: conversational.** Write to a developer joining six months from now. Full sentences. Plain English. Skip the cookbook tone.
 - **Consequences: balanced.** If the section has only positives, you wrote a press release. Every decision has trade-offs; if you can't name one, the decision wasn't a real choice and the ADR isn't worth writing.
 - **No em dashes.** Hard rule. The U+2014 character (em dash) does not appear in any ADR. Use hyphens with surrounding spaces, commas, sentence breaks, or parentheses instead.
+- **No diagrams.** Hard rule. The ADR is the *decision*, not the manual. If a diagram clarifies the design, put it in the architecture spec and reference the section. Diagrams in ADRs trigger the Mega-ADR anti-pattern: they pull in surrounding prose to explain the diagram, the prose pulls in implementation detail, and within a few revisions the ADR is a multi-page document that nobody can scan.
 
 ## Length and time budget
 
@@ -78,9 +79,12 @@ If a decision is easy to reverse, skip it - you'll just reverse it. If it's not 
 
 Write the ADR while the decision is still being made - *before* the implementation lands. ADRs written after implementation tend to read like press releases for the chosen path; they miss the alternatives that actually got debated and the trade-offs that were live in the room. If a decision was already shipped, document it, but mark the status (`accepted, retroactive`), be honest about the alternatives that *were* on the table at the time, and write the Consequences from what you've now learned. (Zimmermann, 2023, calls late-written ADRs the "press release" anti-pattern.)
 
-## Numbering
+## File naming
 
-Scan `docs/adr/` for the highest existing number and increment by one. Filenames: `NNNN-short-slug.md`.
+Filenames are load-bearing: future readers find ADRs by scrolling the directory, not by opening each file. Two rules:
+
+1. **Numbered prefix.** Scan the ADR directory (`docs/adr/`, or wherever ADRs live for this project) for the highest existing number and increment by one. Format: `NNNN-` (four digits, leading zeros). The first ADR is `0001-`. Numbering is forever; once `0007-` is taken, it is taken even if `0007` is later superseded.
+2. **Clear slug.** The slug after the number must say what was decided, not what was discussed. `0007-uuid-v7-for-service-ids.md` reads well; `0007-id-strategy.md` reads as a topic and forces readers to open the file. Keep slugs concise (3 to 7 words, kebab-case) and scoped to the directory's domain (no need to repeat the service or context name if the ADR lives inside a directory that already implies it).
 
 ## Status
 

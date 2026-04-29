@@ -1,6 +1,8 @@
 # Graph Format
 
-How to write diagrams that render correctly on GitHub and stay readable inside decision dossiers, ADRs, and context docs.
+How to write diagrams that render correctly on GitHub and stay readable inside decision dossiers, architecture specs, and `CONTEXT.md`.
+
+**Diagrams do not belong in ADRs.** The ADR is the decision, not the manual; an ADR with a diagram is on the path to becoming a Mega-ADR. If a design needs a diagram to explain itself, the diagram lives in the architecture spec and the ADR points at the spec section. See [ADR-FORMAT.md](./ADR-FORMAT.md) § Voice and tone.
 
 ## Why Mermaid
 
