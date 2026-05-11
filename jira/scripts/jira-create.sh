@@ -10,7 +10,10 @@
 #   --assignee ID         Assignee account ID or username
 #   --priority NAME       Priority — run jira-meta.sh priorities to see valid values
 #   --labels "l1 l2"      Space-separated labels (in addition to defaults)
-#   --parent KEY          Parent issue key (for sub-tasks)
+#   --parent KEY          Parent issue key (works for sub-tasks AND Story-under-Epic
+#                         relationships; applied via follow-up PUT after create,
+#                         because go-jira's create-time -o parent override is ignored
+#                         by Jira Cloud for non-subtask types).
 #
 # Outputs the created issue key (e.g. PROJ-123)
 
@@ -42,7 +45,7 @@ Valid options:
   --assignee ID         Assignee username
   --priority NAME       Priority name
   --labels "l1 l2"      Additional labels (space-separated)
-  --parent KEY          Parent issue for sub-tasks
+  --parent KEY          Parent issue (sub-task parent OR Epic for Story-type issues)
 
 Example:
   jira-create.sh --type Bug --summary "Login fails on timeout" --priority High
@@ -126,7 +129,10 @@ CMD=(jira create --noedit -p "$PROJECT" -i "$TYPE" -o "summary=${SUMMARY}")
 [ -n "$DESCRIPTION" ] && CMD+=(-o "description=${DESCRIPTION}")
 [ -n "$ASSIGNEE" ]    && CMD+=(-o "assignee=${ASSIGNEE}")
 [ -n "$PRIORITY" ]    && CMD+=(-o "priority=${PRIORITY}")
-[ -n "$PARENT" ]      && CMD+=(-o "parent={\"key\":\"${PARENT}\"}")
+# NOTE: parent is set via a follow-up PUT after the issue exists — see below.
+# go-jira's `-o parent={...}` override is silently dropped by Jira Cloud's create
+# endpoint for non-subtask issue types (e.g. Story under Epic), so we don't pass
+# it here.
 
 # Create the issue and extract key
 # go-jira outputs "OK PROJ-123 https://...PROJ-123" — grep matches the key twice.
@@ -162,6 +168,34 @@ if [ -n "$LABELS" ]; then
         ALL_LABELS="${ALL_LABELS} ${LABELS}"
     else
         ALL_LABELS="${LABELS}"
+    fi
+fi
+
+if [ -n "$PARENT" ]; then
+    PARENT_OUTPUT=$("$SCRIPT_DIR/jira-api.sh" PUT "/rest/api/3/issue/${ISSUE_KEY}" \
+        "{\"fields\":{\"parent\":{\"key\":\"${PARENT}\"}}}" 2>&1)
+    PARENT_RC=$?
+    if [ $PARENT_RC -ne 0 ] || echo "$PARENT_OUTPUT" | grep -qiE 'errorMessage|"errors"'; then
+        cat >&2 << EOF
+ERROR: Issue ${ISSUE_KEY} was created BUT parent ${PARENT} could not be set.
+
+API response (exit ${PARENT_RC}):
+${PARENT_OUTPUT}
+
+Common causes:
+  - The parent issue (${PARENT}) is not an Epic, and the new issue's type does
+    not allow parenting under it.
+  - The current user lacks permission to edit the parent field on this issue
+    type in the project.
+  - The project uses the legacy "Epic Link" custom field instead of the modern
+    "parent" field — you may need to set customfield_10008 manually:
+      $SCRIPT_DIR/jira-api.sh PUT "/rest/api/3/issue/${ISSUE_KEY}" \\
+        '{"fields":{"customfield_10008":"${PARENT}"}}'
+
+Fix the parent manually before continuing. The issue key is: ${ISSUE_KEY}
+EOF
+        echo "$ISSUE_KEY"
+        exit 1
     fi
 fi
 
