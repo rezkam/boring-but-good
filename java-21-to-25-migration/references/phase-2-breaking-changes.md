@@ -150,7 +150,35 @@ Feature removed entirely. Replace `STR."..."`, `FMT."..."`, `RAW."..."` with `St
 4. If using RMI over TLS, test with the new default endpoint identification (JDK 25.0.2)
 5. If you have long-lived secrets or compliance pressure, evaluate post-quantum algorithms (ML-KEM, ML-DSA from JDK 24)
 
-## 2.20 Compile and test
+## 2.20 Fix deprecation warnings from upgraded libraries
+
+After upgrading libraries and the JDK toolchain, **compile with deprecation warnings visible and fix them.** Deprecated-for-removal APIs will become compile errors in the next major version of the library or the JDK — fixing them now avoids a second migration later.
+
+```bash
+mvn clean compile -Dmaven.compiler.showDeprecation=true 2>&1 | grep -i "deprecated"
+```
+
+**Common patterns when upgrading Hibernate, Jackson, gRPC, and other major libraries:**
+
+| Library | Deprecated API | Replacement | Since |
+|---------|---------------|-------------|-------|
+| Hibernate 7 | `Session.update(entity)` | `Session.merge(entity)` | 7.0 (removed) |
+| Hibernate 7 | `Session.get(Class, id)` | `Session.find(Class, id)` | 7.0 (deprecated for removal) |
+| Hibernate 7 | `Session.save(entity)` | `Session.persist(entity)` | 7.0 (removed) |
+| Hibernate 7 | `Session.delete(entity)` | `Session.remove(entity)` | 7.0 (removed) |
+| Hibernate 7 | `Session.saveOrUpdate(entity)` | `Session.merge(entity)` | 7.0 (removed) |
+| JDK 25 | `sun.misc.Unsafe` memory-access | `VarHandle` / Foreign Memory API | JDK 23 (warnings JDK 24+) |
+
+**Process:**
+1. Run a full compile and capture all deprecation warnings
+2. Group warnings by library — deprecations from the same library upgrade share a migration path
+3. Fix each group: check the library's migration guide for the replacement API
+4. If a deprecation comes from a transitive dependency (e.g., Lombok using `sun.misc.Unsafe`), check whether a newer version of that dependency fixes it. If no fix exists upstream, document it and move on — do not suppress the warning
+5. Re-compile and verify zero new deprecation warnings from your own code
+
+**Do not suppress deprecation warnings with `@SuppressWarnings("deprecation")` unless the deprecated API has no replacement yet and the situation is documented.** The goal is to align with the current API contract of every library you upgraded.
+
+## 2.21 Compile and test
 
 ```bash
 mvn clean compile
