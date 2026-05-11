@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Boring Skills Installer
-# Interactive setup for dependency-track, jenkins, jira, and sonarqube skills.
+# Interactive setup for dependency-track, jenkins, jira, sonarqube, and workflow skills.
 #
 # Compatible with: bash 3.2+ (macOS default), bash 4+/5+ (Linux), zsh 5+
 # Usage: ./setup.sh | bash setup.sh | zsh setup.sh
@@ -354,6 +354,7 @@ check_and_install_deps() {
         [ "$INSTALL_JENKINS" = "true" ] && { warn "  jenkins"; INSTALL_JENKINS=false; }
         [ "$INSTALL_JIRA"    = "true" ] && { warn "  jira"; INSTALL_JIRA=false; }
         [ "$INSTALL_SONAR"   = "true" ] && { warn "  sonarqube"; INSTALL_SONAR=false; }
+        [ "$INSTALL_ARGOCD"  = "true" ] && { warn "  argocd"; INSTALL_ARGOCD=false; }
         [ "$INSTALL_SKANE"   = "true" ] && { warn "  skanetrafiken"; INSTALL_SKANE=false; }
     elif [ "$_skipped" = "false" ]; then
         success "All required tools available."
@@ -372,12 +373,12 @@ banner() {
     printf "  %b\n" "${BLUE}                           __/ |${RESET}"
     printf "  %b\n" "${BLUE}                          |___/ ${RESET}"
     printf "\n"
-    printf "  %b\n" "${DIM}dependency-track · jenkins · jira · sonarqube · skanetrafiken · java-21-to-25-migration${RESET}"
+    printf "  %b\n" "${DIM}argocd · dependency-track · jenkins · jira · to-tasks · sonarqube · skanetrafiken · java-21-to-25-migration${RESET}"
     printf "\n"
 }
 
 # ── Skill selection ─────────────────────────────────────────────────────────
-INSTALL_DTRACK=false; INSTALL_JENKINS=false; INSTALL_JIRA=false; INSTALL_SONAR=false; INSTALL_SKANE=false; INSTALL_JAVA_MIG=false
+INSTALL_DTRACK=false; INSTALL_JENKINS=false; INSTALL_JIRA=false; INSTALL_TO_TASKS=false; INSTALL_SONAR=false; INSTALL_SKANE=false; INSTALL_JAVA_MIG=false; INSTALL_ARGOCD=false
 INSTALL_DIR=""
 AGENT_HARNESS="claude-code"
 
@@ -387,36 +388,52 @@ select_skills() {
     printf "    %b  dependency-track        %b\n" "${BOLD}1${RESET}" "${DIM}— SCA vulnerability management & audit${RESET}"
     printf "    %b  jenkins                 %b\n" "${BOLD}2${RESET}" "${DIM}— CI build status, tests, console, triggers${RESET}"
     printf "    %b  jira                    %b\n" "${BOLD}3${RESET}" "${DIM}— Issue tracking: create, transition, search${RESET}"
-    printf "    %b  sonarqube               %b\n" "${BOLD}4${RESET}" "${DIM}— Code quality, coverage, security hotspots${RESET}"
-    printf "    %b  skanetrafiken           %b\n" "${BOLD}5${RESET}" "${DIM}— Public transport in Skåne (no config needed)${RESET}"
-    printf "    %b  java-21-to-25-migration %b\n" "${BOLD}6${RESET}" "${DIM}— JDK 21→25 migration (no config needed)${RESET}"
+    printf "    %b  to-tasks               %b\n" "${BOLD}4${RESET}" "${DIM}— Break plans into approved Jira or local tasks${RESET}"
+    printf "    %b  sonarqube               %b\n" "${BOLD}5${RESET}" "${DIM}— Code quality, coverage, security hotspots${RESET}"
+    printf "    %b  skanetrafiken           %b\n" "${BOLD}6${RESET}" "${DIM}— Public transport in Skåne (no config needed)${RESET}"
+    printf "    %b  argocd                  %b\n" "${BOLD}7${RESET}" "${DIM}— GitOps deployments: sync, status, rollback${RESET}"
+    printf "    %b  java-21-to-25-migration %b\n" "${BOLD}8${RESET}" "${DIM}— JDK 21→25 migration (no config needed)${RESET}"
     echo ""
 
     local selection
     ask selection "Skills to install" "all"
 
     if [ "$selection" = "all" ]; then
-        INSTALL_DTRACK=true; INSTALL_JENKINS=true; INSTALL_JIRA=true; INSTALL_SONAR=true; INSTALL_SKANE=true; INSTALL_JAVA_MIG=true
+        INSTALL_DTRACK=true; INSTALL_JENKINS=true; INSTALL_JIRA=true; INSTALL_TO_TASKS=true; INSTALL_SONAR=true; INSTALL_SKANE=true; INSTALL_ARGOCD=true; INSTALL_JAVA_MIG=true
     else
         for s in $selection; do
             case "$s" in
                 1) INSTALL_DTRACK=true   ;;
                 2) INSTALL_JENKINS=true  ;;
-                3) INSTALL_JIRA=true     ;;
-                4) INSTALL_SONAR=true    ;;
-                5) INSTALL_SKANE=true    ;;
-                6) INSTALL_JAVA_MIG=true ;;
+                3) INSTALL_JIRA=true      ;;
+                4) INSTALL_TO_TASKS=true ;;
+                5) INSTALL_SONAR=true     ;;
+                6) INSTALL_SKANE=true     ;;
+                7) INSTALL_ARGOCD=true    ;;
+                8) INSTALL_JAVA_MIG=true  ;;
                 *) warn "Unknown selection: $s (skipping)" ;;
             esac
         done
     fi
 
+    if [ "$INSTALL_TO_TASKS" = "true" ] && [ "$INSTALL_JIRA" != "true" ]; then
+        local install_jira_for_to_tasks
+        ask_yn install_jira_for_to_tasks "to-tasks can create Jira tasks via the jira skill. Install/configure jira too?" "y"
+        if [ "$install_jira_for_to_tasks" = "true" ]; then
+            INSTALL_JIRA=true
+        else
+            warn "to-tasks can still write local task files; Jira mode requires the jira skill."
+        fi
+    fi
+
     local count=0
     [ "$INSTALL_DTRACK"   = "true" ] && count=$((count + 1))
     [ "$INSTALL_JENKINS"  = "true" ] && count=$((count + 1))
-    [ "$INSTALL_JIRA"     = "true" ] && count=$((count + 1))
-    [ "$INSTALL_SONAR"    = "true" ] && count=$((count + 1))
+    [ "$INSTALL_JIRA"      = "true" ] && count=$((count + 1))
+    [ "$INSTALL_TO_TASKS" = "true" ] && count=$((count + 1))
+    [ "$INSTALL_SONAR"     = "true" ] && count=$((count + 1))
     [ "$INSTALL_SKANE"    = "true" ] && count=$((count + 1))
+    [ "$INSTALL_ARGOCD"   = "true" ] && count=$((count + 1))
     [ "$INSTALL_JAVA_MIG" = "true" ] && count=$((count + 1))
 
     [ "$count" -eq 0 ] && { warn "No skills selected. Nothing to do."; exit 0; }
@@ -993,6 +1010,57 @@ configure_sonar() {
     install_skill "sonarqube"
 }
 
+# ── Configure: ArgoCD ────────────────────────────────────────────────────────
+configure_argocd() {
+    header "Configure: ArgoCD"
+    local cfg="$HOME/.boring/argocd"
+
+    if [ -f "${cfg}/token" ]; then
+        info "Existing config found at ${cfg}/"
+        local reconf; ask_yn reconf "Reconfigure?" "n"
+        if [ "$reconf" != "true" ]; then
+            success "Kept existing config."
+            install_skill "argocd"
+            return
+        fi
+    fi
+
+    printf "  %b\n" "${DIM}Enter the ArgoCD server URL.${RESET}"
+    printf "  %b\n\n" "${DIM}Examples: argocd.example.com  https://argocd.myorg.io${RESET}"
+
+    local url
+    ask_url url "Server URL" "argocd.example.com  https://argocd.myorg.io"
+    if [ -z "$url" ]; then
+        warn "URL is required for argocd. Skipping."
+        INSTALL_ARGOCD=false
+        return
+    fi
+
+    echo ""
+    printf "  %b\n" "${BOLD}How to get a Bearer token:${RESET}"
+    printf "    ${BOLD}Option 1:${RESET} Generate an API token (recommended for automation):\n"
+    printf "      %b\n" "${DIM}argocd account generate-token --account <account-name>${RESET}"
+    printf "    ${BOLD}Option 2:${RESET} Exchange credentials for a session token:\n"
+    printf "      %b\n" "${DIM}curl -s ${url}/api/v1/session -d '{\"username\":\"admin\",\"password\":\"PASSWORD\"}'${RESET}"
+    printf "    ${BOLD}Option 3:${RESET} Copy from ArgoCD CLI config:\n"
+    printf "      %b\n\n" "${DIM}cat ~/.config/argocd/config | grep auth-token${RESET}"
+
+    local token
+    ask_secret token "Bearer token"
+
+    if [ -z "$token" ]; then
+        warn "No token provided. Add it later: echo 'TOKEN' > ${cfg}/token"
+    else
+        write_secure "${cfg}/token" "$token"
+        success "Bearer token saved"
+    fi
+
+    write_secure "${cfg}/url" "$url"
+    success "Server URL saved"
+
+    install_skill "argocd"
+}
+
 # ── Connectivity tests ──────────────────────────────────────────────────────
 test_connectivity() {
     header "Testing Connectivity"
@@ -1037,6 +1105,18 @@ test_connectivity() {
             printf "%b %b\n" "${RED}✗ failed${RESET}" "${DIM}(check URL and token)${RESET}"
         fi
     fi
+
+    if [ "$INSTALL_ARGOCD" = "true" ]; then
+        printf "  argocd .............. "
+        local aurl="" atok=""
+        [ -f "$HOME/.boring/argocd/url" ]   && aurl="$(cat "$HOME/.boring/argocd/url")"
+        [ -f "$HOME/.boring/argocd/token" ] && atok="$(cat "$HOME/.boring/argocd/token")"
+        if [ -n "$aurl" ] && [ -n "$atok" ] && curl -sf -H "Authorization: Bearer ${atok}" "${aurl}/api/v1/session/userinfo" >/dev/null 2>&1; then
+            printf "%b\n" "${GREEN}✓ connected${RESET}"
+        else
+            printf "%b %b\n" "${RED}✗ failed${RESET}" "${DIM}(check URL and token)${RESET}"
+        fi
+    fi
 }
 
 # ── Summary ─────────────────────────────────────────────────────────────────
@@ -1052,8 +1132,10 @@ print_summary() {
     _summary_skill() { printf "    %b %-26s → %s/%s/\n" "${GREEN}✓${RESET}" "$1" "$INSTALL_DIR" "$1"; }
     [ "$INSTALL_DTRACK"   = "true" ] && _summary_skill "dependency-track"
     [ "$INSTALL_JENKINS"  = "true" ] && _summary_skill "jenkins"
-    [ "$INSTALL_JIRA"     = "true" ] && _summary_skill "jira"
-    [ "$INSTALL_SONAR"    = "true" ] && _summary_skill "sonarqube"
+    [ "$INSTALL_JIRA"      = "true" ] && _summary_skill "jira"
+    [ "$INSTALL_TO_TASKS" = "true" ] && _summary_skill "to-tasks"
+    [ "$INSTALL_SONAR"     = "true" ] && _summary_skill "sonarqube"
+    [ "$INSTALL_ARGOCD"   = "true" ] && _summary_skill "argocd"
     [ "$INSTALL_SKANE"    = "true" ] && _summary_skill "skanetrafiken"
 
     # In 'both' mode, also show Pi copies
@@ -1061,8 +1143,10 @@ print_summary() {
         _summary_pi() { printf "    %b %-26s → %s/%s/\n" "${GREEN}✓${RESET}" "$1" "$PI_SKILLS_DIR" "$1"; }
         [ "$INSTALL_DTRACK"   = "true" ] && _summary_pi "dependency-track"
         [ "$INSTALL_JENKINS"  = "true" ] && _summary_pi "jenkins"
-        [ "$INSTALL_JIRA"     = "true" ] && _summary_pi "jira"
-        [ "$INSTALL_SONAR"    = "true" ] && _summary_pi "sonarqube"
+        [ "$INSTALL_JIRA"      = "true" ] && _summary_pi "jira"
+        [ "$INSTALL_TO_TASKS" = "true" ] && _summary_pi "to-tasks"
+        [ "$INSTALL_SONAR"     = "true" ] && _summary_pi "sonarqube"
+        [ "$INSTALL_ARGOCD"   = "true" ] && _summary_pi "argocd"
         [ "$INSTALL_SKANE"    = "true" ] && _summary_pi "skanetrafiken"
     fi
 
@@ -1084,12 +1168,14 @@ print_summary() {
     [ "$INSTALL_JENKINS" = "true" ] && has_configs=true
     [ "$INSTALL_JIRA"    = "true" ] && has_configs=true
     [ "$INSTALL_SONAR"   = "true" ] && has_configs=true
+    [ "$INSTALL_ARGOCD"  = "true" ] && has_configs=true
     if [ "$has_configs" = "true" ]; then
         printf "  %b\n" "${BOLD}Configs:${RESET}"
         [ "$INSTALL_DTRACK"  = "true" ] && printf "    %b\n" "${DIM}~/.boring/dependency-track/{url,apikey}${RESET}"
         [ "$INSTALL_JENKINS" = "true" ] && printf "    %b\n" "${DIM}~/.boring/jenkins/{url,user,token}${RESET}"
         [ "$INSTALL_JIRA"    = "true" ] && printf "    %b\n" "${DIM}~/.jira.d/config.yml + ~/.boring/jira/{defaults,default-labels}${RESET}"
         [ "$INSTALL_SONAR"   = "true" ] && printf "    %b\n" "${DIM}~/.boring/sonarqube/{url,token}${RESET}"
+        [ "$INSTALL_ARGOCD"  = "true" ] && printf "    %b\n" "${DIM}~/.boring/argocd/{url,token}${RESET}"
         echo ""
     fi
 
@@ -1107,7 +1193,7 @@ show_help() {
     echo "Usage: $0 [--help]"
     echo ""
     echo "Interactive installer for Boring Skills."
-    echo "Sets up: dependency-track, jenkins, jira, sonarqube, skanetrafiken, java-21-to-25-migration"
+    echo "Sets up: argocd, dependency-track, jenkins, jira, to-tasks, sonarqube, skanetrafiken, java-21-to-25-migration"
     echo ""
     echo "Supports Claude Code and Pi agent harnesses."
     echo "Skills are symlinked — git pull updates them automatically."
@@ -1132,9 +1218,11 @@ main() {
     local remaining=0
     [ "$INSTALL_DTRACK"   = "true" ] && remaining=$((remaining + 1))
     [ "$INSTALL_JENKINS"  = "true" ] && remaining=$((remaining + 1))
-    [ "$INSTALL_JIRA"     = "true" ] && remaining=$((remaining + 1))
-    [ "$INSTALL_SONAR"    = "true" ] && remaining=$((remaining + 1))
+    [ "$INSTALL_JIRA"      = "true" ] && remaining=$((remaining + 1))
+    [ "$INSTALL_TO_TASKS" = "true" ] && remaining=$((remaining + 1))
+    [ "$INSTALL_SONAR"     = "true" ] && remaining=$((remaining + 1))
     [ "$INSTALL_SKANE"    = "true" ] && remaining=$((remaining + 1))
+    [ "$INSTALL_ARGOCD"   = "true" ] && remaining=$((remaining + 1))
     [ "$INSTALL_JAVA_MIG" = "true" ] && remaining=$((remaining + 1))
     if [ "$remaining" -eq 0 ]; then
         echo ""
@@ -1148,8 +1236,10 @@ main() {
     # Each configure function links the skill at the end
     [ "$INSTALL_DTRACK"   = "true" ] && configure_dtrack
     [ "$INSTALL_JENKINS"  = "true" ] && configure_jenkins
-    [ "$INSTALL_JIRA"     = "true" ] && configure_jira
-    [ "$INSTALL_SONAR"    = "true" ] && configure_sonar
+    [ "$INSTALL_JIRA"      = "true" ] && configure_jira
+    [ "$INSTALL_TO_TASKS" = "true" ] && install_skill "to-tasks"          # no config needed; can use jira skill or local files
+    [ "$INSTALL_SONAR"     = "true" ] && configure_sonar
+    [ "$INSTALL_ARGOCD"   = "true" ] && configure_argocd
     [ "$INSTALL_SKANE"    = "true" ] && install_skill "skanetrafiken"      # no config needed
     [ "$INSTALL_JAVA_MIG" = "true" ] && install_java_migration             # harness-aware install
 
@@ -1159,6 +1249,7 @@ main() {
     [ "$INSTALL_JENKINS" = "true" ] && has_remote=true
     [ "$INSTALL_JIRA"    = "true" ] && has_remote=true
     [ "$INSTALL_SONAR"   = "true" ] && has_remote=true
+    [ "$INSTALL_ARGOCD"  = "true" ] && has_remote=true
     if [ "$has_remote" = "true" ]; then
         local run_tests
         ask_yn run_tests "Test connectivity?" "y"

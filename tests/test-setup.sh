@@ -74,7 +74,7 @@ header "Setup: Skill selection menu"
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # All skills must appear in the selection menu
-for skill in dependency-track jenkins jira sonarqube skanetrafiken java-21-to-25-migration; do
+for skill in dependency-track jenkins jira to-tasks sonarqube skanetrafiken java-21-to-25-migration; do
     if grep -q "$skill" "$SETUP"; then
         pass "Skill '${skill}' referenced in setup.sh"
     else
@@ -82,12 +82,12 @@ for skill in dependency-track jenkins jira sonarqube skanetrafiken java-21-to-25
     fi
 done
 
-# All 6 skills in select_skills menu
+# All skills in select_skills menu
 MENU_ITEMS=$(sed -n '/^select_skills/,/^}/p' "$SETUP" | grep -c 'printf.*BOLD.*RESET.*DIM')
-if [ "$MENU_ITEMS" -ge 6 ]; then
-    pass "Selection menu has ${MENU_ITEMS} items (expected ≥6)"
+if [ "$MENU_ITEMS" -ge 8 ]; then
+    pass "Selection menu has ${MENU_ITEMS} items (expected ≥8)"
 else
-    fail "Selection menu has ${MENU_ITEMS} items (expected ≥6)"
+    fail "Selection menu has ${MENU_ITEMS} items (expected ≥8)"
 fi
 
 # 'all' selects all skills including java migration
@@ -96,6 +96,12 @@ if sed -n '/^select_skills/,/^}/p' "$SETUP" | grep -q 'INSTALL_JAVA_MIG=true'; t
     pass "'all' selection includes INSTALL_JAVA_MIG"
 else
     fail "'all' selection does not include INSTALL_JAVA_MIG"
+fi
+
+if sed -n '/^select_skills/,/^}/p' "$SETUP" | grep -q 'INSTALL_TO_TASKS=true'; then
+    pass "'all' selection includes INSTALL_TO_TASKS"
+else
+    fail "'all' selection does not include INSTALL_TO_TASKS"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -347,7 +353,7 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
-header "Setup: Remaining count includes INSTALL_JAVA_MIG"
+header "Setup: Remaining count includes no-config workflow skills"
 # ═══════════════════════════════════════════════════════════════════════════════
 
 MAIN_BODY=$(sed -n '/^main()/,/^}/p' "$SETUP")
@@ -356,6 +362,12 @@ if echo "$MAIN_BODY" | grep -q 'INSTALL_JAVA_MIG.*remaining'; then
     pass "INSTALL_JAVA_MIG counted in remaining check"
 else
     fail "INSTALL_JAVA_MIG not counted in remaining skills check"
+fi
+
+if echo "$MAIN_BODY" | grep -q 'INSTALL_TO_TASKS.*remaining'; then
+    pass "INSTALL_TO_TASKS counted in remaining check"
+else
+    fail "INSTALL_TO_TASKS not counted in remaining skills check"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -590,7 +602,7 @@ fi
 header "Setup: All skills have source directories"
 # ═══════════════════════════════════════════════════════════════════════════════
 
-for skill in dependency-track jenkins jira sonarqube skanetrafiken java-21-to-25-migration; do
+for skill in dependency-track jenkins jira to-tasks sonarqube skanetrafiken java-21-to-25-migration; do
     if [ -d "${REPO_DIR}/${skill}" ]; then
         pass "${skill}/ directory exists"
     else
@@ -608,8 +620,8 @@ header "Setup: Connectivity test only for remote-config skills"
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # The connectivity test prompt should only appear when a service with remote
-# config is selected (dtrack, jenkins, jira, sonarqube) — not for skanetrafiken
-# or java-21-to-25-migration which need no config.
+# config is selected (dtrack, jenkins, jira, sonarqube) — not for skanetrafiken,
+# to-tasks, or java-21-to-25-migration which need no config.
 
 MAIN_BODY=$(sed -n '/^main()/,/^}/p' "$SETUP")
 
@@ -629,7 +641,7 @@ for remote_skill in INSTALL_DTRACK INSTALL_JENKINS INSTALL_JIRA INSTALL_SONAR; d
 done
 
 # No-config skills must NOT set has_remote
-for local_skill in INSTALL_SKANE INSTALL_JAVA_MIG; do
+for local_skill in INSTALL_SKANE INSTALL_TO_TASKS INSTALL_JAVA_MIG; do
     if echo "$MAIN_BODY" | grep -q "${local_skill}.*has_remote"; then
         fail "${local_skill} should not set has_remote (no remote config)"
     else

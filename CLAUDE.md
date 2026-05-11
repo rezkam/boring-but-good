@@ -1,15 +1,17 @@
 # boring-but-good
 
-Shell-script skills that give AI coding agents (Claude Code, etc.) the ability to interact with dev infrastructure. Each skill is a directory with a `SKILL.md` and a `scripts/` folder.
+Shell-script and workflow skills that give AI coding agents (Claude Code, etc.) the ability to interact with dev infrastructure. Each skill is a directory with a `SKILL.md`; infrastructure skills also include a `scripts/` folder.
 
 ## Skills
 
 | Skill | External tool | Auth mechanism |
 |---|---|---|
 | `jira/` | go-jira CLI (`jira`) | Keychain via `~/.jira.d/config.yml` |
+| `to-tasks/` | jira skill or local files | Uses Jira configuration through `jira/`, or writes local task files under `.agents/skills/to-tasks/` |
 | `jenkins/` | curl | `~/.boring/jenkins/{url,user,token}` |
 | `sonarqube/` | curl | `~/.boring/sonarqube/{url,token}` + optional `auth_method` |
 | `dependency-track/` | curl | `~/.boring/dependency-track/{url,apikey}` |
+| `argocd/` | curl | `~/.boring/argocd/{url,token}` |
 | `skanetrafiken/` | curl | No auth needed |
 
 ## Architecture
@@ -17,6 +19,7 @@ Shell-script skills that give AI coding agents (Claude Code, etc.) the ability t
 - **Config loaders** (`_config.sh`): Read credentials from `~/.boring/<skill>/` files. Environment variables take precedence over files (`if [ -z "$VAR" ] && [ -f file ]`).
 - **API helpers** (`_api.sh`): Wrap curl with auth, retry logic (transient failures: codes 7/28/52/56), structured error messages, and HTTP status capture. Jenkins and SonarQube share this pattern. DTrack inlines it in `dtrack-api.sh`.
 - **Jira is different**: Uses go-jira CLI instead of curl. Auth is via keychain, not token files. Scripts wrap `jira request -M METHOD ENDPOINT`.
+- **to-tasks is workflow-only**: It has no scripts or credentials of its own. It tells agents to propose task changes, ask whether the destination is Jira or local, get explicit approval, then use the `jira` skill or write local task files.
 - **`setup.sh`**: Interactive installer. Validates URLs, creates config dirs, symlinks SKILL.md files.
 
 ## CRITICAL: Tests must NEVER have side effects
@@ -29,6 +32,7 @@ The live test sections in `tests/test-*.sh` run only when the corresponding serv
 - SonarQube: `GET /api/system/status` (health check)
 - Dependency-Track: `GET /v1/project` (list projects)
 - Jira: `GET /rest/api/3/myself`, `GET .../project/...`, `GET .../priority`, `POST .../search/jql` (search is read-only), `GET .../issue/...`, `GET .../transitions`
+- ArgoCD: `GET /api/v1/session/userinfo` (health check), `GET .../applications` (list apps), `GET .../projects` (list projects)
 - The "invalid type detection" test calls `jira-create.sh` but it exits at type validation before any write API call
 
 If you add a live test, verify the full call chain to confirm nothing writes to the server.
