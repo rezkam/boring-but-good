@@ -72,13 +72,64 @@ EOF
     fi
 }
 
-# POST request, returns HTTP status code. Body is discarded.
+# Per-process cache for the CSRF crumb header. Resolved lazily on first POST.
+# Set to literal "NONE" once we determine the Jenkins instance does not issue crumbs,
+# so we don't keep refetching.
+_JENKINS_CRUMB_HEADER=""
+
+# Fetch a CSRF crumb header (form "Jenkins-Crumb:abc123…") if the instance issues
+# them, or set the cache to "NONE" if /crumbIssuer is absent. Idempotent.
+_jenkins_load_crumb() {
+    [[ -n "$_JENKINS_CRUMB_HEADER" ]] && return 0
+    local _body _code
+    _body=$(_retry_curl -g -sL \
+        --connect-timeout "$_CURL_CONNECT_TIMEOUT" --max-time "$_CURL_MAX_TIME" \
+        -w "\n%{http_code}" \
+        -u "${JENKINS_USER}:${JENKINS_TOKEN}" "${JENKINS_URL}/crumbIssuer/api/json" 2>/dev/null) || {
+            _JENKINS_CRUMB_HEADER="NONE"
+            return 0
+        }
+    _code="${_body##*$'\n'}"
+    _body="${_body%$'\n'*}"
+    if [[ "$_code" == "200" ]]; then
+        # Parse without depending on jq/python being present.
+        local _field _crumb
+        _field=$(printf '%s' "$_body" | sed -n 's/.*"crumbRequestField"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+        _crumb=$(printf '%s' "$_body" | sed -n 's/.*"crumb"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+        if [[ -n "$_field" && -n "$_crumb" ]]; then
+            _JENKINS_CRUMB_HEADER="${_field}:${_crumb}"
+            return 0
+        fi
+    fi
+    _JENKINS_CRUMB_HEADER="NONE"
+}
+
+# POST request, returns HTTP status code on stdout. On non-2xx the response body
+# is printed to stderr (truncated to 500 chars) so callers can diagnose 4xx like
+# "Nothing is submitted" instead of guessing from a bare status code.
+# Includes a CSRF crumb header automatically when the Jenkins instance issues one.
 # Does NOT use -f: callers check the returned status code themselves.
 jenkins_post() {
-    _retry_curl -g -sL \
+    local _url="${JENKINS_URL}$1"; shift
+    local _tmpfile _code
+    _tmpfile=$(mktemp)
+    _jenkins_load_crumb
+    local _crumb_args=()
+    [[ "$_JENKINS_CRUMB_HEADER" != "NONE" ]] && _crumb_args=(-H "$_JENKINS_CRUMB_HEADER")
+    _code=$(_retry_curl -g -sL \
         --connect-timeout "$_CURL_CONNECT_TIMEOUT" --max-time "$_CURL_MAX_TIME" \
-        -o /dev/null -w "%{http_code}" -X POST \
-        -u "${JENKINS_USER}:${JENKINS_TOKEN}" "${JENKINS_URL}$1" "${@:2}"
+        -o "$_tmpfile" -w "%{http_code}" -X POST \
+        "${_crumb_args[@]}" \
+        -u "${JENKINS_USER}:${JENKINS_TOKEN}" "$_url" "$@") || _code="000"
+    if [[ "$_code" -lt 200 || "$_code" -ge 300 ]]; then
+        local _body
+        _body=$(cat "$_tmpfile")
+        if [[ -n "$_body" ]]; then
+            printf 'Response body: %.500s\n' "$_body" >&2
+        fi
+    fi
+    rm -f "$_tmpfile"
+    printf '%s' "$_code"
 }
 
 # Raw curl with auth pre-filled. Caller controls all other flags.

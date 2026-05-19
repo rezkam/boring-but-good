@@ -32,18 +32,28 @@ done
 [[ -z "$JOB_PATH" ]] && { echo "Usage: $0 <job-path> [--param KEY=VALUE]..." >&2; exit 1; }
 JOB_URL=$(echo "$JOB_PATH" | sed 's|/|/job/|g')
 
+# Parameterized jobs (the typical case for multibranch/PR pipelines) reject empty
+# POSTs to /build with HTTP 400 "Nothing is submitted". /buildWithParameters works
+# for those, and also for non-parameterized jobs whose params all have defaults.
+# True non-parameterized freestyle jobs reject /buildWithParameters with 405 —
+# in that case fall back to /build.
 if [[ ${#PARAMS[@]} -gt 0 ]]; then
     ENCODED_PARAMS=()
     for param in "${PARAMS[@]}"; do
-        # Split KEY=VALUE
         key="${param%%=*}"
         value="${param#*=}"
         ENCODED_PARAMS+=("$(urlencode "$key")=$(urlencode "$value")")
     done
     PARAM_STRING=$(IFS='&'; echo "${ENCODED_PARAMS[*]}")
-    HTTP_CODE=$(jenkins_post "/job/${JOB_URL}/buildWithParameters?${PARAM_STRING}")
+    ENDPOINT="/job/${JOB_URL}/buildWithParameters?${PARAM_STRING}"
+    HTTP_CODE=$(jenkins_post "$ENDPOINT")
 else
-    HTTP_CODE=$(jenkins_post "/job/${JOB_URL}/build")
+    ENDPOINT="/job/${JOB_URL}/buildWithParameters"
+    HTTP_CODE=$(jenkins_post "$ENDPOINT" 2>/dev/null)
+    if [[ "$HTTP_CODE" == "405" || "$HTTP_CODE" == "404" ]]; then
+        ENDPOINT="/job/${JOB_URL}/build"
+        HTTP_CODE=$(jenkins_post "$ENDPOINT")
+    fi
 fi
 
 if [[ "$HTTP_CODE" == "201" || "$HTTP_CODE" == "200" ]]; then
@@ -53,13 +63,14 @@ else
     cat >&2 <<EOF
 ERROR: Failed to trigger build. HTTP ${HTTP_CODE}.
 
-Context: POST /job/${JOB_URL}/build for job '${JOB_PATH}'
+Context: POST ${ENDPOINT} for job '${JOB_PATH}'
 
 Common causes:
+  - HTTP 400: parameterized job rejecting empty body. Pass at least one --param KEY=VALUE.
   - HTTP 404: job path does not exist. Check spelling, verify with: jenkins-list-jobs.sh
-  - HTTP 403: user lacks Build permission. Check Jenkins > Manage > Security
-  - HTTP 405: job is disabled or does not support builds
-  - HTTP 409: job already has a build queued
+  - HTTP 403: user lacks Build permission, or CSRF crumb missing/invalid.
+  - HTTP 405: job is disabled or does not support this build endpoint.
+  - HTTP 409: job already has a build queued.
 
 Recovery: verify the job exists with: jenkins-list-jobs.sh
 EOF
