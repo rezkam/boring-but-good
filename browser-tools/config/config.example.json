@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "generatedAt": "2026-01-01T00:00:00.000Z",
+  "sourceDir": "<local Chrome user data directory>",
+  "profiles": {
+    "<Chrome profile folder>": {
+      "folder": "<Chrome profile folder>",
+      "name": "<local display name>",
+      "account": "<local account label>",
+      "gaiaName": "<local account display name>",
+      "lastUsed": false,
+      "lastActive": false
+    }
+  },
+  "aliases": {
+    "<local alias>": "<Chrome profile folder>"
+  },
+  "taskProfiles": {
+    "tradingeconomics": {
+      "profiles": ["<Chrome profile folder>"],
+      "defaultProfile": "<Chrome profile folder>",
+      "updatedAt": "2026-01-01T00:00:00.000Z"
+    }
+  }
+}

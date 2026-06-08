@@ -1,2 +1,19 @@
 # Override global gitignore: CLAUDE.md is committed in this repo
 !CLAUDE.md
+
+# Local package installs
+node_modules/
+
+# Agent local state
+.claude/
+.pi/
+.tech-debt-audit/
+*-workspace/
+
+# Local browser and AI provider configuration and scratch scripts
+browser-tools/config/*.local.json
+browser-tools/.tmp-*.mjs
+browser-tools/*.tmp.mjs
+browser-tools/v2-*.mjs
+browser-tools/dashboard-shots.mjs
+ai-chat/config/*.local.json

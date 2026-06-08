@@ -13,6 +13,8 @@ Shell-script and workflow skills that give AI coding agents (Claude Code, etc.) 
 | `dependency-track/` | curl | `~/.boring/dependency-track/{url,apikey}` |
 | `argocd/` | curl | `~/.boring/argocd/{url,token}` |
 | `skanetrafiken/` | curl | No auth needed |
+| `browser-tools/` | Node.js + Chrome | Copied Chrome profile under `~/.cache/pi-browser-tools` |
+| `ai-chat/` | Node.js + Chrome via browser-tools | Browser-authenticated provider sessions from managed Chrome |
 
 ## Architecture
 

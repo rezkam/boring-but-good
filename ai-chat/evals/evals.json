@@ -1,0 +1,65 @@
+{
+  "skill_name": "ai-chat",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Use my logged-in browser to ask Perplexity Deep Research for a sourced answer about the latest AI model evaluation trends, save the conversation as eval-research, and return JSON metadata.",
+      "expected_output": "Uses the ai-chat skill with provider perplexity, model perplexity/deep-research, long timeout, save-conversation eval-research, JSON output, and metadata including provider state.",
+      "files": [],
+      "expectations": [
+        "The run uses scripts/ai-chat.mjs --provider perplexity --model perplexity/deep-research.",
+        "The run uses --save-conversation eval-research and --json.",
+        "The output includes provider_state.backend_uuid or a clear provider error.",
+        "The output includes model, requested_model, complete, captured_at, and response."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Continue the Perplexity conversation eval-research and ask a follow-up without resending the full previous answer. Return JSON.",
+      "expected_output": "Uses --conversation eval-research so the saved provider thread is continued by backend uuid and read-write token.",
+      "files": [],
+      "expectations": [
+        "The run uses scripts/ai-chat.mjs --provider perplexity --conversation eval-research.",
+        "The output uses the same saved conversation id.",
+        "The provider state is preserved or updated.",
+        "The run does not replay full chat history manually."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "List and live-verify the available Perplexity models for my current account, including thinking levels, Pro or Max tier, default model, task defaults, and whether chats save to library by default. Return JSON.",
+      "expected_output": "Uses --list-models --verify-models for provider perplexity and returns the WebUI model registry with model ids, display names, mode, tier, thinking metadata, history policy, task defaults, and account availability.",
+      "files": [],
+      "expectations": [
+        "The run uses scripts/ai-chat.mjs --provider perplexity --list-models --verify-models --json.",
+        "The output includes perplexity/deep-research.",
+        "The output includes OpenAI, Gemini, Anthropic, Moonshot, and NVIDIA model ids.",
+        "The output includes min_tier, mode, thinking, thinking_level, available, default_model, task_models, and history_policy."
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Use Grok Fast to start a thread about oil-market scenarios, save it as oil-scenarios, then continue the same Grok thread with a follow-up. Return JSON and screenshot evidence.",
+      "expected_output": "Uses Grok browser UI, verifies Fast model, saves and reopens the conversation URL, and captures a screenshot showing the continued thread.",
+      "files": [],
+      "expectations": [
+        "The first run uses --provider grok --model fast --save-conversation oil-scenarios.",
+        "The follow-up uses --conversation oil-scenarios.",
+        "The output includes a stable conversation_url.",
+        "A screenshot path is included or saved under /tmp."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "For Gemini, use the Browser Tools managed browser started with the Gemini-capable profile to discover and live-verify account model choices, then run a reasoning task using the task default. Report JSON and do not save to Gemini history unless explicitly requested.",
+      "expected_output": "Uses --provider gemini --list-models --verify-models with managed-browser cookies, reports account-specific models from the Gemini RPC, then uses --task reasoning for a temporary chat.",
+      "files": [],
+      "expectations": [
+        "The model list run uses scripts/ai-chat.mjs --provider gemini --list-models --verify-models --json with Browser Tools managed-browser cookies.",
+        "The output includes account_specific true or a clear discovery error.",
+        "The output includes default_model, task_models, history_policy, available, and verification.status.",
+        "The reasoning task output has model_task reasoning, is_temporary true, saved_to_library false, and a non-empty chrome_profile value."
+      ]
+    }
+  ]
+}

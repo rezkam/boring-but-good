@@ -16,6 +16,8 @@ Skills that give AI coding agents (Claude Code, etc.) the ability to interact wi
 | [**argocd**](argocd/) | Check app sync status, trigger syncs, view resources, read pod logs, rollback deployments. |
 | [**skanetrafiken**](skanetrafiken/) | Plan public transport journeys in southern Sweden with real-time delays. |
 | [**java-21-to-25-migration**](java-21-to-25-migration/) | Migrate a Java project from JDK 21 to JDK 25 with a phased plan covering all breaking changes. |
+| [**browser-tools**](browser-tools/) | Control a sandboxed Chrome browser, use logged-in browser sessions, and fetch supported market data. |
+| [**ai-chat**](ai-chat/) | Query browser-authenticated AI providers through Browser Tools managed Chrome. |
 
 ## Getting started
 
@@ -25,22 +27,22 @@ Install skills to any [supported agent](https://www.npmjs.com/package/skills) (C
 
 ```bash
 # Install all skills
-npx skills add rezkam/boring-but-good
+npx skills add your-org/boring-but-good
 
 # Install a specific skill
-npx skills add rezkam/boring-but-good --skill jira
+npx skills add your-org/boring-but-good --skill jira
 
 # Install to a specific agent
-npx skills add rezkam/boring-but-good --skill jenkins -a claude-code
+npx skills add your-org/boring-but-good --skill jenkins -a claude-code
 
 # List available skills without installing
-npx skills add rezkam/boring-but-good --list
+npx skills add your-org/boring-but-good --list
 ```
 
 ### Manual install
 
 ```bash
-git clone https://github.com/rezkam/boring-but-good.git
+git clone https://github.com/your-org/boring-but-good.git
 cd boring-but-good
 ./setup.sh
 ```
