@@ -2,6 +2,14 @@
   "version": 1,
   "generatedAt": "2026-01-01T00:00:00.000Z",
   "sourceDir": "<local Chrome user data directory>",
+  "directories": {
+    "chromeSourceDir": "<local Chrome user data directory>",
+    "cacheDir": "~/.cache/pi-browser-tools",
+    "artifactDir": "/tmp"
+  },
+  "browser": {
+    "chromeBin": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  },
   "profiles": {
     "<Chrome profile folder>": {
       "folder": "<Chrome profile folder>",
@@ -16,7 +24,7 @@
     "<local alias>": "<Chrome profile folder>"
   },
   "taskProfiles": {
-    "tradingeconomics": {
+    "<task name>": {
       "profiles": ["<Chrome profile folder>"],
       "defaultProfile": "<Chrome profile folder>",
       "updatedAt": "2026-01-01T00:00:00.000Z"

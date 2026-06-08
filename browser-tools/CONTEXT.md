@@ -1,6 +1,6 @@
 # Browser Tools Context
 
-Browser Tools is a skill for controlling a sandboxed Chrome browser and using task-specific helpers when low-level browser control is not enough.
+Browser Tools is a skill for controlling a sandboxed Chrome browser and extracting generic page content when low-level browser control is not enough.
 
 ## Language
 
@@ -12,17 +12,13 @@ _Avoid_: flat tool list
 The core capability set for launching, stopping, navigating, evaluating, screenshotting, and selecting inside the sandboxed browser.
 _Avoid_: base thing, main capabilities
 
-**Resource Helper**:
-A task-specific helper script that uses **Browser Control** to access one external resource or workflow.
-_Avoid_: handler, scraper, finance tool
+**Generic Extractor**:
+A task-neutral helper script that uses **Browser Control** to extract current-page links or article text.
+_Avoid_: domain scraper, finance tool
 
-**Resource Helper Module**:
-The shared implementation module that owns Resource Helper lifecycle details such as cache flow, browser connection, output sidecars, page cleanup, and browser disconnect.
+**Extractor Module**:
+The shared implementation module that owns extractor lifecycle details such as cache flow, browser connection, output sidecars, page cleanup, and browser disconnect.
 _Avoid_: helper base class, utility grab bag
-
-**Trading Economics Module**:
-The shared internal module for Trading Economics Resource Helpers. It owns page overlay removal, table payload extraction, text cleanup, markdown table formatting, URL slug helpers, and common metadata shape.
-_Avoid_: scraper utilities, copy-pasted page code
 
 **Profile Sync**:
 The copied Chrome profile data used by **Browser Control** to reuse authenticated sessions without touching the main Chrome profile. It is a snapshot, so it can be stale until refreshed with `--sync`.
@@ -38,19 +34,18 @@ _Avoid_: port, profile name, managed token
 
 ## Relationships
 
-- The **Skill Interface** presents **Browser Control** before **Resource Helpers**.
-- A **Resource Helper** uses the **Resource Helper Module** for repeated lifecycle behavior.
-- Trading Economics **Resource Helpers** use the **Trading Economics Module** for repeated Trading Economics page behavior.
-- The **Resource Helper Module** uses **Browser Control** rather than owning browser lifecycle safety.
+- The **Skill Interface** presents **Browser Control** first.
+- A **Generic Extractor** uses the **Extractor Module** for repeated lifecycle behavior.
+- Specialist skills, such as finance, should call Browser Tools instead of adding domain helpers here.
+- The **Extractor Module** uses **Browser Control** rather than owning browser lifecycle safety.
 - **Browser Control** owns **Profile Sync**.
 - A **Managed Browser** is the only browser process **Browser Control** is allowed to stop, and only when the caller provides the matching **Owner Token**.
 
 ## Example dialogue
 
-> **Dev:** "Should Yahoo price extraction be listed beside `scripts/start.mjs` and `scripts/nav.mjs`?"
-> **Domain expert:** "No. Yahoo price extraction is a **Resource Helper**. The main capability is **Browser Control**."
+> **Dev:** "Should stock price extraction be listed beside `scripts/start.mjs` and `scripts/nav.mjs`?"
+> **Domain expert:** "No. Stock price extraction belongs in the finance skill. Browser Tools owns **Browser Control**."
 
 ## Flagged ambiguities
 
-- "handler" was used for both browser actions and task-specific scripts. Resolved: browser actions belong to **Browser Control**, task-specific scripts are **Resource Helpers**.
-- "scale" was used to mean **Skill Interface** in this context.
+- "resource helper" was used for both generic page extraction and domain-specific workflows. Resolved: Browser Tools keeps generic extractors only. Domain workflows live in specialist skills.

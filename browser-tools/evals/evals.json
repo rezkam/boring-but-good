@@ -4,41 +4,31 @@
     {
       "id": 1,
       "prompt": "Open a sandboxed browser, navigate to https://example.com, get the page title, take a full page screenshot, then stop the browser.",
-      "expected_output": "Uses Browser Control scripts from scripts/ in order: start, nav, eval, screenshot, stop. Does not use Resource Helpers.",
+      "expected_output": "Uses Browser Control scripts from scripts/ in order: start, nav, eval, screenshot, stop. Does not use a domain-specific helper.",
       "files": [],
       "expectations": [
         "The answer uses Browser Control scripts from scripts/ for launch, navigation, evaluation, screenshot, and stop.",
-        "The answer does not use a Resource Helper for a generic browser workflow.",
         "The answer does not require a named local Chrome profile unless the user asks for logged-in access.",
+        "The answer passes the reported port and owner token to follow-up commands.",
         "Any newly opened tab is opened in the background or through helpers that open background tabs."
       ]
     },
     {
       "id": 2,
-      "prompt": "I need current AMZN, BZ=F, and ^GSPC prices from the browser session. Use the best existing helper if this skill has one.",
-      "expected_output": "Classifies the task as a Resource Helper workflow and chooses a market data helper such as yahoo-finance or perplexity-finance instead of manual page scraping.",
+      "prompt": "I want to inspect a logged-in website with my normal Chrome account, but I do not want you touching my live Chrome profile. Start a safe browser session and explain where the copied profile lives.",
+      "expected_output": "Uses Browser Tools managed Chrome with --profile and optionally --sync, explains copied profile and cache defaults, and avoids main Chrome.",
       "files": [],
       "expectations": [
-        "The answer classifies market data as a Resource Helper workflow.",
-        "The answer chooses an existing market data helper instead of low-level DOM scraping.",
-        "The answer sends useful result data to stdout or an output file and progress to stderr."
+        "The answer uses scripts/start.mjs with --profile and recommends --sync when current cookies matter.",
+        "The answer explains that the live Chrome profile is copied into the configured Browser Tools cache directory.",
+        "The answer mentions the default cache path ~/.cache/pi-browser-tools or the configurable cacheDir setting.",
+        "The answer does not connect to unmanaged Chrome or the main Chrome profile."
       ]
     },
     {
       "id": 3,
-      "prompt": "I want to publish this browser-tools skill publicly. Check that the skill instructions and references do not include my machine paths, account emails, or local profile mappings.",
-      "expected_output": "Audits the public skill surface, keeps private config under ~/.agents/browser-tools/config.json or another local config root, keeps only a generic example config, and adds a regression test for personal or machine-specific leaks.",
-      "files": [],
-      "expectations": [
-        "The answer treats account mappings and machine-specific paths as local configuration, not skill documentation.",
-        "The answer keeps Browser Tools config outside the repo and uses a generic config example for public sharing.",
-        "The answer runs or adds an objective regression check for emails, machine paths, and personal identifiers."
-      ]
-    },
-    {
-      "id": 4,
       "prompt": "I need you to open several pages in the browser and scrape data, but please do not steal focus from my desktop while you do it.",
-      "expected_output": "Uses Browser Control or Resource Helpers in a way that opens new tabs in the background and avoids bringToFront unless the user explicitly asks to see a tab.",
+      "expected_output": "Uses Browser Control or generic extractors in a way that opens new tabs in the background and avoids bringToFront unless explicitly requested.",
       "files": [],
       "expectations": [
         "The answer prefers background tab creation with browser.newPage({ background: true }) or existing Browser Control helpers that do this.",
@@ -47,75 +37,38 @@
       ]
     },
     {
-      "id": 5,
-      "prompt": "Get the latest West Texas Intermediate price from Trading Economics. Make sure you scan the full commodities page, not only the crude-oil detail page, and return JSON.",
-      "expected_output": "Uses the Trading Economics market helper for commodities with --json, extracts the full commodities page, filters Crude Oil, includes source, captured_at, coverage counts, and closes the managed browser if it started one.",
+      "id": 4,
+      "prompt": "Extract the article text from the current browser tab and save up to 6000 characters. If no browser is running, tell me exactly what to start first.",
+      "expected_output": "Uses the generic article extraction helper after a managed browser is running and points to start.mjs when no managed browser exists.",
       "files": [],
       "expectations": [
-        "The answer reads references/tradingeconomics.md or follows its helper selection rules.",
-        "The answer uses scripts/tradingeconomics-markets.mjs --market commodities --json rather than manually scraping only /commodity/crude-oil.",
-        "The final answer is a JSON object with source, captured_at, coverage or row count, and a Crude Oil row.",
-        "The managed browser is stopped with scripts/stop.mjs --clean if the run started it."
+        "The answer uses scripts/extract-article.mjs --chars 6000 for current-page extraction.",
+        "The answer treats the helper as generic page extraction, not a domain-specific workflow.",
+        "The answer tells the user to start Browser Tools with scripts/start.mjs if no managed browser is running.",
+        "The answer passes --port and --owner-token or BROWSER_TOOLS_OWNER_TOKEN."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Set up Browser Tools so my finance task uses a specific Chrome profile by default, but keep the profile name out of the repo.",
+      "expected_output": "Stores the task profile preference through Browser Tools config under ~/.agents/browser-tools/config.json and starts with --task finance.",
+      "files": [],
+      "expectations": [
+        "The answer uses scripts/config.mjs task-profile set finance --profile <profile-or-alias>.",
+        "The answer uses scripts/start.mjs --task finance for later starts.",
+        "The answer explains that task profile preferences live in private Browser Tools config, not repo files.",
+        "The answer mentions the default config path ~/.agents/browser-tools/config.json."
       ]
     },
     {
       "id": 6,
-      "prompt": "Compare Government Spending to GDP for the United States, Sweden, Germany, France, United Kingdom, Denmark, Norway, and Netherlands. Use Trading Economics and return a ranked JSON object.",
-      "expected_output": "Uses the Trading Economics country-list helper with the government-spending-to-gdp indicator and country filters, then returns sorted JSON with Last, Previous, Reference, Unit, and observations.",
+      "prompt": "I need current oil and stock index prices. Should I use Browser Tools directly?",
+      "expected_output": "Routes finance-specific data work to the finance skill instead of adding finance helpers to Browser Tools.",
       "files": [],
       "expectations": [
-        "The answer uses scripts/tradingeconomics-country-list.mjs with --indicator government-spending-to-gdp and --countries.",
-        "The final answer is JSON with one row per requested country and a source URL.",
-        "The output includes missing_countries or equivalent confirmation that every requested country was found.",
-        "The countries are ranked or otherwise compared numerically by the latest value."
-      ]
-    },
-    {
-      "id": 7,
-      "prompt": "Can you extract all of https://tradingeconomics.com/united-states/forecast? It has a subscribe overlay. Remove it if needed and give me the full structured JSON.",
-      "expected_output": "Uses the country forecast helper with --country united-states --json, removes blocking overlays, returns all forecast sections and rows, and saves a /tmp JSON file if too large for the final response.",
-      "files": [],
-      "expectations": [
-        "The answer uses scripts/tradingeconomics-forecasts.mjs --country united-states --json or the equivalent URL input.",
-        "The extraction handles the subscribe overlay without asking the user to click it.",
-        "The output includes section_count, total_rows, and sections for Markets, Overview, GDP, Labour, Prices, Money, Trade, Business, Consumer, Housing, Energy, and Government when present.",
-        "If the full output is large, the final JSON includes full_json_path."
-      ]
-    },
-    {
-      "id": 8,
-      "prompt": "Get Sweden's Trading Economics indicators. I need every tab, including Energy and Health if the page has them, in a JSON object.",
-      "expected_output": "Uses the country indicators helper with --country sweden --json, extracts every visible tab table from the DOM, and returns grouped tabs plus flat rows.",
-      "files": [],
-      "expectations": [
-        "The answer uses scripts/tradingeconomics-indicators.mjs --country sweden --json.",
-        "The output includes tabs with id, label, row_count, and rows.",
-        "The output includes all tabs present on the page, not only the first ten.",
-        "The final answer is JSON and includes source and captured_at."
-      ]
-    },
-    {
-      "id": 9,
-      "prompt": "Use Trading Economics to get all available indicator countries from the matrix page, then tell me whether Sweden and Euro Area are available. Return JSON.",
-      "expected_output": "Uses the indicators helper with --list-countries --json, parses the matrix table, and returns country_count plus matching country objects for Sweden and Euro Area.",
-      "files": [],
-      "expectations": [
-        "The answer uses scripts/tradingeconomics-indicators.mjs --list-countries --json.",
-        "The output includes country_count and matrix columns.",
-        "The output confirms Sweden and Euro Area with their indicator URLs or slugs.",
-        "The managed browser is closed if it was opened."
-      ]
-    },
-    {
-      "id": 10,
-      "prompt": "Remember that Trading Economics should use my work browser profile, then start Chrome for that task without repeating the profile name.",
-      "expected_output": "Uses scripts/config.mjs task-profile set tradingeconomics --profile <profile-or-alias>, then starts Chrome with scripts/start.mjs --task tradingeconomics so the stored task profile is used.",
-      "files": [],
-      "expectations": [
-        "The answer uses scripts/config.mjs task-profile set tradingeconomics with a user-supplied profile or alias.",
-        "The answer uses scripts/start.mjs --task tradingeconomics for later runs.",
-        "The answer does not store the profile preference in repo files.",
-        "The answer explains that the private config is ~/.agents/browser-tools/config.json by default."
+        "The answer says Browser Tools is the generic browser layer.",
+        "The answer routes finance-specific quote or market data workflows to the finance skill.",
+        "The answer explains that the finance skill should call Browser Tools managed Chrome if browser access is needed."
       ]
     }
   ]

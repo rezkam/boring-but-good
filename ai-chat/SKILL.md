@@ -30,8 +30,8 @@ Use this skill when the task is about using AI provider web sessions as tools, n
 # For Grok, use the default or configured Chrome profile that is logged in to X/Grok.
 # For Gemini, start Browser Tools with the configured Gemini task profile.
 # Use --sync when current login cookies matter or when the managed browser looked logged out.
-# Example: ../browser-tools/scripts/start.mjs --profile Default --sync
-# Example: ../browser-tools/scripts/start.mjs --task gemini --sync
+# Example: run Browser Tools start with --profile <profile-or-alias> --sync
+# Example: run Browser Tools start with --task gemini --sync
 
 # One-off prompt.
 scripts/ai-chat.mjs --provider grok --model fast --prompt "Give me three scenarios" --json --evidence

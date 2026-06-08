@@ -10,8 +10,7 @@
  */
 
 import { pathToFileURL } from 'url';
-import { parseOwnerToken, parsePort, stripBrowserSessionArgs } from './browser-control.mjs';
-import { runCachedBrowserResource } from './resource-helper.mjs';
+import { loadBrowserToolsRuntime, optionValue, parseBrowserSessionArgs } from './browser-tools-runtime.mjs';
 import {
   TRADING_ECONOMICS_BASE_URL,
   buildTradingEconomicsMetadata,
@@ -54,17 +53,6 @@ const MARKET_CONFIGS = {
     selector: 'table.table-heatmap',
   },
 };
-
-const rawArgs = process.argv.slice(2);
-const ownerToken = parseOwnerToken(rawArgs);
-const port = parsePort(rawArgs, rawArgs.find(a => /^\d{4,5}$/.test(a)) || '9222');
-const args = stripBrowserSessionArgs(rawArgs, { stripPositionalPort: true });
-const outIdx = args.indexOf('--out');
-const outFile = outIdx !== -1 ? args[outIdx + 1] : null;
-const isJson = args.includes('--json');
-const market = parseMarket(args);
-const config = MARKET_CONFIGS[market];
-const cacheInput = { source: 'markets-page', market, schema: 1, json: isJson };
 
 export function parseMarketTablePayloads(tablePayloads, marketName = '') {
   const categories = [];
@@ -178,7 +166,16 @@ export function formatTradingEconomicsMarket(data) {
 }
 
 async function main() {
-  await runCachedBrowserResource({
+  const browserTools = await loadBrowserToolsRuntime();
+  const rawArgs = process.argv.slice(2);
+  const { ownerToken, port, args } = parseBrowserSessionArgs(rawArgs, browserTools);
+  const outFile = optionValue(args, '--out');
+  const isJson = args.includes('--json');
+  const market = parseMarket(args, outFile);
+  const config = MARKET_CONFIGS[market];
+  const cacheInput = { source: 'markets-page', market, schema: 1, json: isJson };
+
+  await browserTools.runCachedBrowserResource({
     tool: 'tradingeconomics-markets',
     cacheInput,
     outFile,
@@ -245,10 +242,10 @@ function normalizeTableShape(table) {
   return { headers, rows };
 }
 
-function parseMarket(rawArgs) {
+function parseMarket(rawArgs, outFile = null) {
   const marketIdx = rawArgs.indexOf('--market');
   const raw = marketIdx !== -1 ? rawArgs[marketIdx + 1]
-    : rawArgs.find(arg => !arg.startsWith('--') && !/^\d{4,5}$/.test(arg));
+    : rawArgs.find(arg => !arg.startsWith('--') && !/^\d{4,5}$/.test(arg) && arg !== outFile);
   const normalized = cleanText(raw || 'commodities').toLowerCase();
 
   for (const [name, cfg] of Object.entries(MARKET_CONFIGS)) {

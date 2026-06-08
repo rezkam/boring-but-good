@@ -57,10 +57,10 @@ test('writeCachedResponse and readCachedResponse round trip output, raw text, me
       BROWSER_QUERY_TTL_SECONDS: null,
     }, () => {
       const input = { tickers: ['AMZN', 'BZ=F'], json: false };
-      const write = writeCachedResponse('yahoo-finance', input, {
+      const write = writeCachedResponse('generic-page-extract', input, {
         output: 'formatted output',
         rawText: 'raw output',
-        pageUrl: 'https://finance.example.test',
+        pageUrl: 'https://example.test/article',
         metadata: { source: 'test' },
         extension: 'md',
       });
@@ -70,7 +70,7 @@ test('writeCachedResponse and readCachedResponse round trip output, raw text, me
       assert.ok(existsSync(write.responsePath));
       assert.ok(existsSync(write.rawPath));
 
-      const cached = readCachedResponse('yahoo-finance', input);
+      const cached = readCachedResponse('generic-page-extract', input);
       assert.equal(cached.output, 'formatted output');
       assert.equal(cached.rawText, 'raw output');
       assert.deepEqual(cached.entry.metadata, { source: 'test' });
@@ -78,7 +78,7 @@ test('writeCachedResponse and readCachedResponse round trip output, raw text, me
       const invocationDir = join(runDir, 'browser-tool-calls', 'step-1');
       assert.ok(existsSync(invocationDir));
       const invocationText = readFileSync(join(invocationDir, newestInvocationFile(invocationDir)), 'utf-8');
-      assert.match(invocationText, /"tool": "yahoo-finance"/);
+      assert.match(invocationText, /"tool": "generic-page-extract"/);
       assert.match(invocationText, /"step_label": "Fetch prices"/);
     });
   } finally {

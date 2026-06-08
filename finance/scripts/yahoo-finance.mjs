@@ -9,28 +9,25 @@
  *   node yahoo-finance.mjs --tickers "CL=F,BZ=F,^GSPC" [port] [--json] [--owner-token token]
  */
 
-import { parseOwnerToken, parsePort, stripBrowserSessionArgs } from './browser-control.mjs';
-import { runCachedBrowserResource } from './resource-helper.mjs';
-
-const rawArgs = process.argv.slice(2);
-const ownerToken = parseOwnerToken(rawArgs);
-const port = parsePort(rawArgs, rawArgs.find(a => /^\d{4,5}$/.test(a)) || '9222');
-const args = stripBrowserSessionArgs(rawArgs, { stripPositionalPort: true });
-const isJson = args.includes('--json');
-const outIdx = args.indexOf('--out');
-const outFile = outIdx !== -1 ? args[outIdx + 1] : null;
-const tickersIdx = args.indexOf('--tickers');
-const tickers = tickersIdx !== -1 ? args[tickersIdx + 1].split(',').map(t => t.trim()) : null;
-
-if (!tickers) {
-  console.error('Usage: node yahoo-finance.mjs --tickers "CL=F,BZ=F,^GSPC" [port] [--json] [--owner-token token]');
-  process.exit(1);
-}
-
-const cacheInput = { tickers, json: isJson };
+import { loadBrowserToolsRuntime, optionValue, parseBrowserSessionArgs } from './browser-tools-runtime.mjs';
 
 async function main() {
-  await runCachedBrowserResource({
+  const browserTools = await loadBrowserToolsRuntime();
+  const rawArgs = process.argv.slice(2);
+  const { ownerToken, port, args } = parseBrowserSessionArgs(rawArgs, browserTools);
+  const isJson = args.includes('--json');
+  const outFile = optionValue(args, '--out');
+  const tickersValue = optionValue(args, '--tickers');
+  const tickers = tickersValue ? tickersValue.split(',').map(t => t.trim()).filter(Boolean) : null;
+
+  if (!tickers || tickers.length === 0) {
+    console.error('Usage: node yahoo-finance.mjs --tickers "CL=F,BZ=F,^GSPC" [port] [--json] [--owner-token token]');
+    process.exit(1);
+  }
+
+  const cacheInput = { tickers, json: isJson };
+
+  await browserTools.runCachedBrowserResource({
     tool: 'yahoo-finance',
     cacheInput,
     outFile,

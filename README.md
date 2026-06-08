@@ -16,7 +16,8 @@ Skills that give AI coding agents (Claude Code, etc.) the ability to interact wi
 | [**argocd**](argocd/) | Check app sync status, trigger syncs, view resources, read pod logs, rollback deployments. |
 | [**skanetrafiken**](skanetrafiken/) | Plan public transport journeys in southern Sweden with real-time delays. |
 | [**java-21-to-25-migration**](java-21-to-25-migration/) | Migrate a Java project from JDK 21 to JDK 25 with a phased plan covering all breaking changes. |
-| [**browser-tools**](browser-tools/) | Control a sandboxed Chrome browser, use logged-in browser sessions, and fetch supported market data. |
+| [**browser-tools**](browser-tools/) | Control a sandboxed Chrome browser and generic page extraction through managed Chrome. |
+| [**finance**](finance/) | Fetch browser-authenticated market and macroeconomic data through Browser Tools managed Chrome. |
 | [**ai-chat**](ai-chat/) | Query browser-authenticated AI providers through Browser Tools managed Chrome. |
 
 ## Getting started

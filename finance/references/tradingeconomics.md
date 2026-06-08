@@ -22,15 +22,15 @@ If the user asks a Trading Economics question that fits one of these types, use 
 
 ## Operating rules
 
-1. Start a managed browser with `scripts/start.mjs` if one is not already running. Keep the reported port and owner token for the helper commands.
+1. Start a managed browser with `../browser-tools/scripts/start.mjs --task finance` if one is not already running. Keep the reported port and owner token for the helper commands.
 2. Use helper commands with `--json` for Trading Economics tasks. The final answer to the user should be a JSON object.
 3. Open any new tab in the background. Helper scripts use `browser.newPage({ background: true })` and must not call `page.bringToFront()` unless the user explicitly asks to interact with the tab.
 4. Remove cookie or subscription overlays only when they block extraction. The helpers remove consent and `subscribe-prompt` style overlays before parsing.
 5. Prefer structured page data where available. Currently `shares` uses inline treemap JSON. Other Trading Economics pages are parsed from DOM tables because no stable public JSON table endpoint was observed. Reuse `scripts/tradingeconomics-common.mjs` for table payload extraction, overlay removal, text cleanup, markdown tables, slug helpers, and common metadata.
-6. Stop the managed browser with `scripts/stop.mjs --clean --port <reported port> --owner-token <token>` after the work if you started it for the task.
+6. Stop the managed browser with `../browser-tools/scripts/stop.mjs --clean --port <reported port> --owner-token <token>` after the work if you started it for the task.
 7. Include `source`, `captured_at`, row counts, and missing country or filter information in the final JSON.
 
-Helper examples below assume `BROWSER_TOOLS_OWNER_TOKEN` is set in the current agent session. Add `--port <reported port>` when the browser is not using the default port.
+Helper examples below assume `BROWSER_TOOLS_OWNER_TOKEN` is set in the current agent session. Add `--port <reported port>` when the browser is not using the default port. Run helper commands from the `finance/` skill directory.
 
 ## Helper selection
 

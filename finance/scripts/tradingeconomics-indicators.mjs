@@ -9,8 +9,7 @@
  */
 
 import { pathToFileURL } from 'url';
-import { parseOwnerToken, parsePort, stripBrowserSessionArgs } from './browser-control.mjs';
-import { runCachedBrowserResource } from './resource-helper.mjs';
+import { loadBrowserToolsRuntime, optionValue, parseBrowserSessionArgs } from './browser-tools-runtime.mjs';
 import {
   TRADING_ECONOMICS_BASE_URL as BASE_URL,
   buildTradingEconomicsMetadata,
@@ -26,18 +25,6 @@ import {
 } from './tradingeconomics-common.mjs';
 
 const MATRIX_URL = `${BASE_URL}/matrix`;
-const rawArgs = process.argv.slice(2);
-const ownerToken = parseOwnerToken(rawArgs);
-const port = parsePort(rawArgs, rawArgs.find(a => /^\d{4,5}$/.test(a)) || '9222');
-const args = stripBrowserSessionArgs(rawArgs, { stripPositionalPort: true });
-const outIdx = args.indexOf('--out');
-const outFile = outIdx !== -1 ? args[outIdx + 1] : null;
-const isJson = args.includes('--json');
-const listCountries = args.includes('--list-countries');
-const countryInput = parseCountryInput(args);
-const cacheInput = listCountries
-  ? { source: 'matrix-countries', schema: 1, json: isJson }
-  : { source: 'country-indicators', country: countryInput.slug, schema: 1, json: isJson };
 
 export function parseIndicatorTabsPayload(payload) {
   const tabLabels = new Map((payload.tabs || []).map(tab => [tab.id, tab.label]));
@@ -131,7 +118,18 @@ export function formatCountryList(data) {
 }
 
 async function main() {
-  await runCachedBrowserResource({
+  const browserTools = await loadBrowserToolsRuntime();
+  const rawArgs = process.argv.slice(2);
+  const { ownerToken, port, args } = parseBrowserSessionArgs(rawArgs, browserTools);
+  const outFile = optionValue(args, '--out');
+  const isJson = args.includes('--json');
+  const listCountries = args.includes('--list-countries');
+  const countryInput = parseCountryInput(args, outFile);
+  const cacheInput = listCountries
+    ? { source: 'matrix-countries', schema: 1, json: isJson }
+    : { source: 'country-indicators', country: countryInput.slug, schema: 1, json: isJson };
+
+  await browserTools.runCachedBrowserResource({
     tool: 'tradingeconomics-indicators',
     cacheInput,
     outFile,
@@ -225,7 +223,7 @@ function parseIndicatorTableRows(rawRows, tableIndex) {
   return rows;
 }
 
-function parseCountryInput(rawArgs) {
+function parseCountryInput(rawArgs, outFile = null) {
   const countryIdx = rawArgs.indexOf('--country');
   const raw = countryIdx !== -1 ? rawArgs[countryIdx + 1]
     : rawArgs.find(arg => !arg.startsWith('--') && !/^\d{4,5}$/.test(arg) && arg !== outFile);

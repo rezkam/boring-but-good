@@ -9,6 +9,7 @@ import {
   PROFILE_DST,
   activeChromeProfiles,
   browserToolsConfigFile,
+  browserToolsRuntimeConfig,
   buildBrowserToolsConfig,
   ensureBrowserToolsConfig,
   freshProfileDirForPort,
@@ -62,7 +63,7 @@ test('owner token parsing and hashing define the Browser Tools ownership surface
   assert.equal(ownerTokenHash('token-a'), ownerTokenHash('token-a'));
   assert.notEqual(ownerTokenHash('token-a'), ownerTokenHash('token-b'));
   assert.deepEqual(stripBrowserSessionArgs(args), ['document.title']);
-  assert.deepEqual(stripBrowserSessionArgs(['stocks', '9333', '--owner-token', 'token-a'], { stripPositionalPort: true }), ['stocks']);
+  assert.deepEqual(stripBrowserSessionArgs(['article', '9333', '--owner-token', 'token-a'], { stripPositionalPort: true }), ['article']);
   assert.throws(() => ownerTokenHash(''), /Missing browser owner token/);
 });
 
@@ -123,12 +124,25 @@ test('private Browser Tools config discovers profiles, active profiles, and task
     assert.equal(config.profiles.Default.name, 'Personal');
     assert.equal(config.aliases.Work, 'Profile 1');
     assert.equal(config.aliases[workAccount], 'Profile 1');
+    assert.equal(config.directories.chromeSourceDir, sourceDir);
+    assert.match(config.directories.cacheDir, /pi-browser-tools$/);
+    assert.match(config.browser.chromeBin, /Google Chrome$/);
 
     ensureBrowserToolsConfig({ configDir, sourceDir });
     assert.equal(existsSync(browserToolsConfigFile(configDir)), true);
     const cached = JSON.parse(readFileSync(browserToolsConfigFile(configDir), 'utf-8'));
     assert.equal(cached.profiles['Profile 1'].account, workAccount);
     assert.equal(cached.profiles['Profile 1'].lastActive, true);
+    assert.equal(cached.directories.chromeSourceDir, sourceDir);
+
+    cached.directories.cacheDir = '~/custom-browser-cache';
+    cached.directories.artifactDir = '~/custom-browser-artifacts';
+    cached.browser.chromeBin = '~/Applications/Chrome Test';
+    writeFileSync(browserToolsConfigFile(configDir), JSON.stringify(cached, null, 2), 'utf-8');
+    const runtimeConfig = browserToolsRuntimeConfig({ configDir });
+    assert.match(runtimeConfig.cacheDir, /custom-browser-cache$/);
+    assert.match(runtimeConfig.artifactDir, /custom-browser-artifacts$/);
+    assert.match(runtimeConfig.chromeBin, /Applications\/Chrome Test$/);
 
     const previousConfigDir = process.env.BROWSER_TOOLS_CONFIG_DIR;
     process.env.BROWSER_TOOLS_CONFIG_DIR = configDir;
@@ -144,11 +158,11 @@ test('private Browser Tools config discovers profiles, active profiles, and task
     assert.deepEqual(activeChromeProfiles({ configDir, sourceDir }).map((profile) => profile.folder), ['Profile 1']);
     assert.equal(resolveChromeProfileReference('Work', { configDir, sourceDir }), 'Profile 1');
 
-    const taskProfile = setTaskProfiles('tradingeconomics', ['Work', 'Default'], { configDir, sourceDir });
+    const taskProfile = setTaskProfiles('finance', ['Work', 'Default'], { configDir, sourceDir });
     assert.deepEqual(taskProfile.profiles, ['Profile 1', 'Default']);
-    assert.equal(resolveTaskProfile('tradingeconomics', { configDir, sourceDir }), 'Profile 1');
+    assert.equal(resolveTaskProfile('finance', { configDir, sourceDir }), 'Profile 1');
     const preserved = ensureBrowserToolsConfig({ configDir, sourceDir, refresh: true });
-    assert.equal(preserved.taskProfiles.tradingeconomics.defaultProfile, 'Profile 1');
+    assert.equal(preserved.taskProfiles.finance.defaultProfile, 'Profile 1');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

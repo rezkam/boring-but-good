@@ -121,7 +121,7 @@ test('runCachedBrowserResource owns fresh browser page lifecycle, cache write, a
   }
 });
 
-test('runBrowserResource disconnects when a Resource Helper fails', async () => {
+test('runBrowserResource disconnects when a generic extractor fails', async () => {
   const calls = [];
   const page = {
     isClosed: () => false,

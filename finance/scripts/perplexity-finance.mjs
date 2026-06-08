@@ -6,55 +6,35 @@
  *   node perplexity-finance.mjs <ticker> [port] [--owner-token token]
  *   node perplexity-finance.mjs --tickers "CL=F,BZ=F,^GSPC,^VIX,GC=F,BTC-USD,EURUSD=X,LMT" [port]
  *   node perplexity-finance.mjs --market [port]   # Main page market summary + top assets
- *   node perplexity-finance.mjs --bundle <ticker> [port]  # ALL shapes in one go (ADR-0012)
  *
  * Flags:
  *   --json         Output raw JSON instead of markdown
  *   --out <file>   Save output to file
- *   --bundle T     Fetch quote + financials + analyst consensus + holders +
- *                  earnings + narratives + key issues + developments +
- *                  research reports for ticker T in one round-trip. Used
- *                  by financial-pipeline's MarketDataService.fetchBundle.
- *                  Endpoints that 4xx are recorded as `null` in the output;
- *                  the caller persists what is present, never fabricates.
  *
  * How it works:
  *   Uses the browser's authenticated session to call Perplexity's internal REST APIs:
  *   - /rest/finance/quote/<ticker>                 - price, change, stats
- *   - /rest/tasks/finance/tickers/<symbol>         - summary, news, predictions
- *   - /rest/finance/financials/<ticker>            - quarterly financials (probed)
- *   - /rest/finance/analyst-consensus/<ticker>     - consensus + targets (probed)
- *   - /rest/finance/holders/<ticker>               - institutional holders (probed)
- *   - /rest/finance/earnings/<ticker>              - earnings history (probed)
- *   - /rest/finance/historical-data/<ticker>       - OHLCV history (probed)
- *   - /rest/finance/news/<ticker>                  - developments newsfeed (probed)
  *
- * Endpoints marked "probed" are best-effort: bundle mode tries each in
- * parallel. Missing endpoints surface as `null` sections - the TypeScript
- * MarketDataService treats those as `unsupported` per the dispatcher's
- * anti-fabrication contract.
- *
- * The price text on the page is SVG-rendered (not DOM text), so we MUST use the API.
+ * The price text on the page is SVG-rendered, not DOM text, so this helper uses the API.
  */
 
-import { parseOwnerToken, parsePort, stripBrowserSessionArgs } from './browser-control.mjs';
-import { runCachedBrowserResource } from './resource-helper.mjs';
-
-const rawArgs = process.argv.slice(2);
-const ownerToken = parseOwnerToken(rawArgs);
-const port = parsePort(rawArgs, rawArgs.find(a => /^\d{4,5}$/.test(a)) || '9222');
-const args = stripBrowserSessionArgs(rawArgs, { stripPositionalPort: true });
-const isJson = args.includes('--json');
-const isMarket = args.includes('--market');
-const outIdx = args.indexOf('--out');
-const outFile = outIdx !== -1 ? args[outIdx + 1] : null;
-const tickersIdx = args.indexOf('--tickers');
-const tickers = tickersIdx !== -1 ? args[tickersIdx + 1].split(',').map(t => t.trim()) : null;
-const singleTicker = !isMarket && !tickers ? args.find(a => !a.startsWith('--') && !/^\d{4,5}$/.test(a)) : null;
-const cacheInput = { market: isMarket, tickers: isMarket ? ['--market'] : (tickers || [singleTicker]), json: isJson };
+import { loadBrowserToolsRuntime, optionValue, parseBrowserSessionArgs } from './browser-tools-runtime.mjs';
 
 async function main() {
-  await runCachedBrowserResource({
+  const browserTools = await loadBrowserToolsRuntime();
+  const rawArgs = process.argv.slice(2);
+  const { ownerToken, port, args } = parseBrowserSessionArgs(rawArgs, browserTools);
+  const isJson = args.includes('--json');
+  const isMarket = args.includes('--market');
+  const outFile = optionValue(args, '--out');
+  const tickersValue = optionValue(args, '--tickers');
+  const tickers = tickersValue ? tickersValue.split(',').map(t => t.trim()).filter(Boolean) : null;
+  const singleTicker = !isMarket && !tickers
+    ? args.find(a => !a.startsWith('--') && !/^\d{4,5}$/.test(a) && a !== outFile)
+    : null;
+  const cacheInput = { market: isMarket, tickers: isMarket ? ['--market'] : (tickers || [singleTicker]), json: isJson };
+
+  await browserTools.runCachedBrowserResource({
     tool: 'perplexity-finance',
     cacheInput,
     outFile,

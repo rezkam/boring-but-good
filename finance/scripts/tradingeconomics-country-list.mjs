@@ -8,8 +8,7 @@
  */
 
 import { pathToFileURL } from 'url';
-import { parseOwnerToken, parsePort, stripBrowserSessionArgs } from './browser-control.mjs';
-import { runCachedBrowserResource } from './resource-helper.mjs';
+import { loadBrowserToolsRuntime, optionValue, parseBrowserSessionArgs } from './browser-tools-runtime.mjs';
 import {
   TRADING_ECONOMICS_BASE_URL as BASE_URL,
   buildTradingEconomicsMetadata,
@@ -22,17 +21,6 @@ import {
   slugify,
   titleCase,
 } from './tradingeconomics-common.mjs';
-
-const rawArgs = process.argv.slice(2);
-const ownerToken = parseOwnerToken(rawArgs);
-const port = parsePort(rawArgs, rawArgs.find(a => /^\d{4,5}$/.test(a)) || '9222');
-const args = stripBrowserSessionArgs(rawArgs, { stripPositionalPort: true });
-const isJson = args.includes('--json');
-const outIdx = args.indexOf('--out');
-const outFile = outIdx !== -1 ? args[outIdx + 1] : null;
-const indicatorInput = parseIndicatorInput(args);
-const countries = parseCountries(args);
-const cacheInput = { source: 'country-list', indicator: indicatorInput.slug, countries, schema: 1, json: isJson };
 
 export function parseCountryListTablePayload(payload, countryFilter = []) {
   const headers = (payload.headers || []).map(cleanText);
@@ -77,7 +65,16 @@ export function formatCountryListComparison(data) {
 }
 
 async function main() {
-  await runCachedBrowserResource({
+  const browserTools = await loadBrowserToolsRuntime();
+  const rawArgs = process.argv.slice(2);
+  const { ownerToken, port, args } = parseBrowserSessionArgs(rawArgs, browserTools);
+  const isJson = args.includes('--json');
+  const outFile = optionValue(args, '--out');
+  const indicatorInput = parseIndicatorInput(args, outFile);
+  const countries = parseCountries(args);
+  const cacheInput = { source: 'country-list', indicator: indicatorInput.slug, countries, schema: 1, json: isJson };
+
+  await browserTools.runCachedBrowserResource({
     tool: 'tradingeconomics-country-list',
     cacheInput,
     outFile,
@@ -137,7 +134,7 @@ async function extractCountryList(page, indicator, countryFilter) {
   };
 }
 
-function parseIndicatorInput(rawArgs) {
+function parseIndicatorInput(rawArgs, outFile = null) {
   const indicatorIdx = rawArgs.indexOf('--indicator');
   const raw = indicatorIdx !== -1 ? rawArgs[indicatorIdx + 1]
     : rawArgs.find(arg => !arg.startsWith('--') && !/^\d{4,5}$/.test(arg) && arg !== outFile);

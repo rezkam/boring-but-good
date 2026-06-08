@@ -25,9 +25,13 @@ function usage() {
 Private config location:
   ${browserToolsConfigFile()}
 
-Config roots:
-  AGENT_CONFIG_DIR           Override the shared agent config root. Default: ~/.agents
-  BROWSER_TOOLS_CONFIG_DIR   Override only Browser Tools config.
+Config roots and runtime overrides:
+  AGENT_CONFIG_DIR                 Override the shared agent config root. Default: ~/.agents
+  BROWSER_TOOLS_CONFIG_DIR         Override only Browser Tools config.
+  BROWSER_TOOLS_CACHE_DIR          Override managed browser cache and copied profiles.
+  BROWSER_TOOLS_ARTIFACT_DIR       Override screenshots and generated artifacts.
+  BROWSER_TOOLS_CHROME_SOURCE_DIR  Override source Chrome profile directory.
+  BROWSER_TOOLS_CHROME_BIN         Override Chrome executable path.
 
 Notes:
   profiles          Creates or reads the cached Chrome profile registry.

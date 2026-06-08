@@ -14,13 +14,7 @@ const PUBLIC_BROWSER_CONTROL_SCRIPTS = [
   'scripts/screenshot.mjs',
   'scripts/pick.mjs',
 ];
-const RESOURCE_HELPER_SCRIPTS = [
-  'scripts/yahoo-finance.mjs',
-  'scripts/tradingeconomics-markets.mjs',
-  'scripts/tradingeconomics-indicators.mjs',
-  'scripts/tradingeconomics-forecasts.mjs',
-  'scripts/tradingeconomics-country-list.mjs',
-  'scripts/perplexity-finance.mjs',
+const GENERIC_EXTRACTOR_SCRIPTS = [
   'scripts/scrape-page.mjs',
   'scripts/extract-article.mjs',
 ];
@@ -39,7 +33,7 @@ function walk(dir, predicate, files = []) {
 }
 
 test('all public scripts named by the Skill Interface exist and are executable', () => {
-  for (const script of [...PUBLIC_BROWSER_CONTROL_SCRIPTS, ...RESOURCE_HELPER_SCRIPTS]) {
+  for (const script of [...PUBLIC_BROWSER_CONTROL_SCRIPTS, ...GENERIC_EXTRACTOR_SCRIPTS]) {
     const path = join(ROOT, script);
     assert.equal(existsSync(path), true, `${script} should exist`);
     accessSync(path, constants.X_OK);
@@ -47,7 +41,7 @@ test('all public scripts named by the Skill Interface exist and are executable',
   }
 });
 
-test('SKILL.md and reference docs document the same public Browser Control and Resource Helper surface', () => {
+test('SKILL.md and reference docs document the same public Browser Control and generic extractor surface', () => {
   const skill = readRelative('SKILL.md');
   const browserControl = readRelative('references/browser-control.md');
   const resourceHelpers = readRelative('references/resource-helpers.md');
@@ -57,7 +51,7 @@ test('SKILL.md and reference docs document the same public Browser Control and R
     assert.match(browserControl, new RegExp(script.replace('.', '\\.')));
   }
 
-  for (const script of RESOURCE_HELPER_SCRIPTS) {
+  for (const script of GENERIC_EXTRACTOR_SCRIPTS) {
     assert.match(skill, new RegExp(script.replace('.', '\\.')));
     assert.match(resourceHelpers, new RegExp(script.replace('.', '\\.')));
   }
@@ -136,50 +130,13 @@ test('new browser tabs are opened in the background to avoid stealing focus', ()
   assert.deepEqual(offenders, []);
 });
 
-test('Trading Economics helpers use the shared Trading Economics module', () => {
-  const tradingEconomicsHelpers = [
-    'scripts/tradingeconomics-markets.mjs',
-    'scripts/tradingeconomics-indicators.mjs',
-    'scripts/tradingeconomics-forecasts.mjs',
-    'scripts/tradingeconomics-country-list.mjs',
-  ];
-  const shared = readRelative('scripts/tradingeconomics-common.mjs');
-  assert.match(shared, /dismissTradingEconomicsOverlays/);
-  assert.match(shared, /extractTradingEconomicsTables/);
-  assert.match(shared, /markdownTable/);
-  assert.match(shared, /buildTradingEconomicsMetadata/);
-
-  for (const script of tradingEconomicsHelpers) {
-    const text = readRelative(script);
-    assert.match(text, /\.\/tradingeconomics-common\.mjs/);
-    assert.doesNotMatch(text, /function cleanText\s*\(/);
-    assert.doesNotMatch(text, /function escapeMarkdown\s*\(/);
-    assert.doesNotMatch(text, /dismissConsentDialog|dismissBlockingOverlays/);
-  }
-});
-
-test('documented Resource Helpers use the shared cache and lifecycle module', () => {
-  const cacheBackedHelpers = [
-    'scripts/yahoo-finance.mjs',
-    'scripts/tradingeconomics-markets.mjs',
-    'scripts/tradingeconomics-indicators.mjs',
-    'scripts/tradingeconomics-forecasts.mjs',
-    'scripts/tradingeconomics-country-list.mjs',
-    'scripts/perplexity-finance.mjs',
-  ];
+test('documented generic extractors use the shared cache and lifecycle module', () => {
   const resourceHelper = readRelative('scripts/resource-helper.mjs');
   assert.match(resourceHelper, /readCachedResponse/);
   assert.match(resourceHelper, /writeCachedResponse/);
   assert.match(resourceHelper, /connectBrowser/);
 
-  for (const script of cacheBackedHelpers) {
-    const text = readRelative(script);
-    assert.match(text, /runCachedBrowserResource/);
-    assert.doesNotMatch(text, /readCachedResponse/);
-    assert.doesNotMatch(text, /writeCachedResponse/);
-  }
-
-  for (const script of ['scripts/scrape-page.mjs', 'scripts/extract-article.mjs']) {
+  for (const script of GENERIC_EXTRACTOR_SCRIPTS) {
     assert.match(readRelative(script), /runBrowserResource/);
   }
 });

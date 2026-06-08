@@ -14,6 +14,7 @@ Shell-script and workflow skills that give AI coding agents (Claude Code, etc.) 
 | `argocd/` | curl | `~/.boring/argocd/{url,token}` |
 | `skanetrafiken/` | curl | No auth needed |
 | `browser-tools/` | Node.js + Chrome | Copied Chrome profile under `~/.cache/pi-browser-tools` |
+| `finance/` | Node.js + Chrome via browser-tools | Browser-authenticated finance sessions from managed Chrome |
 | `ai-chat/` | Node.js + Chrome via browser-tools | Browser-authenticated provider sessions from managed Chrome |
 
 ## Architecture
