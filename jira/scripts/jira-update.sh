@@ -59,10 +59,24 @@ EOF
     esac
 done
 
-# Build JSON payload for raw API (handles special chars safely)
+# Build JSON payload for raw API (handles special chars safely).
+# Description is converted from markdown to Atlassian Document Format (ADF) before
+# posting, because the v3 API rejects raw strings for `description` and v2's wiki
+# interpretation mangles markdown headings/code spans.
 FIELDS="{}"
 [ -n "$SUMMARY" ]     && FIELDS=$(echo "$FIELDS" | jq --arg v "$SUMMARY" '.summary = $v')
-[ -n "$DESCRIPTION" ] && FIELDS=$(echo "$FIELDS" | jq --arg v "$DESCRIPTION" '.description = $v')
+if [ -n "$DESCRIPTION" ]; then
+    DESC_ADF=$(printf '%s' "$DESCRIPTION" | python3 "$SCRIPT_DIR/md_to_adf.py" 2>/dev/null)
+    if [ -z "$DESC_ADF" ]; then
+        cat >&2 << EOF
+ERROR: Failed to convert description from markdown to ADF.
+md_to_adf.py returned an empty document. Check that python3 is on PATH and
+that the script at $SCRIPT_DIR/md_to_adf.py is intact.
+EOF
+        exit 1
+    fi
+    FIELDS=$(echo "$FIELDS" | jq --argjson v "$DESC_ADF" '.description = $v')
+fi
 # Assignee: use jira-assign.sh which handles Cloud (accountId) vs Server (name) correctly.
 # For the raw fields payload, we set it as a separate step after the main update.
 if [ -n "$ASSIGNEE" ]; then
@@ -92,7 +106,7 @@ fi
 if [ "$FIELDS" != "{}" ]; then
     PAYLOAD=$(jq -n --argjson fields "$FIELDS" '{"fields": $fields}')
 
-    OUTPUT=$(jira request -M PUT "/rest/api/2/issue/${ISSUE}" "$PAYLOAD" 2>&1)
+    OUTPUT=$(jira request -M PUT "/rest/api/3/issue/${ISSUE}" "$PAYLOAD" 2>&1)
     RC=$?
 else
     RC=0

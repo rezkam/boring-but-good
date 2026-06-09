@@ -124,9 +124,13 @@ EOF
 _validate_type
 
 # Build go-jira create command
+# NOTE: description is NOT passed here. go-jira sends it to Jira Cloud's v3 API
+# which expects Atlassian Document Format (ADF), and go-jira's markdown-to-ADF
+# conversion mangles the result (every heading collapses into nested list items).
+# Instead, create the issue without a description, then PUT a properly converted
+# ADF payload below via md_to_adf.py + the raw API.
 CMD=(jira create --noedit -p "$PROJECT" -i "$TYPE" -o "summary=${SUMMARY}")
 
-[ -n "$DESCRIPTION" ] && CMD+=(-o "description=${DESCRIPTION}")
 [ -n "$ASSIGNEE" ]    && CMD+=(-o "assignee=${ASSIGNEE}")
 [ -n "$PRIORITY" ]    && CMD+=(-o "priority=${PRIORITY}")
 # NOTE: parent is set via a follow-up PUT after the issue exists — see below.
@@ -168,6 +172,38 @@ if [ -n "$LABELS" ]; then
         ALL_LABELS="${ALL_LABELS} ${LABELS}"
     else
         ALL_LABELS="${LABELS}"
+    fi
+fi
+
+if [ -n "$DESCRIPTION" ]; then
+    DESC_ADF=$(printf '%s' "$DESCRIPTION" | python3 "$SCRIPT_DIR/md_to_adf.py" 2>/dev/null)
+    if [ -z "$DESC_ADF" ]; then
+        cat >&2 << EOF
+WARNING: Issue ${ISSUE_KEY} was created BUT description could not be converted
+to ADF (md_to_adf.py returned empty). The issue has no description yet.
+
+To set the description manually with raw text:
+  $SCRIPT_DIR/jira-update.sh ${ISSUE_KEY} --description "your text"
+EOF
+    else
+        DESC_PAYLOAD=$(jq -n --argjson adf "$DESC_ADF" '{"fields":{"description":$adf}}')
+        DESC_OUTPUT=$("$SCRIPT_DIR/jira-api.sh" PUT "/rest/api/3/issue/${ISSUE_KEY}" "$DESC_PAYLOAD" 2>&1)
+        DESC_RC=$?
+        if [ $DESC_RC -ne 0 ] || echo "$DESC_OUTPUT" | grep -qiE 'errorMessage|"errors"'; then
+            cat >&2 << EOF
+WARNING: Issue ${ISSUE_KEY} was created BUT description PUT failed.
+
+API response (exit ${DESC_RC}):
+${DESC_OUTPUT}
+
+Common causes:
+  - Field 'description' is not on the create/edit screen for this issue type.
+  - Project enforces a description schema that rejects ADF.
+
+To retry manually:
+  $SCRIPT_DIR/jira-update.sh ${ISSUE_KEY} --description "your text"
+EOF
+        fi
     fi
 fi
 
