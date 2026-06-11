@@ -57,6 +57,7 @@ EOF
     exit $RC
 fi
 
+# Print metadata fields
 echo "$RESPONSE" | jq '{
     key: .key,
     summary: .fields.summary,
@@ -67,9 +68,21 @@ echo "$RESPONSE" | jq '{
     reporter: .fields.reporter.displayName,
     labels: .fields.labels,
     created: .fields.created,
-    updated: .fields.updated,
-    description: (if .fields.description then "..." else null end)
+    updated: .fields.updated
 }'
+
+# Render description: convert ADF to Markdown via _adf-to-md.js
+DESC_ADF=$(echo "$RESPONSE" | jq '.fields.description')
+if [ "$DESC_ADF" != "null" ] && [ -n "$DESC_ADF" ]; then
+    echo ""
+    echo "=== Description ==="
+    if command -v node >/dev/null 2>&1 && [ -f "$SCRIPT_DIR/_adf-to-md.js" ]; then
+        echo "$DESC_ADF" | node "$SCRIPT_DIR/_adf-to-md.js" 2>/dev/null || echo "$DESC_ADF"
+    else
+        # Fallback: plain text extraction from ADF
+        echo "$DESC_ADF" | jq -r '.. | .text? // empty' 2>/dev/null | tr -s '\n'
+    fi
+fi
 
 if [ "$SHOW_COMMENTS" = "true" ]; then
     COMMENTS=$("$SCRIPT_DIR/jira-api.sh" GET "/rest/api/3/issue/${ISSUE}/comment" 2>&1)
@@ -77,10 +90,24 @@ if [ "$SHOW_COMMENTS" = "true" ]; then
         echo "WARNING: Could not fetch comments: ${COMMENTS}" >&2
     else
         echo ""
-        echo "$COMMENTS" | jq '[.comments[] | {
-            author: .author.displayName,
-            created: .created,
-            body: (if .body.content then [.body.content[].content[]?.text] | join(" ") else .body end)
-        }]'
+        echo "=== Comments ==="
+        # Render each comment: header line + ADF body converted to markdown
+        COMMENT_COUNT=$(echo "$COMMENTS" | jq '.comments | length' 2>/dev/null)
+        COMMENT_COUNT=${COMMENT_COUNT:-0}
+        if [ "$COMMENT_COUNT" -eq 0 ]; then
+            echo "(no comments)"
+        fi
+        i=0
+        while [ "$i" -lt "$COMMENT_COUNT" ]; do
+            echo ""
+            echo "$COMMENTS" | jq -r "\"--- \(.comments[$i].author.displayName) (\(.comments[$i].created)) ---\"" 2>/dev/null
+            CBODY=$(echo "$COMMENTS" | jq ".comments[$i].body" 2>/dev/null)
+            if command -v node >/dev/null 2>&1 && [ -f "$SCRIPT_DIR/_adf-to-md.js" ]; then
+                echo "$CBODY" | node "$SCRIPT_DIR/_adf-to-md.js" 2>/dev/null || echo "$CBODY" | jq -r '.. | .text? // empty' 2>/dev/null
+            else
+                echo "$CBODY" | jq -r '.. | .text? // empty' 2>/dev/null | tr -s '\n'
+            fi
+            i=$((i + 1))
+        done
     fi
 fi

@@ -73,6 +73,17 @@ Applies default labels from `~/.boring/jira/default-labels` automatically. Retur
 
 #### Writing issue descriptions
 
+**Always write descriptions in standard Markdown.** The scripts convert Markdown to Atlassian Document Format (ADF) automatically before posting. Never use Jira wiki markup (`h2.`, `{{code}}`, `*bold*`) — it will be stored as literal text and render broken in the Jira UI.
+
+Supported Markdown:
+- Headings: `##`, `###` (not `h2.`)
+- Inline code: `` `code` `` (not `{{code}}`)
+- Bold: `**text**` (not `*text*`)
+- Bullets: `- item`
+- Numbered lists: `1. item`
+- Links: `[text](url)`
+- Fenced code blocks: ` ```lang `
+
 **Issues describe problems, not solutions.** Do not include fix details, code changes, or implementation plans. The fix is unknown at the time of filing — that comes later during investigation.
 
 A good issue description contains:
@@ -88,11 +99,19 @@ A good issue description contains:
 - "The fix is to change X to Y" — that belongs in a PR, not a ticket
 - Workarounds (unless explicitly asked to document them)
 
-**Example — BAD:**
-> `jenkins_post` uses `-f` flag. Fix: remove `-f` from curl command in `_api.sh` line 20.
+**Example — BAD (Jira wiki markup — never do this):**
+```
+h2. What is broken
+{{FileReaderLoop}} jams on {{exported/}} keys. Fix: add delimiter to ListObjectsV2.
+```
 
-**Example — GOOD:**
-> Jenkins trigger and abort operations fail silently on HTTP errors. When the server returns 4xx/5xx, the script exits before reaching its error handling code, producing no error message. This happens because `curl -f` causes a non-zero exit under `set -e`, killing the process during command substitution. Affected scripts: `jenkins-trigger.sh`, `jenkins-abort.sh`. To reproduce: trigger a build on a non-existent job path.
+**Example — GOOD (Markdown):**
+```
+## What is broken
+`FileReaderLoop` jams when sub-folder keys appear in the listing result.
+The loop fetches with `limit=1` and `exported/` sorts before all flat keys,
+so the same unreachable key is returned on every iteration.
+```
 
 ### View issue
 
