@@ -109,6 +109,8 @@ const PROFILE_SYNC_ITEMS = [
   { path: 'Network/Network Persistent State', type: 'file' },
   { path: 'Account Web Data', type: 'file' },
   { path: 'Account Web Data-journal', type: 'file' },
+  { path: 'Web Data', type: 'file' },
+  { path: 'Web Data-journal', type: 'file' },
   { path: 'Safe Browsing Cookies', type: 'file' },
   { path: 'Safe Browsing Cookies-journal', type: 'file' },
   { path: 'Preferences', type: 'file' },

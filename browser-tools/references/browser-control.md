@@ -53,7 +53,7 @@ Environment variables take precedence: `BROWSER_TOOLS_CONFIG_DIR`, `BROWSER_TOOL
 
 ## Profile Sync
 
-Profile Sync copies allow-listed auth, browser state, extension payloads, and extension state for the resolved Chrome profile folder into a per-port sandbox directory under the configured cache directory. It copies Chrome `Local State`, cookies, preferences, local storage, session storage, transport security state, trust tokens, installed extension payloads, extension cookies, extension rules, extension scripts, and local/managed/sync extension settings when those files exist.
+Profile Sync copies allow-listed auth, browser state, extension payloads, and extension state for the resolved Chrome profile folder into a per-port sandbox directory under the configured cache directory. It copies Chrome `Local State`, cookies, account web data, web data (autofill plus the account OAuth refresh token in `token_service`), preferences, local storage, session storage, transport security state, trust tokens, installed extension payloads, extension cookies, extension rules, extension scripts, and local/managed/sync extension settings when those files exist.
 
 It intentionally does not copy browser caches, history, favicons, service workers, IndexedDB, file system storage, or other large browser-generated data unrelated to matching the profile. Managed Chrome launches with Chrome sync disabled so the sandbox does not sync mutations back through the browser account. It does not use the live Chrome profile as its runtime profile.
 
