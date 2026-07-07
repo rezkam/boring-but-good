@@ -4,69 +4,124 @@
  * Usage: ./scrape-page.js [--port 9222] [--owner-token token]
  * Outputs JSON: [{headline, href, time}]
  */
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { activePage, parseOwnerToken, parsePort } from './browser-control.mjs';
 import { runBrowserResource } from './resource-helper.mjs';
 
-const args = process.argv.slice(2);
-const port = parsePort(args);
-const ownerToken = parseOwnerToken(args);
+const ARTICLE_LIKE_PATH_SEGMENT_PATTERN = /(?:^|\/)(?:articles?|news|stor(?:y|ies)|(?:19|20)\d{2})(?=\/|$)/i;
 
-await runBrowserResource({
-  port,
-  ownerToken,
-  getPage: activePage,
-  run: async ({ page }) => {
-    // Scroll to bottom to trigger lazy-loaded content
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await new Promise(r => setTimeout(r, 2000));
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await new Promise(r => setTimeout(r, 1500));
+if (isDirectExecution()) await main();
 
-    const articles = await page.evaluate(() => {
-      const seen = new Set();
-      const results = [];
+async function main() {
+  const args = process.argv.slice(2);
+  const port = parsePort(args);
+  const ownerToken = parseOwnerToken(args);
 
-      // Candidate link selectors (broad)
-      const links = Array.from(document.querySelectorAll("a[href]"));
+  await runBrowserResource({
+    port,
+    ownerToken,
+    getPage: activePage,
+    run: async ({ page }) => {
+      // Scroll to bottom to trigger lazy-loaded content
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await new Promise(r => setTimeout(r, 2000));
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await new Promise(r => setTimeout(r, 1500));
 
-      for (const a of links) {
-        const href = a.href;
-        const headline = a.innerText.trim().replace(/\s+/g, " ");
+      const articles = await page.evaluate((articleLikePathSegmentPatternSource, articleLikePathSegmentPatternFlags) => {
+        const articleLikePathSegmentPattern = new RegExp(
+          articleLikePathSegmentPatternSource,
+          articleLikePathSegmentPatternFlags,
+        );
+        const isGenericArticleLikeHref = (href) => {
+          let pathname = href;
+          try {
+            pathname = new URL(href, 'https://example.invalid').pathname;
+          } catch {
+            pathname = href;
+          }
 
-        // Filter: meaningful headlines, article-like URLs
-        if (
-          headline.length < 25 ||
-          headline.length > 250 ||
-          seen.has(headline) ||
-          !/\/(article|news|story|markets|finance|stocks|economy|business|investing|2026)/.test(href)
-        ) continue;
+          return articleLikePathSegmentPattern.test(pathname);
+        };
+        const scrapeVisibleText = (element) => {
+          const raw = typeof element?.innerText === 'string'
+            ? element.innerText
+            : typeof element?.textContent === 'string'
+              ? element.textContent
+              : '';
+          return raw.trim().replace(/\s+/g, ' ');
+        };
+        const seen = new Set();
+        const results = [];
 
-        // Skip nav/footer/promo links
-        if (/subscribe|sign.?in|login|newsletter|podcast|video|watch|listen/i.test(headline)) continue;
+        // Candidate link selectors (broad)
+        const links = Array.from(document.querySelectorAll("a[href]"));
 
-        seen.add(headline);
+        for (const a of links) {
+          const href = a.href;
+          const headline = scrapeVisibleText(a);
 
-        // Try to find a timestamp near this link
-        let time = "";
-        let el = a;
-        for (let i = 0; i < 7; i++) {
-          el = el.parentElement;
-          if (!el) break;
-          const ts = el.querySelector("time, [class*='time'], [class*='timestamp'], [class*='date'], [data-testid*='time']");
-          if (ts) { time = ts.innerText.trim() || ts.getAttribute("datetime") || ""; break; }
+          // Filter: meaningful headlines, article-like URLs
+          if (
+            headline.length < 25 ||
+            headline.length > 250 ||
+            seen.has(headline) ||
+            !isGenericArticleLikeHref(href)
+          ) continue;
+
+          // Skip nav/footer/promo links
+          if (/subscribe|sign.?in|login|newsletter|podcast|video|watch|listen/i.test(headline)) continue;
+
+          seen.add(headline);
+
+          // Try to find a timestamp near this link
+          let time = "";
+          let el = a;
+          for (let i = 0; i < 7; i++) {
+            el = el.parentElement;
+            if (!el) break;
+            const ts = el.querySelector("time, [class*='time'], [class*='timestamp'], [class*='date'], [data-testid*='time']");
+            if (ts) { time = scrapeVisibleText(ts) || ts.getAttribute("datetime") || ""; break; }
+          }
+
+          results.push({ headline, href, time });
         }
 
-        results.push({ headline, href, time });
-      }
+        return results;
+      }, ARTICLE_LIKE_PATH_SEGMENT_PATTERN.source, ARTICLE_LIKE_PATH_SEGMENT_PATTERN.flags);
 
-      return results;
-    });
+      // Deduplicate by href
+      const unique = Object.values(
+        Object.fromEntries(articles.map(a => [a.href, a]))
+      );
 
-    // Deduplicate by href
-    const unique = Object.values(
-      Object.fromEntries(articles.map(a => [a.href, a]))
-    );
+      console.log(JSON.stringify(unique, null, 2));
+    },
+  });
+}
 
-    console.log(JSON.stringify(unique, null, 2));
-  },
-});
+function isDirectExecution() {
+  if (!process.argv[1]) return false;
+  return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+}
+
+export function scrapeVisibleText(element) {
+  const raw = typeof element?.innerText === 'string'
+    ? element.innerText
+    : typeof element?.textContent === 'string'
+      ? element.textContent
+      : '';
+  return raw.trim().replace(/\s+/g, ' ');
+}
+
+export function isGenericArticleLikeHref(href) {
+  let pathname = href;
+  try {
+    pathname = new URL(href, 'https://example.invalid').pathname;
+  } catch {
+    pathname = href;
+  }
+
+  return ARTICLE_LIKE_PATH_SEGMENT_PATTERN.test(pathname);
+}

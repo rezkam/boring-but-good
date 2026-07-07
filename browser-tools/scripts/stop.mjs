@@ -8,16 +8,32 @@
  *   scripts/stop.mjs --port 9223
  *   scripts/stop.mjs --clean
  *   scripts/stop.mjs --dry-run
+ *   scripts/stop.mjs --prune            (remove all cached clones not in use)
  *   scripts/stop.mjs --owner-token "$BROWSER_TOOLS_OWNER_TOKEN"
  */
 
-import { hasFlag, parseOwnerToken, parsePort, stopChrome } from './browser-control.mjs';
+import { hasFlag, parseOwnerToken, parsePort, pruneChromeClones, stopChrome } from './browser-control.mjs';
 
 const args = process.argv.slice(2);
 const port = parsePort(args);
 const clean = hasFlag(args, '--clean');
 const dryRun = hasFlag(args, '--dry-run');
 const ownerToken = parseOwnerToken(args);
+
+if (hasFlag(args, '--prune')) {
+  const prune = pruneChromeClones({ dryRun });
+  if (!prune.removed.length && !prune.kept.length) {
+    console.log('No cached Chrome clones found.');
+  }
+  for (const entry of prune.kept) {
+    console.log(`• Keeping :${entry.port} (in use by PID ${entry.pid})`);
+  }
+  for (const entry of prune.removed) {
+    const count = entry.paths.length;
+    console.log(`${dryRun ? '• Would remove' : '✓ Removed'} clone for :${entry.port} (${count} item${count === 1 ? '' : 's'})`);
+  }
+  process.exit(0);
+}
 
 const result = stopChrome({ port, clean, dryRun, ownerToken });
 

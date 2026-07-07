@@ -18,7 +18,7 @@ export BROWSER_TOOLS_OWNER_TOKEN="<owner token from start output>"
 scripts/nav.mjs https://example.com --port <reported port>
 scripts/eval.mjs 'document.title' --port <reported port>
 scripts/screenshot.mjs --full --port <reported port>
-scripts/stop.mjs --port <reported port> --owner-token "$BROWSER_TOOLS_OWNER_TOKEN"
+scripts/stop.mjs --port <reported port>
 ```
 
 All executable scripts live under `scripts/`. There are no root-level compatibility wrappers.
@@ -28,13 +28,13 @@ All executable scripts live under `scripts/`. There are no root-level compatibil
 | Task | Script |
 | --- | --- |
 | Configure private Browser Tools config | `scripts/config.mjs profiles`, `scripts/config.mjs active-profiles`, `scripts/config.mjs task-profile set <task> --profile "<alias>"` |
-| Start Chrome | `scripts/start.mjs`, `scripts/start.mjs --profile "<Chrome profile folder or local alias>"`, or `scripts/start.mjs --task <task>` |
-| Stop Chrome | `scripts/stop.mjs --clean --owner-token "<token>"` |
+| Start Chrome | `scripts/start.mjs`, `scripts/start.mjs --profile "<Chrome profile folder or local alias>"`, `scripts/start.mjs --task <task>`, or `scripts/start.mjs --headless` |
+| Stop Chrome | `scripts/stop.mjs --clean` |
 | Navigate | `scripts/nav.mjs https://example.com` |
 | Evaluate JavaScript | `scripts/eval.mjs 'document.title'` |
 | Screenshot | `scripts/screenshot.mjs --full` |
 | Pick DOM element | `scripts/pick.mjs "Click the price"` |
-| Extract visible links from the current page | `scripts/scrape-page.mjs` |
+| Extract article-like visible links from the current page | `scripts/scrape-page.mjs` |
 | Extract article text from the current page | `scripts/extract-article.mjs --chars 6000` |
 
 Read [browser-control.md](references/browser-control.md) when you need profile names, private config behavior, port behavior, DOM picking controls, directory defaults, or implementation details.
@@ -45,8 +45,9 @@ Read [browser-control.md](references/browser-control.md) when you need profile n
 - Add `--profile "<Chrome profile folder or local alias>"` only when logged-in browser access is needed.
 - Use `--task <task>` to start with a configured profile for a specialist skill or workflow.
 - If cookies must be current, start with `--sync` or restart with `--sync` after a login mismatch.
+- Add `--headless` to run without opening a browser window when the task needs no user interaction. It runs the full browser (profile and extensions still load), so navigation, evaluation, scraping, and screenshots behave the same. Headless presents the normal Chrome User-Agent instead of `HeadlessChrome` so a Google-signed-in clone does not trip session-theft protection and log the source profile out. Headless is set at start time; to change it, stop with `--clean` and start again.
 - If the default port is busy, `scripts/start.mjs` auto-allocates another port and creates a separate per-port sandbox profile copy. Use the reported port for follow-up commands.
-- Each start owns the browser with an owner token. Use the printed token through `--owner-token <token>` or `BROWSER_TOOLS_OWNER_TOKEN` for all follow-up commands.
+- Each start owns the browser with an owner token. Export the printed token as `BROWSER_TOOLS_OWNER_TOKEN` for follow-up commands. Avoid passing user-supplied tokens with `--owner-token` because command-line arguments can be visible to other local users through process listings.
 - Open new browser tabs in the background with `browser.newPage({ background: true })` so automation does not steal OS focus from the user. Do not call `page.bringToFront()` unless the user explicitly asks to see or interact with that tab.
 - Send useful result data to stdout. Treat stderr as progress and diagnostics.
 

@@ -1,43 +1,63 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   DEFAULT_PORT,
+  CACHE_DIR,
   CHROME_BIN,
+  CHROME_SRC,
+  FRESH_PROFILE_DIR,
   PROFILE_DST,
+  PROFILE_SYNC_STATE_FILE,
   activeChromeProfiles,
   browserToolsConfigFile,
+  browserToolsProfilesConfigFile,
   browserToolsRuntimeConfig,
   buildBrowserToolsConfig,
+  buildChromeProfilesConfig,
   ensureBrowserToolsConfig,
+  ensureChromeProfilesConfig,
   freshProfileDirForPort,
   activePage,
   acquirePortLock,
   chromeLaunchArgs,
+  chromeUserAgentForMajor,
   fileExists,
   hasFlag,
   managedChromeCommandSafety,
   managedBrowserOwnershipSafety,
   normalizePort,
   optionValue,
+  parsePositiveIntegerOption,
   ownerTokenHash,
   parseOwnerId,
   parseOwnerToken,
   parsePort,
+  pidFileForPort,
   portLockDirForPort,
   dedicatedPage,
   profileDataDirForPort,
   profileSyncItems,
   profileSyncRsyncCommands,
+  profileSyncStateFileForPort,
+  pruneChromeClones,
+  readBrowserToolsConfig,
+  readChromeProfilesConfig,
+  requiredOptionValue,
   resolveChromeProfileReference,
+  resolveStartProfileName,
   resolveTaskProfile,
   setTaskProfiles,
+  startChrome,
+  stateFileForPort,
   stripBrowserSessionArgs,
+  syncChromeProfile,
   timestampedTmpPath,
   validateProfileName,
   waitForChromeReady,
+  writeChromeProfilesConfig,
 } from '../scripts/browser-control.mjs';
 
 test('optionValue, hasFlag, parsePort, and normalizePort define the shared CLI surface', () => {
@@ -53,6 +73,27 @@ test('optionValue, hasFlag, parsePort, and normalizePort define the shared CLI s
   assert.throws(() => normalizePort(0), /Invalid --port value/);
   assert.throws(() => normalizePort(70000), /Invalid --port value/);
   assert.throws(() => normalizePort('abc'), /Invalid --port value/);
+});
+
+test('parsePositiveIntegerOption accepts only present positive integer option values', () => {
+  assert.equal(parsePositiveIntegerOption([], '--chars', 5000), 5000);
+  assert.equal(parsePositiveIntegerOption(['--chars', '6000'], '--chars', 5000), 6000);
+
+  assert.throws(() => parsePositiveIntegerOption(['--chars'], '--chars', 5000), /Missing --chars value/);
+  assert.throws(() => parsePositiveIntegerOption(['--chars', 'abc'], '--chars', 5000), /Invalid --chars value/);
+  assert.throws(() => parsePositiveIntegerOption(['--chars', '--port', '9223'], '--chars', 5000), /Missing --chars value/);
+  assert.throws(() => parsePositiveIntegerOption(['--chars', '0'], '--chars', 5000), /Invalid --chars value/);
+});
+
+test('value option parsers reject missing and option-like values', () => {
+  assert.throws(() => parsePort(['--port']), /Missing value after --port/);
+  assert.throws(() => parsePort(['--port', '--owner-token', 'token-a']), /Missing value after --port/);
+  assert.throws(() => parseOwnerToken(['--owner-token']), /Missing value after --owner-token/);
+  assert.throws(() => parseOwnerToken(['--owner-token', '--port', '9333']), /Missing value after --owner-token/);
+  assert.throws(() => parseOwnerId(['--owner-id', '--port', '9333']), /Missing value after --owner-id/);
+  assert.throws(() => parseOwnerId(['--agent-id']), /Missing value after --agent-id/);
+  assert.throws(() => requiredOptionValue(['--profile', '--sync'], '--profile', null), /Missing value after --profile/);
+  assert.throws(() => requiredOptionValue(['--config-dir'], '--config-dir', undefined), /Missing value after --config-dir/);
 });
 
 test('owner token parsing and hashing define the Browser Tools ownership surface', () => {
@@ -161,9 +202,177 @@ test('private Browser Tools config discovers profiles, active profiles, and task
     const taskProfile = setTaskProfiles('finance', ['Work', 'Default'], { configDir, sourceDir });
     assert.deepEqual(taskProfile.profiles, ['Profile 1', 'Default']);
     assert.equal(resolveTaskProfile('finance', { configDir, sourceDir }), 'Profile 1');
+    assert.deepEqual(
+      resolveStartProfileName({ taskName: 'missing-task', defaultProfileName: 'Default', configDir, sourceDir }),
+      { requestedProfileName: 'Default', resolvedProfileName: 'Default', source: 'default' },
+    );
+    assert.deepEqual(
+      resolveStartProfileName({ profileName: 'Work', taskName: 'finance', defaultProfileName: 'Default', configDir, sourceDir }),
+      { requestedProfileName: 'Work', resolvedProfileName: 'Profile 1', source: 'explicit' },
+    );
     const preserved = ensureBrowserToolsConfig({ configDir, sourceDir, refresh: true });
     assert.equal(preserved.taskProfiles.finance.defaultProfile, 'Profile 1');
   } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('Browser Tools config JSON parse errors fail loudly without overwrite', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'browser-config-json-test-'));
+  const configDir = join(tmp, '.agents', 'browser-tools');
+  try {
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(browserToolsConfigFile(configDir), '{ bad json', 'utf-8');
+
+    assert.throws(() => readBrowserToolsConfig({ configDir }), /Failed to parse JSON file .*config\.json/);
+    assert.throws(() => ensureBrowserToolsConfig({ configDir, refresh: true }), /Failed to parse JSON file .*config\.json/);
+    assert.equal(readFileSync(browserToolsConfigFile(configDir), 'utf-8'), '{ bad json');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('refresh with a custom config dir scans that config source directory by default', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'browser-config-refresh-test-'));
+  const customSourceDir = join(tmp, 'Custom Chrome');
+  const wrongSourceDir = join(tmp, 'Wrong Chrome');
+  const customConfigDir = join(tmp, 'custom-config');
+  const wrongConfigDir = join(tmp, 'wrong-config');
+  const previousConfigDir = process.env.BROWSER_TOOLS_CONFIG_DIR;
+  try {
+    mkdirSync(customSourceDir, { recursive: true });
+    mkdirSync(wrongSourceDir, { recursive: true });
+    writeFileSync(join(customSourceDir, 'Local State'), JSON.stringify({
+      profile: { info_cache: { Default: { name: 'Custom Source' } }, last_active_profiles: ['Default'] },
+    }), 'utf-8');
+    writeFileSync(join(wrongSourceDir, 'Local State'), JSON.stringify({
+      profile: { info_cache: { Default: { name: 'Wrong Source' } }, last_active_profiles: ['Default'] },
+    }), 'utf-8');
+
+    ensureBrowserToolsConfig({ configDir: wrongConfigDir, sourceDir: wrongSourceDir });
+    process.env.BROWSER_TOOLS_CONFIG_DIR = wrongConfigDir;
+    ensureBrowserToolsConfig({ configDir: customConfigDir, sourceDir: customSourceDir });
+
+    writeFileSync(join(customSourceDir, 'Local State'), JSON.stringify({
+      profile: { info_cache: { Default: { name: 'Custom Refreshed' } }, last_active_profiles: ['Default'] },
+    }), 'utf-8');
+
+    const refreshed = ensureBrowserToolsConfig({ configDir: customConfigDir, refresh: true });
+    assert.equal(refreshed.profiles.Default.name, 'Custom Refreshed');
+    assert.equal(refreshed.directories.chromeSourceDir, customSourceDir);
+  } finally {
+    if (previousConfigDir === undefined) delete process.env.BROWSER_TOOLS_CONFIG_DIR;
+    else process.env.BROWSER_TOOLS_CONFIG_DIR = previousConfigDir;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('legacy Browser Tools profile config exports stay as compatibility aliases', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'browser-legacy-config-test-'));
+  const sourceDir = join(tmp, 'Chrome');
+  const configDir = join(tmp, '.agents', 'browser-tools');
+  try {
+    mkdirSync(sourceDir, { recursive: true });
+    writeFileSync(join(sourceDir, 'Local State'), JSON.stringify({
+      profile: {
+        info_cache: {
+          Default: { name: 'Default' },
+        },
+        last_active_profiles: ['Default'],
+      },
+    }), 'utf-8');
+
+    assert.equal(browserToolsProfilesConfigFile(configDir), browserToolsConfigFile(configDir));
+    assert.equal(CHROME_SRC.endsWith(join('Google', 'Chrome')), true);
+    assert.equal(FRESH_PROFILE_DIR, join(CACHE_DIR, 'chrome-fresh'));
+    assert.equal(PROFILE_SYNC_STATE_FILE, join(CACHE_DIR, 'chrome-profile-sync.json'));
+
+    const built = buildChromeProfilesConfig({ sourceDir });
+    writeChromeProfilesConfig(built, { configDir });
+    assert.deepEqual(readChromeProfilesConfig({ configDir }).profiles.Default, built.profiles.Default);
+    assert.equal(ensureChromeProfilesConfig({ configDir, sourceDir }).profiles.Default.lastActive, true);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('profile sync fails fast when rsync exits non-zero', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'browser-profile-sync-fail-test-'));
+  const sourceDir = join(tmp, 'Chrome');
+  const destDir = join(tmp, 'chrome-data');
+  const cacheDir = join(tmp, 'cache');
+  const binDir = join(tmp, 'bin');
+  const previousPath = process.env.PATH;
+  const previousCacheDir = process.env.BROWSER_TOOLS_CACHE_DIR;
+  try {
+    mkdirSync(sourceDir, { recursive: true });
+    mkdirSync(join(sourceDir, 'Default'), { recursive: true });
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(join(sourceDir, 'Local State'), JSON.stringify({ profile: { info_cache: { Default: { name: 'Default' } } } }), 'utf-8');
+    const rsyncPath = join(binDir, 'rsync');
+    writeFileSync(rsyncPath, '#!/bin/sh\nexit 7\n', 'utf-8');
+    chmodSync(rsyncPath, 0o755);
+    process.env.PATH = `${binDir}:${previousPath}`;
+    process.env.BROWSER_TOOLS_CACHE_DIR = cacheDir;
+
+    assert.throws(() => syncChromeProfile('Default', { force: true, port: 65401, sourceDir, destDir }), /rsync failed for Local State: exit status 7/);
+    assert.equal(existsSync(profileSyncStateFileForPort(65401)), false);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    if (previousCacheDir === undefined) delete process.env.BROWSER_TOOLS_CACHE_DIR;
+    else process.env.BROWSER_TOOLS_CACHE_DIR = previousCacheDir;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('profile sync fails when requested Chrome profile folder is missing', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'browser-profile-sync-missing-test-'));
+  const sourceDir = join(tmp, 'Chrome');
+  const destDir = join(tmp, 'chrome-data');
+  const cacheDir = join(tmp, 'cache');
+  const previousCacheDir = process.env.BROWSER_TOOLS_CACHE_DIR;
+  try {
+    mkdirSync(sourceDir, { recursive: true });
+    writeFileSync(join(sourceDir, 'Local State'), JSON.stringify({ profile: { info_cache: { Default: { name: 'Default' } } } }), 'utf-8');
+    process.env.BROWSER_TOOLS_CACHE_DIR = cacheDir;
+
+    assert.throws(() => profileSyncRsyncCommands('Default', { sourceDir, destDir, checkExists: true }), /Chrome profile folder not found/);
+    assert.throws(() => syncChromeProfile('Default', { force: true, port: 65403, sourceDir, destDir }), /Chrome profile folder not found/);
+    assert.equal(existsSync(profileSyncStateFileForPort(65403)), false);
+  } finally {
+    if (previousCacheDir === undefined) delete process.env.BROWSER_TOOLS_CACHE_DIR;
+    else process.env.BROWSER_TOOLS_CACHE_DIR = previousCacheDir;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('profile sync fails fast when rsync is terminated by signal', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'browser-profile-sync-signal-test-'));
+  const sourceDir = join(tmp, 'Chrome');
+  const destDir = join(tmp, 'chrome-data');
+  const cacheDir = join(tmp, 'cache');
+  const binDir = join(tmp, 'bin');
+  const previousPath = process.env.PATH;
+  const previousCacheDir = process.env.BROWSER_TOOLS_CACHE_DIR;
+  try {
+    mkdirSync(sourceDir, { recursive: true });
+    mkdirSync(join(sourceDir, 'Default'), { recursive: true });
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(join(sourceDir, 'Local State'), JSON.stringify({ profile: { info_cache: { Default: { name: 'Default' } } } }), 'utf-8');
+    const rsyncPath = join(binDir, 'rsync');
+    writeFileSync(rsyncPath, '#!/bin/sh\nkill -TERM $$\n', 'utf-8');
+    chmodSync(rsyncPath, 0o755);
+    process.env.PATH = `${binDir}:${previousPath}`;
+    process.env.BROWSER_TOOLS_CACHE_DIR = cacheDir;
+
+    assert.throws(() => syncChromeProfile('Default', { force: true, port: 65402, sourceDir, destDir }), /rsync failed for Local State: terminated by signal SIGTERM/);
+    assert.equal(existsSync(profileSyncStateFileForPort(65402)), false);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    if (previousCacheDir === undefined) delete process.env.BROWSER_TOOLS_CACHE_DIR;
+    else process.env.BROWSER_TOOLS_CACHE_DIR = previousCacheDir;
     rmSync(tmp, { recursive: true, force: true });
   }
 });
@@ -203,6 +412,67 @@ test('profile sync plan is allow-listed to auth and browser state, not whole pro
   assert.throws(() => validateProfileName('nested/profile'), /Invalid Chrome profile folder name/);
 });
 
+test('pruneChromeClones removes stale clone artifacts and preserves non-clone cache files', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'bt-prune-'));
+  const previous = process.env.BROWSER_TOOLS_CACHE_DIR;
+  process.env.BROWSER_TOOLS_CACHE_DIR = tmp;
+  try {
+    // stale profile clone with full lifecycle + sync-state litter
+    mkdirSync(join(tmp, 'chrome-data-9601'));
+    writeFileSync(join(tmp, 'chrome-data-9601', 'Local State'), '{}');
+    writeFileSync(join(tmp, 'chrome-9601.pid'), '123');
+    writeFileSync(join(tmp, 'chrome-9601.json'), '{}');
+    writeFileSync(join(tmp, 'chrome-profile-sync-9601.json'), '{}');
+    // stale fresh (no-auth) clone
+    mkdirSync(join(tmp, 'chrome-fresh-9602'));
+    // orphan sync-state json with no matching clone dir
+    writeFileSync(join(tmp, 'chrome-profile-sync-9603.json'), '{}');
+    // non-clone cache entries that must survive
+    writeFileSync(join(tmp, 'ai-chat-browser.json'), '{}');
+    mkdirSync(join(tmp, 'ai-chat-conversations'));
+
+    // dry run reports work but deletes nothing
+    const dry = pruneChromeClones({ dryRun: true });
+    assert.equal(dry.removed.length, 3);
+    assert.ok(existsSync(join(tmp, 'chrome-data-9601')));
+    assert.ok(existsSync(join(tmp, 'chrome-profile-sync-9603.json')));
+
+    const result = pruneChromeClones();
+    assert.equal(result.removed.length, 3);
+    assert.ok(!existsSync(join(tmp, 'chrome-data-9601')));
+    assert.ok(!existsSync(join(tmp, 'chrome-9601.pid')));
+    assert.ok(!existsSync(join(tmp, 'chrome-9601.json')));
+    assert.ok(!existsSync(join(tmp, 'chrome-profile-sync-9601.json')));
+    assert.ok(!existsSync(join(tmp, 'chrome-fresh-9602')));
+    assert.ok(!existsSync(join(tmp, 'chrome-profile-sync-9603.json')));
+    // non-clone files preserved
+    assert.ok(existsSync(join(tmp, 'ai-chat-browser.json')));
+    assert.ok(existsSync(join(tmp, 'ai-chat-conversations')));
+  } finally {
+    if (previous === undefined) delete process.env.BROWSER_TOOLS_CACHE_DIR;
+    else process.env.BROWSER_TOOLS_CACHE_DIR = previous;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('pruneChromeClones keeps the ports listed in keepPorts (protects an in-progress start)', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'bt-prune-keep-'));
+  const previous = process.env.BROWSER_TOOLS_CACHE_DIR;
+  process.env.BROWSER_TOOLS_CACHE_DIR = tmp;
+  try {
+    mkdirSync(join(tmp, 'chrome-data-9611'));
+    mkdirSync(join(tmp, 'chrome-data-9612'));
+    const result = pruneChromeClones({ keepPorts: [9611] });
+    assert.ok(existsSync(join(tmp, 'chrome-data-9611')), 'kept port must survive');
+    assert.ok(!existsSync(join(tmp, 'chrome-data-9612')), 'other stale clone must be removed');
+    assert.equal(result.removed.length, 1);
+  } finally {
+    if (previous === undefined) delete process.env.BROWSER_TOOLS_CACHE_DIR;
+    else process.env.BROWSER_TOOLS_CACHE_DIR = previous;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('managedChromeCommandSafety refuses main Chrome and accepts only exact managed state', () => {
   const state = {
     managedBy: 'browser-tools',
@@ -224,6 +494,29 @@ test('managedChromeCommandSafety refuses main Chrome and accepts only exact mana
   assert.equal(managedChromeCommandSafety({ pid: 123, port: 9222, state, command: managedCommand }).ok, true);
 });
 
+test('startChrome fails invalid Chrome binary without leaving lifecycle files or lock', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'browser-start-missing-bin-test-'));
+  const cacheDir = join(tmp, 'cache');
+  const port = 65405;
+  const previousChromeBin = process.env.BROWSER_TOOLS_CHROME_BIN;
+  const previousCacheDir = process.env.BROWSER_TOOLS_CACHE_DIR;
+  try {
+    process.env.BROWSER_TOOLS_CHROME_BIN = join(tmp, 'missing-chrome');
+    process.env.BROWSER_TOOLS_CACHE_DIR = cacheDir;
+
+    await assert.rejects(() => startChrome({ port, ownerToken: 'token-a' }), /Chrome binary not found/);
+    assert.equal(existsSync(pidFileForPort(port)), false);
+    assert.equal(existsSync(stateFileForPort(port)), false);
+    assert.equal(existsSync(portLockDirForPort(port)), false);
+  } finally {
+    if (previousChromeBin === undefined) delete process.env.BROWSER_TOOLS_CHROME_BIN;
+    else process.env.BROWSER_TOOLS_CHROME_BIN = previousChromeBin;
+    if (previousCacheDir === undefined) delete process.env.BROWSER_TOOLS_CACHE_DIR;
+    else process.env.BROWSER_TOOLS_CACHE_DIR = previousCacheDir;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('chromeLaunchArgs keeps fresh and profile launches separate and marks managed browsers', () => {
   const fresh = chromeLaunchArgs({ port: 9223, managedToken: 'token-1' });
   assert.ok(fresh.includes('--remote-debugging-port=9223'));
@@ -233,6 +526,8 @@ test('chromeLaunchArgs keeps fresh and profile launches separate and marks manag
   assert.ok(fresh.includes('--disable-sync'));
   assert.equal(fresh.some((arg) => arg.startsWith('--profile-directory=')), false);
 
+  assert.equal(fresh.includes('--headless=new'), false);
+
   const profiled = chromeLaunchArgs({ port: 9224, profileName: 'Work Profile', managedToken: 'token-2' });
   assert.ok(profiled.includes('--remote-debugging-port=9224'));
   assert.ok(profiled.includes(`--user-data-dir=${profileDataDirForPort(9224)}`));
@@ -240,6 +535,47 @@ test('chromeLaunchArgs keeps fresh and profile launches separate and marks manag
   assert.ok(profiled.includes('--pi-browser-tools-managed=token-2'));
   assert.equal(profiled.includes('--disable-extensions'), false);
   assert.ok(profiled.includes('--disable-sync'));
+  assert.equal(profiled.includes('--headless=new'), false);
+});
+
+test('chromeUserAgentForMajor builds a normal Chrome UA without the headless marker', () => {
+  const ua = chromeUserAgentForMajor(150);
+  assert.match(ua, /Chrome\/150\.0\.0\.0 Safari\/537\.36$/);
+  // The whole point of the override is to not look like headless.
+  assert.equal(/Headless/i.test(ua), false);
+  // No machine-specific data belongs in the UA template.
+  assert.equal(chromeUserAgentForMajor(0), null);
+  assert.equal(chromeUserAgentForMajor(null), null);
+  assert.equal(chromeUserAgentForMajor('abc'), null);
+});
+
+test('chromeLaunchArgs adds new headless only when requested and stays compatible with safety checks', () => {
+  const headlessArgs = chromeLaunchArgs({ port: 9225, profileName: 'Work Profile', managedToken: 'token-3', headless: true });
+  assert.ok(headlessArgs.includes('--headless=new'));
+  // Old --headless is a separate engine that ignores extensions, so it must never appear.
+  assert.equal(headlessArgs.includes('--headless'), false);
+  assert.equal(headlessArgs.includes('--headless=old'), false);
+  assert.ok(headlessArgs.includes('--profile-directory=Work Profile'));
+
+  // When a UA override is supplied (headless launches pass one), it is present browser-wide.
+  const ua = chromeUserAgentForMajor(150);
+  const maskedArgs = chromeLaunchArgs({ port: 9226, managedToken: 'token-4', headless: true, userAgent: ua });
+  assert.ok(maskedArgs.includes(`--user-agent=${ua}`));
+  // A windowed launch supplies no override, so it keeps the real Chrome UA untouched.
+  const windowedArgs = chromeLaunchArgs({ port: 9227, managedToken: 'token-5' });
+  assert.equal(windowedArgs.some((arg) => arg.startsWith('--user-agent=')), false);
+
+  // A headless launch must still pass the managed-process safety gate that stop/connect rely on.
+  const state = {
+    managedBy: 'browser-tools',
+    pid: 321,
+    port: 9225,
+    userDataDir: profileDataDirForPort(9225),
+    managedToken: 'token-3',
+    args: headlessArgs,
+  };
+  const managedCommand = `${CHROME_BIN} ${headlessArgs.join(' ')}`;
+  assert.equal(managedChromeCommandSafety({ pid: 321, port: 9225, state, command: managedCommand }).ok, true);
 });
 
 test('activePage and dedicatedPage concentrate page selection behavior', async () => {

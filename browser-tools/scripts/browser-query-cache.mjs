@@ -22,10 +22,22 @@ function nowStamp() {
 }
 
 function isFreshEnough(createdAt, ttlSeconds) {
-  if (!ttlSeconds) return true;
+  if (ttlSeconds === null || ttlSeconds === undefined) return true;
+  if (!Number.isFinite(ttlSeconds) || ttlSeconds < 0) return false;
   const ts = Date.parse(createdAt || '');
   if (!Number.isFinite(ts)) return false;
   return Date.now() - ts <= ttlSeconds * 1000;
+}
+
+function parseTtlSeconds(value = process.env.BROWSER_QUERY_TTL_SECONDS) {
+  if (value === undefined || value === null) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const ttlSeconds = Number(raw);
+  if (!Number.isFinite(ttlSeconds) || ttlSeconds < 0) {
+    throw new Error(`Invalid BROWSER_QUERY_TTL_SECONDS: expected a non-negative number of seconds, got "${value}"`);
+  }
+  return ttlSeconds;
 }
 
 export function getCacheConfig() {
@@ -42,7 +54,7 @@ export function getCacheConfig() {
     stepId: process.env.BROWSER_QUERY_STEP_ID || null,
     stepLabel: process.env.BROWSER_QUERY_STEP_LABEL || null,
     runDir: process.env.BROWSER_QUERY_RUN_DIR || null,
-    ttlSeconds: process.env.BROWSER_QUERY_TTL_SECONDS ? Number(process.env.BROWSER_QUERY_TTL_SECONDS) : null,
+    ttlSeconds: parseTtlSeconds(),
   };
 }
 
