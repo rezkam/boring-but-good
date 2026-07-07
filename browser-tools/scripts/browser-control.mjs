@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import {
+  accessSync,
   chmodSync,
+  constants as fsConstants,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -11,7 +13,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import puppeteer from 'puppeteer-core';
 
 export const DEFAULT_PORT = 9222;
@@ -22,6 +24,9 @@ export const DEFAULT_CHROME_BIN = '/Applications/Google Chrome.app/Contents/MacO
 export const DEFAULT_CHROME_SRC = join(homedir(), 'Library', 'Application Support', 'Google', 'Chrome');
 export const DEFAULT_CACHE_DIR = join(homedir(), '.cache', 'pi-browser-tools');
 export const DEFAULT_ARTIFACT_DIR = tmpdir();
+
+// Legacy path constants are retained for older scripts that imported the pre-config Browser Tools API.
+// New runtime code should use browserToolsRuntimeConfig() and path helpers so env and private config overrides are honored.
 export const CHROME_BIN = DEFAULT_CHROME_BIN;
 export const CHROME_SRC = DEFAULT_CHROME_SRC;
 export const CACHE_DIR = DEFAULT_CACHE_DIR;
@@ -49,6 +54,7 @@ export function browserToolsConfigFile(configDir = browserToolsConfigDir()) {
   return join(resolveBrowserToolsConfigDir(configDir), 'config.json');
 }
 
+// Compatibility alias for the earlier Chrome profiles config file name.
 export function browserToolsProfilesConfigFile(configDir = browserToolsConfigDir()) {
   return browserToolsConfigFile(configDir);
 }
@@ -162,6 +168,27 @@ export function optionValue(args, name, fallback = null) {
   return value;
 }
 
+export function requiredOptionValue(args, name, fallback = null) {
+  const i = args.indexOf(name);
+  if (i === -1) return fallback;
+  const value = args[i + 1];
+  if (value === undefined || value.startsWith('--')) throw new Error(`Missing value after ${name}`);
+  return value;
+}
+
+export function parsePositiveIntegerOption(args, name, fallback) {
+  const value = optionValue(args, name, fallback);
+  if (value === fallback) return fallback;
+  if (value === true) throw new Error(`Missing ${name} value: expected a positive integer`);
+
+  const normalized = String(value).trim();
+  if (!/^[1-9]\d*$/.test(normalized)) {
+    throw new Error(`Invalid ${name} value: expected a positive integer, got "${value}"`);
+  }
+
+  return Number.parseInt(normalized, 10);
+}
+
 export function hasFlag(args, name) {
   return args.includes(name);
 }
@@ -175,7 +202,7 @@ export function normalizePort(value = DEFAULT_PORT) {
 }
 
 export function parsePort(args, fallback = DEFAULT_PORT) {
-  return normalizePort(optionValue(args, '--port', fallback));
+  return normalizePort(requiredOptionValue(args, '--port', fallback));
 }
 
 function normalizeOwnerValue(value) {
@@ -195,11 +222,12 @@ export function ownerTokenHash(ownerToken) {
 }
 
 export function parseOwnerToken(args, fallback = process.env[OWNER_TOKEN_ENV] || null) {
-  return normalizeOwnerValue(optionValue(args, '--owner-token', fallback));
+  return normalizeOwnerValue(requiredOptionValue(args, '--owner-token', fallback));
 }
 
 export function parseOwnerId(args, fallback = process.env[OWNER_ID_ENV] || null) {
-  return normalizeOwnerValue(optionValue(args, '--owner-id', optionValue(args, '--agent-id', fallback)));
+  if (args.includes('--owner-id')) return normalizeOwnerValue(requiredOptionValue(args, '--owner-id', fallback));
+  return normalizeOwnerValue(requiredOptionValue(args, '--agent-id', fallback));
 }
 
 export function stripBrowserSessionArgs(args, { stripPort = true, stripPositionalPort = false } = {}) {
@@ -320,12 +348,8 @@ export function profileAuthStateReady(profileDir) {
 }
 
 export function readProfileSyncState(port = null) {
-  try {
-    const stateFile = port === null ? profileSyncStateFileForPort(DEFAULT_PORT) : profileSyncStateFileForPort(port);
-    return JSON.parse(readFileSync(stateFile, 'utf-8'));
-  } catch {
-    return null;
-  }
+  const stateFile = port === null ? profileSyncStateFileForPort(DEFAULT_PORT) : profileSyncStateFileForPort(port);
+  return safeReadJson(stateFile);
 }
 
 export function readManagedStateForPort(port = DEFAULT_PORT) {
@@ -416,8 +440,12 @@ export function validateProfileName(profileName) {
 function safeReadJson(file) {
   try {
     return JSON.parse(readFileSync(file, 'utf-8'));
-  } catch {
-    return null;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    if (error instanceof SyntaxError) {
+      throw new Error(`Failed to parse JSON file ${file}: ${error.message}`, { cause: error });
+    }
+    throw new Error(`Failed to read JSON file ${file}: ${error.message}`, { cause: error });
   }
 }
 
@@ -492,6 +520,8 @@ export function buildBrowserToolsConfig({ sourceDir = browserToolsChromeSourceDi
   };
 }
 
+// Compatibility wrappers for the earlier Chrome profiles config API.
+// Keep them as direct aliases to the Browser Tools config layer.
 export function buildChromeProfilesConfig(options = {}) {
   return buildBrowserToolsConfig(options);
 }
@@ -515,11 +545,12 @@ export function writeChromeProfilesConfig(config, options = {}) {
   return writeBrowserToolsConfig(config, options);
 }
 
-export function ensureBrowserToolsConfig({ configDir = browserToolsConfigDir(), sourceDir = browserToolsChromeSourceDir(), refresh = false } = {}) {
+export function ensureBrowserToolsConfig({ configDir = browserToolsConfigDir(), sourceDir = undefined, refresh = false } = {}) {
   const effectiveConfigDir = resolveBrowserToolsConfigDir(configDir);
   const existing = readBrowserToolsConfig({ configDir: effectiveConfigDir });
   if (!refresh && existing?.version === 1 && existing.profiles && existing.aliases && existing.taskProfiles && existing.directories && existing.browser) return existing;
-  return writeBrowserToolsConfig(buildBrowserToolsConfig({ sourceDir, existing }), { configDir: effectiveConfigDir });
+  const effectiveSourceDir = sourceDir ?? browserToolsChromeSourceDir({ configDir: effectiveConfigDir });
+  return writeBrowserToolsConfig(buildBrowserToolsConfig({ sourceDir: effectiveSourceDir, existing }), { configDir: effectiveConfigDir });
 }
 
 export function ensureChromeProfilesConfig(options = {}) {
@@ -531,7 +562,7 @@ export function activeChromeProfiles(options = {}) {
   return Object.values(config.profiles || {}).filter((profile) => profile.lastActive);
 }
 
-export function resolveChromeProfileReference(profileRef, { configDir = browserToolsConfigDir(), sourceDir = browserToolsChromeSourceDir(), refresh = false } = {}) {
+export function resolveChromeProfileReference(profileRef, { configDir = browserToolsConfigDir(), sourceDir = undefined, refresh = false } = {}) {
   validateProfileName(profileRef);
   const config = ensureBrowserToolsConfig({ configDir, sourceDir, refresh });
   const profiles = config.profiles || {};
@@ -554,7 +585,7 @@ export function resolveChromeProfileReference(profileRef, { configDir = browserT
   return validateProfileName(profileRef);
 }
 
-export function setTaskProfiles(taskName, profileRefs, { configDir = browserToolsConfigDir(), sourceDir = browserToolsChromeSourceDir() } = {}) {
+export function setTaskProfiles(taskName, profileRefs, { configDir = browserToolsConfigDir(), sourceDir = undefined } = {}) {
   if (!taskName || typeof taskName !== 'string') throw new Error('Missing task name');
   const profiles = profileRefs.map((profileRef) => resolveChromeProfileReference(profileRef, { configDir, sourceDir }));
   if (!profiles.length) throw new Error('At least one --profile is required');
@@ -569,7 +600,7 @@ export function setTaskProfiles(taskName, profileRefs, { configDir = browserTool
   return config.taskProfiles[taskName];
 }
 
-export function taskProfileConfig(taskName, { configDir = browserToolsConfigDir(), sourceDir = browserToolsChromeSourceDir() } = {}) {
+export function taskProfileConfig(taskName, { configDir = browserToolsConfigDir(), sourceDir = undefined } = {}) {
   if (!taskName) return null;
   const config = ensureBrowserToolsConfig({ configDir, sourceDir });
   return config.taskProfiles?.[taskName] || null;
@@ -578,6 +609,24 @@ export function taskProfileConfig(taskName, { configDir = browserToolsConfigDir(
 export function resolveTaskProfile(taskName, options = {}) {
   const entry = taskProfileConfig(taskName, options);
   return entry?.defaultProfile || entry?.profiles?.[0] || null;
+}
+
+export function resolveStartProfileName({
+  profileName = null,
+  taskName = null,
+  defaultProfileName = null,
+  configDir = browserToolsConfigDir(),
+  sourceDir = undefined,
+  refresh = false,
+} = {}) {
+  const taskProfileName = !profileName && taskName ? resolveTaskProfile(taskName, { configDir, sourceDir }) : null;
+  const requestedProfileName = profileName || taskProfileName || defaultProfileName || null;
+  const resolvedProfileName = requestedProfileName ? resolveChromeProfileReference(requestedProfileName, { configDir, sourceDir, refresh }) : null;
+  return {
+    requestedProfileName,
+    resolvedProfileName,
+    source: profileName ? 'explicit' : (taskProfileName ? 'task' : (defaultProfileName ? 'default' : 'fresh')),
+  };
 }
 
 export function profileSyncItems() {
@@ -589,6 +638,18 @@ export function profileSyncRsyncCommands(profileName, { sourceDir = browserTools
   const sourceProfileDir = join(sourceDir, safeProfileName);
   const destProfileDir = join(destDir, safeProfileName);
   const commands = [];
+
+  if (checkExists) {
+    let sourceProfileStat = null;
+    try {
+      sourceProfileStat = statSync(sourceProfileDir);
+    } catch {
+      throw new Error(`Chrome profile folder not found: ${sourceProfileDir}`);
+    }
+    if (!sourceProfileStat.isDirectory()) {
+      throw new Error(`Chrome profile folder is not a directory: ${sourceProfileDir}`);
+    }
+  }
 
   const localStateSource = join(sourceDir, 'Local State');
   if (!checkExists || existsSync(localStateSource)) {
@@ -620,25 +681,24 @@ export function syncChromeProfile(profileName, { force = false, port = DEFAULT_P
     return { status: 'cached', profileDir: destDir, state: readProfileSyncState(port) };
   }
 
+  const commands = profileSyncRsyncCommands(profileName, { sourceDir, destDir, checkExists: true });
+
   rmSync(destDir, { recursive: true, force: true });
   mkdirSync(destDir, { recursive: true });
-
-  const commands = profileSyncRsyncCommands(profileName, { sourceDir, destDir, checkExists: true });
   const results = [];
   const copiedItems = [];
   for (const command of commands) {
     mkdirSync(command.dest, { recursive: true });
     const result = spawnSync('rsync', command.args, { stdio: 'inherit' });
     if (result.error) throw result.error;
+    if (result.signal) throw new Error(`rsync failed for ${command.item}: terminated by signal ${result.signal}`);
+    if (result.status !== 0) throw new Error(`rsync failed for ${command.item}: exit status ${result.status}`);
     results.push(result);
     copiedItems.push(command.item);
-    if (result.status && result.status !== 0) {
-      console.error(`[browser-control] Profile sync step returned ${result.status}; continuing with copied profile`);
-    }
   }
 
   removeChromeProfileLocks(destDir);
-  const rsyncStatuses = results.map((result) => result.status || 0);
+  const rsyncStatuses = results.map((result) => result.status);
   const state = {
     profileName,
     profileDir: destDir,
@@ -678,7 +738,7 @@ export function removeChromeProfileLocks(profileDir) {
   }
 }
 
-export function chromeLaunchArgs({ port = DEFAULT_PORT, profileName = null, managedToken = null, userDataDir = null } = {}) {
+export function chromeLaunchArgs({ port = DEFAULT_PORT, profileName = null, managedToken = null, userDataDir = null, headless = false, userAgent = null } = {}) {
   const normalizedPort = normalizePort(port);
   const launchUserDataDir = userDataDir || (profileName ? profileDataDirForPort(normalizedPort) : freshProfileDirForPort(normalizedPort));
   const args = [
@@ -688,9 +748,39 @@ export function chromeLaunchArgs({ port = DEFAULT_PORT, profileName = null, mana
     '--no-default-browser-check',
     '--disable-sync',
   ];
+  // New headless runs the full browser (extensions and the copied profile still load) without opening
+  // a window. Old --headless is a separate lightweight engine that ignores extensions, so keep =new.
+  if (headless) args.push('--headless=new');
+  // A headless launch otherwise advertises a "HeadlessChrome" User-Agent. When the copied profile is
+  // signed in to Google, that headless fingerprint trips Google's session-theft protection and logs the
+  // source profile out, while a windowed launch (normal Chrome UA) does not. Present the normal UA so a
+  // headless clone matches a windowed one. Applied browser-wide so account reconcile requests use it too.
+  if (userAgent) args.push(`--user-agent=${userAgent}`);
   if (managedToken) args.push(`--pi-browser-tools-managed=${managedToken}`);
   if (profileName) args.push(`--profile-directory=${profileName}`);
   return args;
+}
+
+export function detectChromeMajorVersion(chromeBin = browserToolsChromeBin()) {
+  try {
+    const result = spawnSync(chromeBin, ['--version'], { encoding: 'utf-8' });
+    if (result.status !== 0 || !result.stdout) return null;
+    const match = result.stdout.match(/(\d+)\.\d+\.\d+\.\d+/);
+    return match ? Number.parseInt(match[1], 10) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Build the normal reduced Chrome User-Agent for a major version. Chrome freezes the platform token,
+// so this matches what a windowed macOS Chrome sends. It carries no machine-specific data.
+export function chromeUserAgentForMajor(major) {
+  if (!Number.isInteger(major) || major < 1) return null;
+  return `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`;
+}
+
+export function headlessUserAgent(chromeBin = browserToolsChromeBin()) {
+  return chromeUserAgentForMajor(detectChromeMajorVersion(chromeBin));
 }
 
 export function managedBrowserForUserDataDir(userDataDir) {
@@ -716,24 +806,63 @@ export function managedBrowserForUserDataDir(userDataDir) {
   return null;
 }
 
-export function launchChrome({ port = DEFAULT_PORT, profileName = null, userDataDir = null, ownerToken = null, ownerId = null } = {}) {
+function chromeBinCandidates(chromeBin) {
+  if (String(chromeBin).includes('/')) return [chromeBin];
+  const pathDirs = (process.env.PATH || '').split(delimiter).filter(Boolean);
+  return pathDirs.length ? pathDirs.map((dir) => join(dir, chromeBin)) : [chromeBin];
+}
+
+function assertChromeBinaryLaunchable(chromeBin) {
+  const candidates = chromeBinCandidates(chromeBin);
+  let exists = false;
+  for (const candidate of candidates) {
+    try {
+      const stat = statSync(candidate);
+      exists = true;
+      if (!stat.isFile()) continue;
+      accessSync(candidate, fsConstants.X_OK);
+      return;
+    } catch {
+      // Try the next PATH candidate or report a single actionable error below.
+    }
+  }
+
+  const problem = exists ? 'Chrome binary is not executable' : 'Chrome binary not found';
+  throw new Error(`${problem}: ${chromeBin}. Set BROWSER_TOOLS_CHROME_BIN or browser.chromeBin in Browser Tools config.`);
+}
+
+export function launchChrome({ port = DEFAULT_PORT, profileName = null, userDataDir = null, ownerToken = null, ownerId = null, headless = false } = {}) {
   ensureCacheDir();
   const normalizedPort = normalizePort(port);
   const launchUserDataDir = userDataDir || (profileName ? profileDataDirForPort(normalizedPort) : freshProfileDirForPort(normalizedPort));
   const managedToken = randomUUID();
   const effectiveOwnerToken = normalizeOwnerValue(ownerToken) || generateOwnerToken();
-  const args = chromeLaunchArgs({ port: normalizedPort, profileName, managedToken, userDataDir: launchUserDataDir });
-  const proc = spawn(browserToolsChromeBin(), args, {
+  const chromeBin = browserToolsChromeBin();
+  const userAgent = headless ? headlessUserAgent(chromeBin) : null;
+  const args = chromeLaunchArgs({ port: normalizedPort, profileName, managedToken, userDataDir: launchUserDataDir, headless, userAgent });
+  assertChromeBinaryLaunchable(chromeBin);
+  const pidFile = pidFileForPort(normalizedPort);
+  const stateFile = stateFileForPort(normalizedPort);
+  const proc = spawn(chromeBin, args, {
     detached: true,
     stdio: 'ignore',
   });
-  writePrivateFile(pidFileForPort(normalizedPort), String(proc.pid));
-  writePrivateFile(stateFileForPort(normalizedPort), JSON.stringify({
+  proc.once('error', (error) => {
+    rmSync(pidFile, { force: true });
+    rmSync(stateFile, { force: true });
+    console.error(`[browser-control] Chrome spawn failed: ${error.message}`);
+  });
+  if (!Number.isInteger(proc.pid)) {
+    throw new Error(`Chrome failed to start: no child process PID for ${chromeBin}`);
+  }
+  writePrivateFile(pidFile, String(proc.pid));
+  writePrivateFile(stateFile, JSON.stringify({
     managedBy: 'browser-tools',
     pid: proc.pid,
     port: normalizedPort,
     profileName: profileName || null,
     userDataDir: launchUserDataDir,
+    headless: Boolean(headless),
     managedToken,
     ...buildOwnerState({ ownerToken: effectiveOwnerToken, ownerId }),
     args,
@@ -765,18 +894,18 @@ export async function startChrome({
   port = DEFAULT_PORT,
   profileName = null,
   taskName = null,
+  defaultProfileName = null,
   forceProfileSync = false,
   autoAllocatePort = false,
   ownerToken = null,
   ownerId = null,
+  headless = false,
 } = {}) {
   let normalizedPort = normalizePort(port);
   const providedOwnerToken = normalizeOwnerValue(ownerToken);
   const effectiveOwnerToken = providedOwnerToken || generateOwnerToken();
   const normalizedOwnerId = normalizeOwnerValue(ownerId);
-  const taskProfileName = !profileName && taskName ? resolveTaskProfile(taskName) : null;
-  const requestedProfileName = profileName || taskProfileName;
-  const resolvedProfileName = requestedProfileName ? resolveChromeProfileReference(requestedProfileName) : null;
+  const { requestedProfileName, resolvedProfileName } = resolveStartProfileName({ profileName, taskName, defaultProfileName });
   ensureCacheDir();
 
   while (true) {
@@ -808,6 +937,7 @@ export async function startChrome({
           return {
             status: 'reused',
             port: normalizedPort,
+            headless: Boolean(state?.headless),
             ownerToken: effectiveOwnerToken,
             ownerId: ownership.ownerId,
             ownerTokenGenerated: false,
@@ -842,6 +972,14 @@ export async function startChrome({
         );
       }
 
+      // Sweep clones left behind by browsers that are no longer running, keeping this port's copy
+      // so an in-progress reuse is never deleted. Best-effort: cleanup must not block a launch.
+      try {
+        pruneChromeClones({ keepPorts: [normalizedPort] });
+      } catch {
+        // Ignore cleanup failures.
+      }
+
       let profileSync = null;
       if (resolvedProfileName) {
         const willSync = forceProfileSync || !profileCopyReady(resolvedProfileName, userDataDir);
@@ -859,6 +997,7 @@ export async function startChrome({
         userDataDir,
         ownerToken: effectiveOwnerToken,
         ownerId: normalizedOwnerId,
+        headless,
       });
       const ready = await waitForChromeReady(normalizedPort, { timeoutMs: CHROME_READY_TIMEOUT_MS });
       if (!ready) {
@@ -873,6 +1012,7 @@ export async function startChrome({
         requestedProfileName,
         taskName,
         profileSync,
+        headless: Boolean(headless),
         ownerToken: effectiveOwnerToken,
         ownerId: normalizedOwnerId,
         ownerTokenGenerated: !providedOwnerToken,
@@ -911,6 +1051,7 @@ export function stopChrome({ port = DEFAULT_PORT, clean = false, dryRun = false,
     let cleaned = false;
     if (clean && isBrowserToolsUserDataDir(state?.userDataDir)) {
       rmSync(state.userDataDir, { recursive: true, force: true });
+      rmSync(profileSyncStateFileForPort(normalizedPort), { force: true });
       cleaned = true;
     }
     return { status: 'already-gone', port: normalizedPort, pid, cleaned };
@@ -975,18 +1116,64 @@ export function stopChrome({ port = DEFAULT_PORT, clean = false, dryRun = false,
   let cleaned = false;
   if (clean && isBrowserToolsUserDataDir(state?.userDataDir)) {
     rmSync(state.userDataDir, { recursive: true, force: true });
+    rmSync(profileSyncStateFileForPort(normalizedPort), { force: true });
     cleaned = true;
   }
 
   return { status, port: normalizedPort, pid, cleaned, error };
 }
 
-function readManagedState(stateFile) {
+// Sweep cached profile clones that are not currently in use by a running managed Chrome.
+// Removes the clone data dir plus its per-port sync-state and lifecycle files. A clone whose
+// user-data-dir is still owned by a live managed Chrome is kept. Never touches non-clone cache
+// entries (for example ai-chat data), because every path comes from the per-port helpers.
+export function pruneChromeClones({ dryRun = false, keepPorts = [] } = {}) {
+  const cacheDir = browserToolsCacheDir();
+  const keep = new Set(keepPorts.map((value) => Number.parseInt(value, 10)));
+  const removed = [];
+  const kept = [];
+  let entries;
   try {
-    return JSON.parse(readFileSync(stateFile, 'utf-8'));
+    entries = readdirSync(cacheDir, { withFileTypes: true });
   } catch {
-    return null;
+    return { removed, kept, dryRun, cacheDir };
   }
+
+  const ports = new Set();
+  for (const entry of entries) {
+    let match = entry.name.match(/^chrome-(?:data|fresh)-(\d+)$/);
+    if (match && entry.isDirectory()) { ports.add(Number.parseInt(match[1], 10)); continue; }
+    match = entry.name.match(/^chrome-profile-sync-(\d+)\.json$/);
+    if (match && entry.isFile()) { ports.add(Number.parseInt(match[1], 10)); continue; }
+    match = entry.name.match(/^chrome-(\d+)\.(?:pid|json)$/);
+    if (match && entry.isFile()) ports.add(Number.parseInt(match[1], 10));
+  }
+
+  for (const port of [...ports].sort((a, b) => a - b)) {
+    if (keep.has(port)) {
+      kept.push({ port, reason: 'kept-port' });
+      continue;
+    }
+    const dataDir = profileDataDirForPort(port);
+    const freshDir = freshProfileDirForPort(port);
+    const activeDir = existsSync(dataDir) ? dataDir : (existsSync(freshDir) ? freshDir : null);
+    const running = activeDir ? managedBrowserForUserDataDir(activeDir) : null;
+    if (running) {
+      kept.push({ port, reason: 'running', pid: running.pid, dir: activeDir });
+      continue;
+    }
+    const targets = [dataDir, freshDir, pidFileForPort(port), stateFileForPort(port), profileSyncStateFileForPort(port)]
+      .filter((path) => existsSync(path));
+    if (!targets.length) continue;
+    if (!dryRun) for (const path of targets) rmSync(path, { recursive: true, force: true });
+    removed.push({ port, paths: targets });
+  }
+
+  return { removed, kept, dryRun, cacheDir };
+}
+
+function readManagedState(stateFile) {
+  return safeReadJson(stateFile);
 }
 
 function commandForPid(pid) {

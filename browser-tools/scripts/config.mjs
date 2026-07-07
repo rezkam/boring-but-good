@@ -9,7 +9,7 @@ import {
   browserToolsConfigFile,
   ensureBrowserToolsConfig,
   hasFlag,
-  optionValue,
+  requiredOptionValue,
   readBrowserToolsConfig,
   setTaskProfiles,
 } from './browser-control.mjs';
@@ -104,7 +104,7 @@ try {
 
   const refresh = hasFlag(args, '--refresh');
   const json = hasFlag(args, '--json');
-  const configDir = optionValue(args, '--config-dir', undefined);
+  const configDir = requiredOptionValue(args, '--config-dir', undefined);
 
   if (command === 'profiles') {
     const config = ensureBrowserToolsConfig({ configDir, refresh });

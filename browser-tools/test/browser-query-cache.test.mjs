@@ -44,6 +44,15 @@ test('cache is disabled unless BROWSER_QUERY_CACHE_DIR is set', async () => {
   });
 });
 
+test('invalid cache TTL values fail loudly instead of disabling expiration', async () => {
+  await withCacheEnv({
+    BROWSER_QUERY_CACHE_DIR: '/tmp/browser-query-cache-test',
+    BROWSER_QUERY_TTL_SECONDS: 'not-a-number',
+  }, () => {
+    assert.throws(() => getCacheConfig(), /Invalid BROWSER_QUERY_TTL_SECONDS/);
+  });
+});
+
 test('writeCachedResponse and readCachedResponse round trip output, raw text, metadata, and invocation records', async () => {
   const cacheDir = mkdtempSync(join(tmpdir(), 'browser-query-cache-'));
   const runDir = mkdtempSync(join(tmpdir(), 'browser-query-run-'));

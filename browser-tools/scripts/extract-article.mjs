@@ -3,14 +3,19 @@
  * Extract full article text from the current tab.
  * Usage: ./extract-article.js [--port 9222] [--owner-token token] [--chars 6000]
  */
-import { activePage, parseOwnerToken, parsePort } from './browser-control.mjs';
+import { activePage, parseOwnerToken, parsePort, parsePositiveIntegerOption } from './browser-control.mjs';
 import { runBrowserResource } from './resource-helper.mjs';
 
 const args = process.argv.slice(2);
+let maxChars;
+try {
+  maxChars = parsePositiveIntegerOption(args, '--chars', 5000);
+} catch (error) {
+  console.error(error.message);
+  process.exit(1);
+}
 const port = parsePort(args);
 const ownerToken = parseOwnerToken(args);
-const charsI = args.indexOf("--chars");
-const maxChars = charsI !== -1 ? parseInt(args[charsI + 1], 10) : 5000;
 
 await runBrowserResource({
   port,

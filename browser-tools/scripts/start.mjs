@@ -8,34 +8,38 @@
  *   scripts/start.mjs --profile "<Chrome profile folder>"
  *   scripts/start.mjs --profile "<Chrome profile folder>" --sync
  *   scripts/start.mjs --profile "<Chrome profile folder>" --port 9223
- *   scripts/start.mjs --owner-token "$BROWSER_TOOLS_OWNER_TOKEN"
+ *   scripts/start.mjs --headless        (run without opening a browser window)
+ *   BROWSER_TOOLS_OWNER_TOKEN="<owner token>" scripts/start.mjs
  */
 
-import { hasFlag, optionValue, parseOwnerId, parseOwnerToken, parsePort, startChrome } from './browser-control.mjs';
+import { hasFlag, requiredOptionValue, parseOwnerId, parseOwnerToken, parsePort, startChrome } from './browser-control.mjs';
 
 const args = process.argv.slice(2);
-const profileName = optionValue(args, '--profile', null);
-const taskName = optionValue(args, '--task', null);
+const profileName = requiredOptionValue(args, '--profile', null);
+const taskName = requiredOptionValue(args, '--task', null);
 const forceProfileSync = hasFlag(args, '--sync');
+const headless = hasFlag(args, '--headless');
 const explicitPort = args.includes('--port');
 const port = parsePort(args);
 const ownerToken = parseOwnerToken(args);
 const ownerId = parseOwnerId(args);
 
 try {
-  const result = await startChrome({ port, profileName, taskName, forceProfileSync, autoAllocatePort: !explicitPort, ownerToken, ownerId });
+  const result = await startChrome({ port, profileName, taskName, forceProfileSync, autoAllocatePort: !explicitPort, ownerToken, ownerId, headless });
+  const mode = result.headless ? ' (headless)' : '';
   if (result.status === 'reused') {
-    console.log(`✓ Chrome already running on :${result.port}; reusing owned instance`);
+    console.log(`✓ Chrome already running on :${result.port}${mode}; reusing owned instance`);
   } else if (result.requestedProfileName) {
     const resolved = result.profileName && result.profileName !== result.requestedProfileName ? ` resolved to "${result.profileName}"` : '';
     const task = taskName ? ` for task "${taskName}"` : '';
-    console.log(`✓ Chrome ready on :${result.port} with profile "${result.requestedProfileName}"${resolved}${task}`);
+    console.log(`✓ Chrome ready on :${result.port}${mode} with profile "${result.requestedProfileName}"${resolved}${task}`);
   } else {
-    console.log(`✓ Chrome ready on :${result.port} (fresh)`);
+    console.log(`✓ Chrome ready on :${result.port}${mode} (fresh)`);
   }
   if (result.ownerTokenGenerated) {
     console.log(`Owner token: ${result.ownerToken}`);
-    console.log(`Use with follow-up commands: --port ${result.port} --owner-token ${result.ownerToken}`);
+    console.log(`Run: export BROWSER_TOOLS_OWNER_TOKEN="${result.ownerToken}"`);
+    console.log(`Use with follow-up commands: --port ${result.port}`);
   }
 } catch (e) {
   console.error(`✗ ${e.message}`);

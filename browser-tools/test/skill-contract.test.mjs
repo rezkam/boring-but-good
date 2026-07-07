@@ -55,6 +55,26 @@ test('SKILL.md and reference docs document the same public Browser Control and g
     assert.match(skill, new RegExp(script.replace('.', '\\.')));
     assert.match(resourceHelpers, new RegExp(script.replace('.', '\\.')));
   }
+
+  assert.match(skill, /Extract article-like visible links/);
+  assert.match(browserControl, /Extract article-like visible links/);
+  assert.match(resourceHelpers, /Extract article-like visible links and nearby timestamps/);
+});
+
+test('start guidance prefers owner token environment variable over CLI token argument', () => {
+  const startScript = readRelative('scripts/start.mjs');
+
+  assert.match(startScript, /export BROWSER_TOOLS_OWNER_TOKEN/);
+  assert.doesNotMatch(startScript, /--owner-token \$\{result\.ownerToken\}/);
+});
+
+test('Browser Control docs document legacy profile config compatibility', () => {
+  const browserControl = readRelative('references/browser-control.md');
+
+  assert.match(browserControl, /Legacy profile config compatibility/);
+  assert.match(browserControl, /browserToolsProfilesConfigFile/);
+  assert.match(browserControl, /buildChromeProfilesConfig/);
+  assert.match(browserControl, /new code should use `browserToolsRuntimeConfig`/i);
 });
 
 test('all JavaScript modules in the skill pass node syntax validation', () => {
@@ -130,13 +150,19 @@ test('new browser tabs are opened in the background to avoid stealing focus', ()
   assert.deepEqual(offenders, []);
 });
 
-test('documented generic extractors use the shared cache and lifecycle module', () => {
+test('documented current-tab extractors use uncached lifecycle while reusable resources keep cache support', () => {
   const resourceHelper = readRelative('scripts/resource-helper.mjs');
+  const resourceHelpersReference = readRelative('references/resource-helpers.md');
   assert.match(resourceHelper, /readCachedResponse/);
   assert.match(resourceHelper, /writeCachedResponse/);
   assert.match(resourceHelper, /connectBrowser/);
+  assert.match(resourceHelper, /runCachedBrowserResource/);
+  assert.match(resourceHelpersReference, /Current-tab extractors[\s\S]*do not use `BROWSER_QUERY_\*` caching/);
+  assert.match(resourceHelpersReference, /`runCachedBrowserResource`[\s\S]*uses `BROWSER_QUERY_\*` caching/);
 
   for (const script of GENERIC_EXTRACTOR_SCRIPTS) {
-    assert.match(readRelative(script), /runBrowserResource/);
+    const text = readRelative(script);
+    assert.match(text, /runBrowserResource/);
+    assert.doesNotMatch(text, /runCachedBrowserResource/);
   }
 });
