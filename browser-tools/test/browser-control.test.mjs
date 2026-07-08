@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -141,6 +141,23 @@ test('port locks are atomic and releasable', () => {
 
   assert.equal(acquirePortLock(65432, { ownerId: 'agent-b', staleMs: 1000 })?.lockDir, portLockDirForPort(65432));
   rmSync(portLockDirForPort(65432), { recursive: true, force: true });
+});
+
+test('a corrupt lock.json is treated as stale, not a fatal error', () => {
+  const lockDir = portLockDirForPort(65431);
+  rmSync(lockDir, { recursive: true, force: true });
+  mkdirSync(lockDir, { recursive: true });
+  writeFileSync(join(lockDir, 'lock.json'), '{ this is not valid json');
+  // Backdate the lock so it is stale by age; a corrupt lock must then be recovered, never throw.
+  const past = new Date(Date.now() - 3_600_000);
+  utimesSync(lockDir, past, past);
+  try {
+    const lock = acquirePortLock(65431, { ownerId: 'agent-a', staleMs: 1000 });
+    assert.ok(lock, 'a stale corrupt lock should be removed and the port re-acquired');
+    assert.equal(typeof lock.release, 'function');
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
 });
 
 test('per-port user data dirs isolate concurrent managed browsers', () => {

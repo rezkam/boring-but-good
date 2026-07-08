@@ -400,7 +400,15 @@ export function acquirePortLock(port = DEFAULT_PORT, { ownerId = null, staleMs =
       };
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
-      const lockState = safeReadJson(join(lockDir, 'lock.json'));
+      // A start that crashed mid-write can leave a partial or corrupt lock.json. Treat an unreadable
+      // lock as having no metadata rather than throwing, so the age-based staleness check below can
+      // still recover the port (and a fresh, possibly mid-write lock is left alone until it ages out).
+      let lockState = null;
+      try {
+        lockState = safeReadJson(join(lockDir, 'lock.json'));
+      } catch {
+        lockState = null;
+      }
       let stale = false;
       if (lockState?.pid && !processExists(Number(lockState.pid))) stale = true;
       try {
