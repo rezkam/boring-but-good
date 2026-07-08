@@ -67,6 +67,9 @@ try {
     headless,
     autoAllocatePort: true,
     ownerToken,
+    // This check exists to verify a Google-signed-in clone, so it must keep the Google identity;
+    // the default sync strips it, which would make the sign-in check always fail.
+    includeGoogle: true,
   });
   port = started.port;
   log(`✓ Chrome ready on :${port}${started.headless ? ' (headless)' : ''}`);

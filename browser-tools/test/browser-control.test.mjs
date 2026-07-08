@@ -51,6 +51,7 @@ import {
   profileSyncRsyncCommands,
   profileSyncStateFileForPort,
   pruneChromeClones,
+  readProfileSyncState,
   readBrowserToolsConfig,
   readChromeProfilesConfig,
   requiredOptionValue,
@@ -157,6 +158,21 @@ test('a corrupt lock.json is treated as stale, not a fatal error', () => {
     assert.equal(typeof lock.release, 'function');
   } finally {
     rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+test('readProfileSyncState treats a corrupt per-port state file as a cache miss', () => {
+  const previousCacheDir = process.env.BROWSER_TOOLS_CACHE_DIR;
+  const tmp = mkdtempSync(join(tmpdir(), 'sync-state-corrupt-'));
+  try {
+    process.env.BROWSER_TOOLS_CACHE_DIR = tmp;
+    writeFileSync(profileSyncStateFileForPort(9222), '{ truncated');
+    // Must not throw; a corrupt generated cache file should read as null so start resyncs.
+    assert.equal(readProfileSyncState(9222), null);
+  } finally {
+    if (previousCacheDir === undefined) delete process.env.BROWSER_TOOLS_CACHE_DIR;
+    else process.env.BROWSER_TOOLS_CACHE_DIR = previousCacheDir;
+    rmSync(tmp, { recursive: true, force: true });
   }
 });
 

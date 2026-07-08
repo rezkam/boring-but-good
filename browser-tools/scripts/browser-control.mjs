@@ -349,7 +349,13 @@ export function profileAuthStateReady(profileDir) {
 
 export function readProfileSyncState(port = null) {
   const stateFile = port === null ? profileSyncStateFileForPort(DEFAULT_PORT) : profileSyncStateFileForPort(port);
-  return safeReadJson(stateFile);
+  // This is a generated per-port cache file, not user config. A truncated or corrupt one should be
+  // treated as a cache miss (forcing a fresh sync), never abort a launch, so swallow parse errors.
+  try {
+    return safeReadJson(stateFile);
+  } catch {
+    return null;
+  }
 }
 
 export function readManagedStateForPort(port = DEFAULT_PORT) {
@@ -686,8 +692,13 @@ export function syncChromeProfile(profileName, { force = false, port = DEFAULT_P
 
   // Reuse a cached copy only when its Google-inclusion matches the request, so switching the flag
   // (or an older copy that predates it) forces a fresh sync instead of leaving the wrong identity in.
+  // A copy whose Google strip did not fully succeed is never reused, so the strip is retried (and its
+  // warning re-shown) instead of silently serving a clone that still carries the Google session.
   const cachedState = readProfileSyncState(port);
-  const cachedMatches = cachedState && typeof cachedState.includeGoogle === 'boolean' && cachedState.includeGoogle === includeGoogle;
+  const cachedMatches = cachedState
+    && typeof cachedState.includeGoogle === 'boolean'
+    && cachedState.includeGoogle === includeGoogle
+    && (includeGoogle || cachedState.googleStripOk === true);
   if (!force && cachedMatches && profileCopyReady(profileName, destDir)) {
     removeChromeProfileLocks(destDir);
     return { status: 'cached', profileDir: destDir, state: cachedState };
@@ -713,6 +724,7 @@ export function syncChromeProfile(profileName, { force = false, port = DEFAULT_P
   // Default: remove the Google session from the clone so a live copy cannot fork the source profile's
   // rotating Google session token and log the source Chrome out. Opt back in with includeGoogle.
   const googleStrip = includeGoogle ? null : stripGoogleIdentityFromProfileCopy(join(destDir, profileName));
+  const googleStripOk = includeGoogle ? true : !(googleStrip?.errors?.length);
   const rsyncStatuses = results.map((result) => result.status);
   const state = {
     profileName,
@@ -724,6 +736,7 @@ export function syncChromeProfile(profileName, { force = false, port = DEFAULT_P
     copiedItems,
     includeGoogle,
     googleStrip,
+    googleStripOk,
     syncScope: includeGoogle ? 'auth-minimal' : 'auth-minimal-no-google',
   };
   writePrivateFile(profileSyncStateFileForPort(port), JSON.stringify(state, null, 2));
@@ -1247,10 +1260,13 @@ export function pruneChromeClones({ dryRun = false, keepPorts = [] } = {}) {
     }
     const dataDir = profileDataDirForPort(port);
     const freshDir = freshProfileDirForPort(port);
-    const activeDir = existsSync(dataDir) ? dataDir : (existsSync(freshDir) ? freshDir : null);
-    const running = activeDir ? managedBrowserForUserDataDir(activeDir) : null;
+    // Both a stale profiled clone and a live fresh clone can share a port, so check each candidate
+    // dir for a live owner. Removing either dir while one is in use would corrupt a running browser.
+    const runningData = existsSync(dataDir) ? managedBrowserForUserDataDir(dataDir) : null;
+    const runningFresh = existsSync(freshDir) ? managedBrowserForUserDataDir(freshDir) : null;
+    const running = runningData || runningFresh;
     if (running) {
-      kept.push({ port, reason: 'running', pid: running.pid, dir: activeDir });
+      kept.push({ port, reason: 'running', pid: running.pid, dir: runningData ? dataDir : freshDir });
       continue;
     }
     const targets = [dataDir, freshDir, pidFileForPort(port), stateFileForPort(port), profileSyncStateFileForPort(port)]
