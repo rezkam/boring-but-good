@@ -1,8 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+const SQLITE_AVAILABLE = (() => {
+  try { return spawnSync('sqlite3', ['--version'], { encoding: 'utf-8' }).status === 0; }
+  catch { return false; }
+})();
 import {
   DEFAULT_PORT,
   CACHE_DIR,
@@ -24,6 +30,8 @@ import {
   acquirePortLock,
   chromeLaunchArgs,
   chromeUserAgentForMajor,
+  googleCookieDeleteSql,
+  stripGoogleIdentityFromProfileCopy,
   fileExists,
   hasFlag,
   managedChromeCommandSafety,
@@ -576,6 +584,57 @@ test('chromeLaunchArgs adds new headless only when requested and stays compatibl
   };
   const managedCommand = `${CHROME_BIN} ${headlessArgs.join(' ')}`;
   assert.equal(managedChromeCommandSafety({ pid: 321, port: 9225, state, command: managedCommand }).ok, true);
+});
+
+test('googleCookieDeleteSql covers the Google ecosystem without matching lookalikes', () => {
+  const sql = googleCookieDeleteSql();
+  assert.match(sql, /DELETE FROM cookies/i);
+  assert.match(sql, /host_key='google\.com'/);
+  assert.match(sql, /host_key LIKE '%\.google\.com'/);
+  assert.match(sql, /host_key='youtube\.com'/);
+  assert.match(sql, /host_key='doubleclick\.net'/);
+  assert.match(sql, /host_key='google\.dev'/);
+  // Country search domains and the Google-owned .google gTLD, matched by leading-dot patterns only.
+  assert.match(sql, /host_key LIKE '%\.google\.__'/);
+  assert.match(sql, /host_key LIKE '%\.google\.co\.__'/);
+  assert.match(sql, /host_key LIKE '%\.google'/);
+  // Every domain must use exact or leading-dot matching, so a dotless suffix (which would catch
+  // notgoogle.com) must never appear.
+  assert.doesNotMatch(sql, /LIKE '%google\.com'/);
+});
+
+test('stripGoogleIdentityFromProfileCopy removes the Google ecosystem while keeping other logins', { skip: SQLITE_AVAILABLE ? false : 'sqlite3 not available' }, () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'strip-google-test-'));
+  try {
+    const profileDir = join(tmp, 'Default');
+    mkdirSync(join(profileDir, 'Network'), { recursive: true });
+    const googleHosts = ['.google.com', 'accounts.google.com', '.youtube.com', '.google.se', '.doubleclick.net', 'googleusercontent.com', 'ai.google.dev', 'codeassist.google'];
+    const keepHosts = ['.wsj.com', 'x.com', 'notgoogle.com', '.notgoogle.se', 'x.notgoogle'];
+    const values = [...googleHosts, ...keepHosts].map((h) => `('${h}','c','x')`).join(',');
+    const seed = `CREATE TABLE cookies (host_key TEXT, name TEXT, value TEXT); INSERT INTO cookies VALUES ${values};`;
+    const cookiesDb = join(profileDir, 'Cookies');
+    const networkCookiesDb = join(profileDir, 'Network', 'Cookies');
+    assert.equal(spawnSync('sqlite3', [cookiesDb, seed]).status, 0);
+    assert.equal(spawnSync('sqlite3', [networkCookiesDb, seed]).status, 0);
+    const webDataDb = join(profileDir, 'Web Data');
+    assert.equal(spawnSync('sqlite3', [webDataDb, "CREATE TABLE token_service (service TEXT, token TEXT); INSERT INTO token_service VALUES('google','secret');"]).status, 0);
+
+    const result = stripGoogleIdentityFromProfileCopy(profileDir);
+    assert.deepEqual(result.errors, []);
+    assert.equal(result.cookieDbs.length, 2);
+    assert.equal(result.webDataCleared, true);
+
+    for (const db of [cookiesDb, networkCookiesDb]) {
+      const hosts = spawnSync('sqlite3', [db, 'SELECT host_key FROM cookies;'], { encoding: 'utf-8' })
+        .stdout.trim().split('\n').filter(Boolean);
+      assert.deepEqual(hosts.sort(), [...keepHosts].sort(), `only non-Google logins should remain, got ${JSON.stringify(hosts)}`);
+      for (const g of googleHosts) assert.equal(hosts.includes(g), false, `${g} should be removed`);
+    }
+    const tokenCount = spawnSync('sqlite3', [webDataDb, 'SELECT COUNT(*) FROM token_service;'], { encoding: 'utf-8' }).stdout.trim();
+    assert.equal(tokenCount, '0');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('activePage and dedicatedPage concentrate page selection behavior', async () => {

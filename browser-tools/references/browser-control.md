@@ -63,6 +63,12 @@ Profile Sync copies allow-listed auth, browser state, extension payloads, and ex
 
 It intentionally does not copy browser caches, history, favicons, service workers, IndexedDB, file system storage, or other large browser-generated data unrelated to matching the profile. Managed Chrome launches with Chrome sync disabled so the sandbox does not sync mutations back through the browser account. It does not use the live Chrome profile as its runtime profile.
 
+### Google identity is excluded by default
+
+A clone is a second live browser. If it carries the source profile's Google session, Google's session-theft protection can revoke the shared rotating session token and log the source Chrome out of Google, even when the clone never opens a Google page (background account reconcile is enough). So by default Profile Sync strips the Google identity from the copied profile: it deletes cookies for the Google ecosystem (google.com and all its account services such as Gmail, Drive, Docs, Photos, Play, Cloud, and Gemini, plus YouTube and related Google-owned domains and country search domains) from the copied Cookies databases, and clears the Google OAuth refresh token from the copied `Web Data` (`token_service`). The domain list lives in `GOOGLE_IDENTITY_DOMAINS` and is easy to extend for new Google services. Only plain-text columns are touched, no cookie values are decrypted, and all other site logins (for example WSJ, Bloomberg, X, Instagram) are preserved. Non-Google workflows (news, X, Instagram, most finance) are unaffected and no longer risk the source Google session.
+
+Pass `--include-google` to keep the Google session in the clone. This is required for Google-backed workflows (for example ai-chat's Gemini provider, or any task that must be signed in to a Google property), and it re-introduces the source-logout risk, so use it only when the workflow genuinely needs Google. Switching the flag forces a fresh sync, because a cached copy made with the other setting is not reused.
+
 The cached profile copy is not live. A site can be logged in in normal Chrome while the managed copy is stale and opens the same site as logged out. For account workflows and browser-authenticated providers, use `--sync` when starting the workflow or whenever auth looks wrong. If a managed browser is already running from a stale copy, set `BROWSER_TOOLS_OWNER_TOKEN`, stop it with `scripts/stop.mjs --clean`, and then start again with the same profile plus `--sync`.
 
 ### Cleanup
