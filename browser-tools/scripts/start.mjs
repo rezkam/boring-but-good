@@ -9,6 +9,7 @@
  *   scripts/start.mjs --profile "<Chrome profile folder>" --sync
  *   scripts/start.mjs --profile "<Chrome profile folder>" --port 9223
  *   scripts/start.mjs --headless        (run without opening a browser window)
+ *   scripts/start.mjs --include-google   (keep the Google session in the clone; needed for Google workflows)
  *   BROWSER_TOOLS_OWNER_TOKEN="<owner token>" scripts/start.mjs
  */
 
@@ -19,13 +20,14 @@ const profileName = requiredOptionValue(args, '--profile', null);
 const taskName = requiredOptionValue(args, '--task', null);
 const forceProfileSync = hasFlag(args, '--sync');
 const headless = hasFlag(args, '--headless');
+const includeGoogle = hasFlag(args, '--include-google');
 const explicitPort = args.includes('--port');
 const port = parsePort(args);
 const ownerToken = parseOwnerToken(args);
 const ownerId = parseOwnerId(args);
 
 try {
-  const result = await startChrome({ port, profileName, taskName, forceProfileSync, autoAllocatePort: !explicitPort, ownerToken, ownerId, headless });
+  const result = await startChrome({ port, profileName, taskName, forceProfileSync, autoAllocatePort: !explicitPort, ownerToken, ownerId, headless, includeGoogle });
   const mode = result.headless ? ' (headless)' : '';
   if (result.status === 'reused') {
     console.log(`✓ Chrome already running on :${result.port}${mode}; reusing owned instance`);

@@ -671,14 +671,18 @@ export function profileSyncRsyncCommands(profileName, { sourceDir = browserTools
   return commands;
 }
 
-export function syncChromeProfile(profileName, { force = false, port = DEFAULT_PORT, sourceDir = browserToolsChromeSourceDir(), destDir = profileDataDirForPort(port) } = {}) {
+export function syncChromeProfile(profileName, { force = false, port = DEFAULT_PORT, sourceDir = browserToolsChromeSourceDir(), destDir = profileDataDirForPort(port), includeGoogle = false } = {}) {
   if (!profileName) return { status: 'skipped', profileDir: null };
   validateProfileName(profileName);
   ensureCacheDir();
 
-  if (!force && profileCopyReady(profileName, destDir)) {
+  // Reuse a cached copy only when its Google-inclusion matches the request, so switching the flag
+  // (or an older copy that predates it) forces a fresh sync instead of leaving the wrong identity in.
+  const cachedState = readProfileSyncState(port);
+  const cachedMatches = cachedState && typeof cachedState.includeGoogle === 'boolean' && cachedState.includeGoogle === includeGoogle;
+  if (!force && cachedMatches && profileCopyReady(profileName, destDir)) {
     removeChromeProfileLocks(destDir);
-    return { status: 'cached', profileDir: destDir, state: readProfileSyncState(port) };
+    return { status: 'cached', profileDir: destDir, state: cachedState };
   }
 
   const commands = profileSyncRsyncCommands(profileName, { sourceDir, destDir, checkExists: true });
@@ -698,6 +702,9 @@ export function syncChromeProfile(profileName, { force = false, port = DEFAULT_P
   }
 
   removeChromeProfileLocks(destDir);
+  // Default: remove the Google session from the clone so a live copy cannot fork the source profile's
+  // rotating Google session token and log the source Chrome out. Opt back in with includeGoogle.
+  const googleStrip = includeGoogle ? null : stripGoogleIdentityFromProfileCopy(join(destDir, profileName));
   const rsyncStatuses = results.map((result) => result.status);
   const state = {
     profileName,
@@ -707,10 +714,74 @@ export function syncChromeProfile(profileName, { force = false, port = DEFAULT_P
     rsyncStatus: rsyncStatuses.length ? Math.max(...rsyncStatuses) : 0,
     rsyncStatuses,
     copiedItems,
-    syncScope: 'auth-minimal',
+    includeGoogle,
+    googleStrip,
+    syncScope: includeGoogle ? 'auth-minimal' : 'auth-minimal-no-google',
   };
   writePrivateFile(profileSyncStateFileForPort(port), JSON.stringify(state, null, 2));
   return { status: 'synced', profileDir: destDir, state };
+}
+
+// Registrable domains for Google account services and Google-owned properties whose cookies carry,
+// share, or can re-establish the Google session. Account services (Gmail, Drive, Docs, Photos, Play,
+// Cloud, Gemini, and so on) are all subdomains of google.com, so they are covered by that entry.
+// Add new Google services here to keep the default exclusion comprehensive.
+export const GOOGLE_IDENTITY_DOMAINS = [
+  'google.com', 'google.dev', 'youtube.com', 'youtu.be', 'ytimg.com', 'googlevideo.com',
+  'googleusercontent.com', 'gstatic.com', 'googleapis.com',
+  'gmail.com', 'googlemail.com', 'blogger.com', 'blogspot.com',
+  'doubleclick.net', 'google-analytics.com', 'googletagmanager.com',
+  'googlesyndication.com', 'googleadservices.com',
+  'withgoogle.com', 'google.org', 'android.com', 'goo.gl',
+];
+
+// SQL that removes Google-ecosystem cookies from a copied Cookies database. host_key is stored in
+// plain text, so this needs no decryption. Each domain matches as an exact host or a leading-dot
+// suffix, and the Google country-search patterns require a leading dot, so lookalikes such as
+// notgoogle.com or notgoogle.se can never match.
+export function googleCookieDeleteSql() {
+  const clauses = [];
+  for (const domain of GOOGLE_IDENTITY_DOMAINS) {
+    const escaped = domain.replace(/'/g, "''");
+    clauses.push(`host_key='${escaped}'`);
+    clauses.push(`host_key LIKE '%.${escaped}'`);
+  }
+  // Google country search domains (.google.se, .google.co.uk, .google.com.au).
+  clauses.push("host_key LIKE '%.google.__'");
+  clauses.push("host_key LIKE '%.google.co.__'");
+  clauses.push("host_key LIKE '%.google.com.__'");
+  // The .google gTLD is owned entirely by Google (for example blog.google, codeassist.google).
+  clauses.push("host_key LIKE '%.google'");
+  return `DELETE FROM cookies WHERE ${clauses.join(' OR ')};`;
+}
+
+// Remove the Google session from a copied profile so a live clone cannot reconcile with Google and
+// fork the source profile's rotating session token (which logs the source Chrome out). Deletes Google
+// cookies from the copied Cookies databases and clears the Google OAuth refresh token from Web Data.
+// Best effort and non-decrypting: it only touches plain-text columns of the copied databases.
+export function stripGoogleIdentityFromProfileCopy(profileDir, { sqlite3Bin = 'sqlite3' } = {}) {
+  const result = { cookieDbs: [], webDataCleared: false, errors: [] };
+  const runSql = (db, sql) => {
+    const r = spawnSync(sqlite3Bin, [db, sql], { encoding: 'utf-8' });
+    if (r.error) return r.error.message;
+    if (r.status !== 0) return (r.stderr || `sqlite3 exited ${r.status}`).trim();
+    return null;
+  };
+  for (const rel of ['Cookies', join('Network', 'Cookies')]) {
+    const db = join(profileDir, rel);
+    if (!existsSync(db)) continue;
+    const error = runSql(db, googleCookieDeleteSql());
+    if (error) result.errors.push({ db, error });
+    else result.cookieDbs.push(db);
+  }
+  const webData = join(profileDir, 'Web Data');
+  if (existsSync(webData)) {
+    // token_service holds the account OAuth refresh token; dropping it stops the clone re-minting a session.
+    const error = runSql(webData, 'DELETE FROM token_service;');
+    if (error && !/no such table/i.test(error)) result.errors.push({ db: webData, error });
+    else result.webDataCleared = true;
+  }
+  return result;
 }
 
 export function removeChromeProfileLocks(profileDir) {
@@ -900,6 +971,7 @@ export async function startChrome({
   ownerToken = null,
   ownerId = null,
   headless = false,
+  includeGoogle = false,
 } = {}) {
   let normalizedPort = normalizePort(port);
   const providedOwnerToken = normalizeOwnerValue(ownerToken);
@@ -982,13 +1054,23 @@ export async function startChrome({
 
       let profileSync = null;
       if (resolvedProfileName) {
-        const willSync = forceProfileSync || !profileCopyReady(resolvedProfileName, userDataDir);
-        if (willSync) console.error('⟳ Syncing Chrome profile auth state...');
-        profileSync = syncChromeProfile(resolvedProfileName, { force: forceProfileSync, port: normalizedPort, destDir: userDataDir });
+        const cachedState = readProfileSyncState(normalizedPort);
+        const googleMatches = cachedState && typeof cachedState.includeGoogle === 'boolean' && cachedState.includeGoogle === includeGoogle;
+        const willSync = forceProfileSync || !profileCopyReady(resolvedProfileName, userDataDir) || !googleMatches;
+        if (willSync) console.error(`⟳ Syncing Chrome profile auth state${includeGoogle ? ' (including Google)' : ' (Google identity excluded)'}...`);
+        profileSync = syncChromeProfile(resolvedProfileName, { force: forceProfileSync, port: normalizedPort, destDir: userDataDir, includeGoogle });
         if (profileSync.status === 'cached') {
           console.error(`✓ Using cached profile copy at ${userDataDir} (use --sync to refresh; if a logged-in site appears logged out, stop with --clean and restart with --sync)`);
         } else if (profileSync.status === 'synced') {
           console.error(`✓ Profile synced to ${userDataDir}`);
+          if (!includeGoogle) {
+            const strip = profileSync.state?.googleStrip;
+            if (strip?.errors?.length) {
+              console.error('⚠ Could not fully strip Google identity from the clone; the source Google session may be at risk. This clone is meant for non-Google sites.');
+            } else {
+              console.error('✓ Google identity excluded from the clone (source Google session protected; pass --include-google for Google workflows)');
+            }
+          }
         }
       }
       const proc = launchChrome({
@@ -1013,6 +1095,7 @@ export async function startChrome({
         taskName,
         profileSync,
         headless: Boolean(headless),
+        includeGoogle: Boolean(includeGoogle),
         ownerToken: effectiveOwnerToken,
         ownerId: normalizedOwnerId,
         ownerTokenGenerated: !providedOwnerToken,
