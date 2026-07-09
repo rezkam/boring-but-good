@@ -514,6 +514,39 @@ test('pruneChromeClones keeps the ports listed in keepPorts (protects an in-prog
   }
 });
 
+test('pruneChromeClones skips a port that has an active start lock', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'bt-prune-lock-'));
+  const previous = process.env.BROWSER_TOOLS_CACHE_DIR;
+  process.env.BROWSER_TOOLS_CACHE_DIR = tmp;
+  try {
+    mkdirSync(join(tmp, 'chrome-data-9621')); // a concurrent start's just-synced clone
+    mkdirSync(portLockDirForPort(9621));       // that start still holds the port lock, no process yet
+    mkdirSync(join(tmp, 'chrome-data-9622')); // an unrelated stale clone
+    const result = pruneChromeClones();
+    assert.ok(existsSync(join(tmp, 'chrome-data-9621')), 'a locked port clone must survive');
+    assert.ok(!existsSync(join(tmp, 'chrome-data-9622')), 'the unlocked stale clone must be removed');
+    assert.ok(result.kept.some((entry) => entry.port === 9621 && entry.reason === 'start-locked'));
+  } finally {
+    if (previous === undefined) delete process.env.BROWSER_TOOLS_CACHE_DIR;
+    else process.env.BROWSER_TOOLS_CACHE_DIR = previous;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('stripGoogleIdentityFromProfileCopy records errors when sqlite3 is unavailable', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'strip-fail-'));
+  try {
+    const profileDir = join(tmp, 'Default');
+    mkdirSync(profileDir, { recursive: true });
+    writeFileSync(join(profileDir, 'Cookies'), 'not-a-real-db');
+    // A failed strip must be observable (drives the abort that protects the source Google session).
+    const result = stripGoogleIdentityFromProfileCopy(profileDir, { sqlite3Bin: join(tmp, 'no-such-sqlite3') });
+    assert.ok(result.errors.length > 0, 'a missing sqlite3 binary must be recorded as an error');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('managedChromeCommandSafety refuses main Chrome and accepts only exact managed state', () => {
   const state = {
     managedBy: 'browser-tools',
