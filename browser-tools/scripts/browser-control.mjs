@@ -725,6 +725,15 @@ export function syncChromeProfile(profileName, { force = false, port = DEFAULT_P
   // rotating Google session token and log the source Chrome out. Opt back in with includeGoogle.
   const googleStrip = includeGoogle ? null : stripGoogleIdentityFromProfileCopy(join(destDir, profileName));
   const googleStripOk = includeGoogle ? true : !(googleStrip?.errors?.length);
+  // A default start that could not strip Google would launch a clone still carrying the source Google
+  // session, which is exactly the logout risk this excludes. Fail loudly instead of launching it.
+  if (!includeGoogle && !googleStripOk) {
+    rmSync(destDir, { recursive: true, force: true });
+    const detail = googleStrip.errors.map((entry) => entry.error).join('; ');
+    throw new Error(
+      `Could not strip the Google identity from the clone (${detail}). Refusing to launch, because the source Google session would be at risk. Ensure sqlite3 is available, or pass --include-google if you intend to use Google.`,
+    );
+  }
   const rsyncStatuses = results.map((result) => result.status);
   const state = {
     profileName,
@@ -923,7 +932,7 @@ function assertChromeBinaryLaunchable(chromeBin) {
   throw new Error(`${problem}: ${chromeBin}. Set BROWSER_TOOLS_CHROME_BIN or browser.chromeBin in Browser Tools config.`);
 }
 
-export function launchChrome({ port = DEFAULT_PORT, profileName = null, userDataDir = null, ownerToken = null, ownerId = null, headless = false } = {}) {
+export function launchChrome({ port = DEFAULT_PORT, profileName = null, userDataDir = null, ownerToken = null, ownerId = null, headless = false, includeGoogle = false } = {}) {
   ensureCacheDir();
   const normalizedPort = normalizePort(port);
   const launchUserDataDir = userDataDir || (profileName ? profileDataDirForPort(normalizedPort) : freshProfileDirForPort(normalizedPort));
@@ -955,6 +964,7 @@ export function launchChrome({ port = DEFAULT_PORT, profileName = null, userData
     profileName: profileName || null,
     userDataDir: launchUserDataDir,
     headless: Boolean(headless),
+    includeGoogle: Boolean(includeGoogle),
     managedToken,
     ...buildOwnerState({ ownerToken: effectiveOwnerToken, ownerId }),
     args,
@@ -1027,10 +1037,18 @@ export async function startChrome({
               `Chrome DevTools on :${normalizedPort} is owned by another Browser Tools agent (${ownership.reason}). Use a different --port or provide the correct --owner-token.`,
             );
           }
+          // Never reuse across a different Google mode: a default (stripped) start must not adopt a
+          // Google-included browser (logout risk), and a Google workflow must not adopt a stripped one.
+          if (Boolean(state?.includeGoogle) !== includeGoogle) {
+            throw new Error(
+              `Chrome on :${normalizedPort} is running with Google ${state?.includeGoogle ? 'included' : 'excluded'}, but this start requested Google ${includeGoogle ? 'included' : 'excluded'}. Stop it with scripts/stop.mjs --clean and start again.`,
+            );
+          }
           return {
             status: 'reused',
             port: normalizedPort,
             headless: Boolean(state?.headless),
+            includeGoogle: Boolean(state?.includeGoogle),
             ownerToken: effectiveOwnerToken,
             ownerId: ownership.ownerId,
             ownerTokenGenerated: false,
@@ -1085,12 +1103,8 @@ export async function startChrome({
         } else if (profileSync.status === 'synced') {
           console.error(`✓ Profile synced to ${userDataDir}`);
           if (!includeGoogle) {
-            const strip = profileSync.state?.googleStrip;
-            if (strip?.errors?.length) {
-              console.error('⚠ Could not fully strip Google identity from the clone; the source Google session may be at risk. This clone is meant for non-Google sites.');
-            } else {
-              console.error('✓ Google identity excluded from the clone (source Google session protected; pass --include-google for Google workflows)');
-            }
+            // A failed strip aborts the sync above, so reaching here means the strip succeeded.
+            console.error('✓ Google identity excluded from the clone (source Google session protected; pass --include-google for Google workflows)');
           }
         }
       }
@@ -1101,6 +1115,7 @@ export async function startChrome({
         ownerToken: effectiveOwnerToken,
         ownerId: normalizedOwnerId,
         headless,
+        includeGoogle,
       });
       const ready = await waitForChromeReady(normalizedPort, { timeoutMs: CHROME_READY_TIMEOUT_MS });
       if (!ready) {
@@ -1258,6 +1273,12 @@ export function pruneChromeClones({ dryRun = false, keepPorts = [] } = {}) {
       kept.push({ port, reason: 'kept-port' });
       continue;
     }
+    // A concurrent start holds a port lock between profile sync and process spawn, so it has no
+    // running process yet. Skip locked ports so we never delete another start's just-synced clone.
+    if (existsSync(portLockDirForPort(port))) {
+      kept.push({ port, reason: 'start-locked' });
+      continue;
+    }
     const dataDir = profileDataDirForPort(port);
     const freshDir = freshProfileDirForPort(port);
     // Both a stale profiled clone and a live fresh clone can share a port, so check each candidate
@@ -1280,7 +1301,13 @@ export function pruneChromeClones({ dryRun = false, keepPorts = [] } = {}) {
 }
 
 function readManagedState(stateFile) {
-  return safeReadJson(stateFile);
+  // Generated lifecycle state, not user config. A crash-truncated file must read as null so stop and
+  // stale-state cleanup can remove it and recover the port, rather than aborting on a parse error.
+  try {
+    return safeReadJson(stateFile);
+  } catch {
+    return null;
+  }
 }
 
 function commandForPid(pid) {
