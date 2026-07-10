@@ -5,8 +5,8 @@
 # Read-only live tests run automatically when Jira is configured.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-JIRA_SCRIPTS="${SCRIPT_DIR}/../jira/scripts"
-SKILL_DIR="${SCRIPT_DIR}/../jira"
+JIRA_SCRIPTS="${SCRIPT_DIR}/../workflow-tools/jira/scripts"
+SKILL_DIR="${SCRIPT_DIR}/../workflow-tools/jira"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'
 PASS=0; FAIL=0; SKIP=0

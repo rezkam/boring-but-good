@@ -4,16 +4,16 @@ I was bored. So I wrote some scripts to make my AI agents actually useful at the
 
 ## What's in here
 
-Skills that give AI coding agents (Claude Code, etc.) the ability to interact with real dev infrastructure through shell scripts and workflow instructions. Each skill is a directory with a `SKILL.md` that tells the agent what it can do; infrastructure skills also include a `scripts/` folder that does it.
+Skills that give AI coding agents (Claude Code, etc.) the ability to interact with real engineering systems through shell scripts and workflow instructions. Each skill is a directory with a `SKILL.md` that tells the agent what it can do; workflow tools also include a `scripts/` folder that does it.
 
 | Skill | What it does |
 |-------|-------------|
-| [**jira**](jira/) | Create, view, update, transition, and search Jira issues. Works with Cloud and Server/DC via go-jira. |
+| [**jira**](workflow-tools/jira/) | Create, view, update, transition, and search Jira issues. Works with Cloud and Server/DC via go-jira. |
 | [**to-tasks**](to-tasks/) | Break plans/specs into proposed tasks, ask whether to create them in Jira or locally, then create them after approval. |
-| [**jenkins**](jenkins/) | Check build status, read test failures, view console output, trigger builds, watch pipelines. |
-| [**sonarqube**](sonarqube/) | Fetch code quality issues, coverage metrics, security hotspots, quality gate status. |
-| [**dependency-track**](dependency-track/) | Query SCA findings, audit vulnerabilities, check project health, review policy violations. |
-| [**argocd**](argocd/) | Check app sync status, trigger syncs, view resources, read pod logs, rollback deployments. |
+| [**jenkins**](workflow-tools/jenkins/) | Check build status, read test failures, view console output, trigger builds, watch pipelines. |
+| [**sonarqube**](workflow-tools/sonarqube/) | Fetch code quality issues, coverage metrics, security hotspots, quality gate status. |
+| [**dependency-track**](workflow-tools/dependency-track/) | Query SCA findings, audit vulnerabilities, check project health, review policy violations. |
+| [**argocd**](workflow-tools/argocd/) | Check app sync status, trigger syncs, view resources, read pod logs, rollback deployments. |
 | [**skanetrafiken**](skanetrafiken/) | Plan public transport journeys in southern Sweden with real-time delays. |
 | [**java-21-to-25-migration**](java-21-to-25-migration/) | Migrate a Java project from JDK 21 to JDK 25 with a phased plan covering all breaking changes. |
 | [**browser-tools**](browser-tools/) | Control a sandboxed Chrome browser and generic page extraction through managed Chrome. |
@@ -52,10 +52,10 @@ The setup script walks you through configuring whichever skills you need. It cre
 
 ## How it works
 
-Infrastructure skills follow this structure:
+Workflow tools follow this structure:
 
 ```
-skill-name/
+workflow-tools/skill-name/
 ├── SKILL.md        # Agent reads this to know what's available
 ├── scripts/
 │   ├── _config.sh  # Loads credentials from ~/.boring/<skill>/

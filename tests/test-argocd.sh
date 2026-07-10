@@ -5,9 +5,9 @@
 # Read-only live tests run automatically when ArgoCD is configured.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ARGOCD_DIR="${SCRIPT_DIR}/../argocd"
+ARGOCD_DIR="${SCRIPT_DIR}/../workflow-tools/argocd"
 ARGOCD_SCRIPTS="${ARGOCD_DIR}/scripts"
-SKILL_DIR="${SCRIPT_DIR}/../argocd"
+SKILL_DIR="${SCRIPT_DIR}/../workflow-tools/argocd"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'
 PASS=0; FAIL=0; SKIP=0

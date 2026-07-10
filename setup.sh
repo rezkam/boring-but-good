@@ -12,6 +12,7 @@ CYAN=$'\033[0;36m'; BOLD=$'\033[1m'; DIM=$'\033[2m'; RESET=$'\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILLS_SRC="${SCRIPT_DIR}"
+WORKFLOW_TOOL_SKILLS="argocd dependency-track jenkins jira sonarqube"
 BORING_DIR="${HOME}/.boring"
 
 # ── Output helpers ──────────────────────────────────────────────────────────
@@ -504,9 +505,18 @@ select_install_path() {
 
 # ── Symlink a skill directory to a target dir ──────────────────────────────
 # Usage: _link_skill_to <name> <target_dir>
+_skill_source() {
+    local name="$1"
+    case " ${WORKFLOW_TOOL_SKILLS} " in
+        *" ${name} "*) printf "%s/workflow-tools/%s" "$SKILLS_SRC" "$name" ;;
+        *) printf "%s/%s" "$SKILLS_SRC" "$name" ;;
+    esac
+}
+
 _link_skill_to() {
     local name="$1" target_dir="$2"
-    local src="${SKILLS_SRC}/${name}"
+    local src
+    src="$(_skill_source "$name")"
     local dest="${target_dir}/${name}"
 
     if [ ! -d "$src" ]; then

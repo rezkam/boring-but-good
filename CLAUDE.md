@@ -1,17 +1,17 @@
 # boring-but-good
 
-Shell-script and workflow skills that give AI coding agents (Claude Code, etc.) the ability to interact with dev infrastructure. Each skill is a directory with a `SKILL.md`; infrastructure skills also include a `scripts/` folder.
+Shell-script and workflow skills that give AI coding agents (Claude Code, etc.) the ability to interact with engineering systems. Each skill is a directory with a `SKILL.md`; workflow tools also include a `scripts/` folder.
 
 ## Skills
 
 | Skill | External tool | Auth mechanism |
 |---|---|---|
-| `jira/` | go-jira CLI (`jira`) | Keychain via `~/.jira.d/config.yml` |
-| `to-tasks/` | jira skill or local files | Uses Jira configuration through `jira/`, or writes local task files under `.agents/skills/to-tasks/` |
-| `jenkins/` | curl | `~/.boring/jenkins/{url,user,token}` |
-| `sonarqube/` | curl | `~/.boring/sonarqube/{url,token}` + optional `auth_method` |
-| `dependency-track/` | curl | `~/.boring/dependency-track/{url,apikey}` |
-| `argocd/` | curl | `~/.boring/argocd/{url,token}` |
+| `workflow-tools/jira/` | go-jira CLI (`jira`) | Keychain via `~/.jira.d/config.yml` |
+| `to-tasks/` | jira skill or local files | Uses Jira configuration through `workflow-tools/jira/`, or writes local task files under `.agents/skills/to-tasks/` |
+| `workflow-tools/jenkins/` | curl | `~/.boring/jenkins/{url,user,token}` |
+| `workflow-tools/sonarqube/` | curl | `~/.boring/sonarqube/{url,token}` + optional `auth_method` |
+| `workflow-tools/dependency-track/` | curl | `~/.boring/dependency-track/{url,apikey}` |
+| `workflow-tools/argocd/` | curl | `~/.boring/argocd/{url,token}` |
 | `skanetrafiken/` | curl | No auth needed |
 | `browser-tools/` | Node.js + Chrome | Copied Chrome profile under `~/.cache/pi-browser-tools` |
 | `finance/` | Node.js + Chrome via browser-tools | Browser-authenticated finance sessions from managed Chrome |

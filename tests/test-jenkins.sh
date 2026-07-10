@@ -5,9 +5,9 @@
 # Read-only live tests run automatically when Jenkins is configured.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-JENKINS_DIR="${SCRIPT_DIR}/../jenkins"
+JENKINS_DIR="${SCRIPT_DIR}/../workflow-tools/jenkins"
 JENKINS_SCRIPTS="${JENKINS_DIR}/scripts"
-SKILL_DIR="${SCRIPT_DIR}/../jenkins"
+SKILL_DIR="${SCRIPT_DIR}/../workflow-tools/jenkins"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'
 PASS=0; FAIL=0; SKIP=0

@@ -70,14 +70,14 @@ CROSS_FAIL=0
 
 # Only scan directories that contain a SKILL.md (actual skills)
 SKILL_DIRS=""
-for d in "$REPO_DIR"/*/; do
-    [ -f "${d}SKILL.md" ] && SKILL_DIRS="$SKILL_DIRS $d"
-done
+while IFS= read -r skillmd; do
+    SKILL_DIRS="$SKILL_DIRS $(dirname "$skillmd")"
+done < <(find "$REPO_DIR" -mindepth 2 -maxdepth 3 -name SKILL.md -type f | sort)
 
 # Check no company/user/system-specific data anywhere in skill dirs
 LEAKS=""
 for d in $SKILL_DIRS; do
-    found=$(grep -rniE 'telavox|reza\.kamali|kamali.fard' "$d" --include='*.sh' --include='*.md' 2>/dev/null)
+    found=$(grep -rniE 'telavox|reza\.kamali|kamali.fard' "$d" --include='*.sh' --include='*.md' --exclude-dir=node_modules 2>/dev/null)
     [ -n "$found" ] && LEAKS="${LEAKS}${found}\n"
 done
 if [ -n "$LEAKS" ]; then
@@ -93,7 +93,7 @@ fi
 # Check no hardcoded home directory paths
 PATHS=""
 for d in $SKILL_DIRS; do
-    found=$(grep -rnE '/Users/[a-z]|/home/[a-z]' "$d" --include='*.sh' --include='*.md' 2>/dev/null)
+    found=$(grep -rnE '/Users/[a-z]|/home/[a-z]' "$d" --include='*.sh' --include='*.md' --exclude-dir=node_modules 2>/dev/null)
     [ -n "$found" ] && PATHS="${PATHS}${found}\n"
 done
 if [ -n "$PATHS" ]; then
@@ -136,7 +136,7 @@ for skill_dir in $SKILL_DIRS; do
 
     # All referenced scripts exist
     while IFS= read -r ref; do
-        ref_path="${skill_dir}${ref}"
+        ref_path="${skill_dir}/${ref}"
         if [ -f "$ref_path" ] || [ -d "$ref_path" ]; then
             : # OK
         else

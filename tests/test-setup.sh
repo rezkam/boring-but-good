@@ -74,7 +74,7 @@ header "Setup: Skill selection menu"
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # All skills must appear in the selection menu
-for skill in dependency-track jenkins jira to-tasks sonarqube skanetrafiken java-21-to-25-migration; do
+for skill in dependency-track jenkins jira to-tasks sonarqube argocd skanetrafiken java-21-to-25-migration; do
     if grep -q "$skill" "$SETUP"; then
         pass "Skill '${skill}' referenced in setup.sh"
     else
@@ -602,13 +602,19 @@ fi
 header "Setup: All skills have source directories"
 # ═══════════════════════════════════════════════════════════════════════════════
 
-for skill in dependency-track jenkins jira to-tasks sonarqube skanetrafiken java-21-to-25-migration; do
-    if [ -d "${REPO_DIR}/${skill}" ]; then
+for skill in dependency-track jenkins jira to-tasks sonarqube argocd skanetrafiken java-21-to-25-migration; do
+    skill_dir="${REPO_DIR}/${skill}"
+    case " ${skill} " in
+        " dependency-track "|" jenkins "|" jira "|" sonarqube "|" argocd ")
+            skill_dir="${REPO_DIR}/workflow-tools/${skill}"
+            ;;
+    esac
+    if [ -d "$skill_dir" ]; then
         pass "${skill}/ directory exists"
     else
         fail "${skill}/ directory missing"
     fi
-    if [ -f "${REPO_DIR}/${skill}/SKILL.md" ]; then
+    if [ -f "${skill_dir}/SKILL.md" ]; then
         pass "${skill}/SKILL.md exists"
     else
         fail "${skill}/SKILL.md missing"
