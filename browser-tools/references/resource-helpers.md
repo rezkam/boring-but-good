@@ -4,10 +4,10 @@ Browser Tools includes only generic browser extraction helpers. Domain-specific 
 
 ## Extraction helpers
 
-| Script | Purpose | Example |
+| Command | Purpose | Example |
 | --- | --- | --- |
-| `scripts/scrape-page.mjs` | Extract article-like visible links and nearby timestamps from the current page | `scripts/scrape-page.mjs --port <reported port>` |
-| `scripts/extract-article.mjs` | Extract article body text from the current page | `scripts/extract-article.mjs --chars 6000 --port <reported port>` |
+| `browser-tools scrape-page` | Extract article-like visible links and nearby timestamps from the current page | `browser-tools scrape-page --port <reported port>` |
+| `browser-tools extract-article` | Extract article body text from the current page | `browser-tools extract-article --chars 6000 --port <reported port>` |
 
 Use these after Browser Control has navigated to the page.
 

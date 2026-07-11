@@ -2,21 +2,24 @@
 
 Use Browser Control when the task is about controlling the sandboxed Chrome itself: launch, stop, navigate, evaluate page JavaScript, take screenshots, select DOM elements, or extract generic current-page content.
 
-## Scripts
+## Commands
 
-| Script | Purpose | Example |
+Requires the `@rezkam/browser-tools` npm package (`npm install -g @rezkam/browser-tools`, or run each command via `npx @rezkam/browser-tools <subcommand>`). Every subcommand dispatches to the matching script under `scripts/` unchanged.
+
+| Command | Purpose | Example |
 | --- | --- | --- |
-| `scripts/config.mjs` | Create or refresh private Browser Tools config | `scripts/config.mjs profiles --refresh` |
-| `scripts/start.mjs` | Launch sandboxed Chrome | `scripts/start.mjs`, `scripts/start.mjs --profile "<Chrome profile folder or local alias>"`, `scripts/start.mjs --task <task>`, or `scripts/start.mjs --headless` |
-| `scripts/stop.mjs` | Stop sandboxed Chrome | `scripts/stop.mjs --dry-run` then `scripts/stop.mjs --clean` |
-| `scripts/nav.mjs` | Navigate current tab or open a new tab | `scripts/nav.mjs https://example.com --new` |
-| `scripts/eval.mjs` | Run JavaScript in the active tab | `scripts/eval.mjs 'document.title'` |
-| `scripts/screenshot.mjs` | Capture visible or full-page screenshot | `scripts/screenshot.mjs --full` |
-| `scripts/pick.mjs` | Select DOM elements interactively | `scripts/pick.mjs "Click the price"` |
-| `scripts/scrape-page.mjs` | Extract article-like visible links from the current page | `scripts/scrape-page.mjs` |
-| `scripts/extract-article.mjs` | Extract article body text from the current page | `scripts/extract-article.mjs --chars 6000` |
+| `browser-tools config` | Create or refresh private Browser Tools config | `browser-tools config profiles --refresh` |
+| `browser-tools start` | Launch sandboxed Chrome | `browser-tools start`, `browser-tools start --profile "<Chrome profile folder or local alias>"`, `browser-tools start --task <task>`, or `browser-tools start --headless` |
+| `browser-tools status` | Report whether a managed Chrome instance is running for a port | `browser-tools status --port 9223 --json` |
+| `browser-tools stop` | Stop sandboxed Chrome | `browser-tools stop --dry-run` then `browser-tools stop --clean` |
+| `browser-tools nav` | Navigate current tab or open a new tab | `browser-tools nav https://example.com --new` |
+| `browser-tools eval` | Run JavaScript in the active tab | `browser-tools eval 'document.title'` |
+| `browser-tools screenshot` | Capture visible or full-page screenshot | `browser-tools screenshot --full` |
+| `browser-tools pick` | Select DOM elements interactively | `browser-tools pick "Click the price"` |
+| `browser-tools scrape-page` | Extract article-like visible links from the current page | `browser-tools scrape-page` |
+| `browser-tools extract-article` | Extract article body text from the current page | `browser-tools extract-article --chars 6000` |
 
-All executable scripts live under `scripts/`. There are no root-level compatibility wrappers. Examples that connect to a running managed browser assume `BROWSER_TOOLS_OWNER_TOKEN` is set.
+There are no root-level compatibility wrappers; the CLI is the supported entry point. Examples that connect to a running managed browser assume `BROWSER_TOOLS_OWNER_TOKEN` is set.
 
 ## Profiles and config
 
@@ -55,7 +58,7 @@ Earlier Browser Tools code imported Chrome profile config helpers from `scripts/
 
 The compatibility constants do not reflect environment variables or private config overrides. New code should use `browserToolsRuntimeConfig`, `browserToolsConfigFile`, `browserToolsChromeSourceDir`, `browserToolsCacheDir`, and the per-port path helpers so runtime overrides are honored.
 
-`scripts/config.mjs profiles` creates the profile registry when missing by reading Chrome `Local State`. `scripts/config.mjs profiles --refresh` rescans and rewrites it while preserving task preferences and directory settings. `scripts/config.mjs active-profiles` shows Chrome profiles marked as last-active in `Local State`. `scripts/config.mjs task-profile set <task> --profile "<alias>"` remembers which profile to use for a specialist task. `scripts/start.mjs --profile "<alias>"` and `scripts/start.mjs --task <task>` also create the config on demand.
+`browser-tools config profiles` creates the profile registry when missing by reading Chrome `Local State`. `browser-tools config profiles --refresh` rescans and rewrites it while preserving task preferences and directory settings. `browser-tools config active-profiles` shows Chrome profiles marked as last-active in `Local State`. `browser-tools config task-profile set <task> --profile "<alias>"` remembers which profile to use for a specialist task. `browser-tools start --profile "<alias>"` and `browser-tools start --task <task>` also create the config on demand.
 
 ## Profile Sync
 
@@ -69,31 +72,31 @@ A clone is a second live browser. If it carries the source profile's Google sess
 
 Pass `--include-google` to keep the Google session in the clone. This is required for Google-backed workflows (for example ai-chat's Gemini provider, or any task that must be signed in to a Google property), and it re-introduces the source-logout risk, so use it only when the workflow genuinely needs Google. Switching the flag forces a fresh sync, because a cached copy made with the other setting is not reused.
 
-The cached profile copy is not live. A site can be logged in in normal Chrome while the managed copy is stale and opens the same site as logged out. For account workflows and browser-authenticated providers, use `--sync` when starting the workflow or whenever auth looks wrong. If a managed browser is already running from a stale copy, set `BROWSER_TOOLS_OWNER_TOKEN`, stop it with `scripts/stop.mjs --clean`, and then start again with the same profile plus `--sync`.
+The cached profile copy is not live. A site can be logged in in normal Chrome while the managed copy is stale and opens the same site as logged out. For account workflows and browser-authenticated providers, use `--sync` when starting the workflow or whenever auth looks wrong. If a managed browser is already running from a stale copy, set `BROWSER_TOOLS_OWNER_TOKEN`, stop it with `browser-tools stop --clean`, and then start again with the same profile plus `--sync`.
 
 ### Cleanup
 
-Each clone lives in a per-port sandbox directory (about 400 MB per profile). Because starting without `--port` auto-allocates a new port, clones can accumulate over time. `scripts/stop.mjs --clean` removes the clone data directory and its per-port sync-state file for the stopped browser. `scripts/stop.mjs --prune` sweeps every cached clone that is not currently in use by a running managed Chrome, removing each stale clone directory along with its sync-state and lifecycle files; add `--dry-run` to preview. Prune keeps any clone still owned by a live process and never touches non-clone cache entries such as ai-chat data.
+Each clone lives in a per-port sandbox directory (about 400 MB per profile). Because starting without `--port` auto-allocates a new port, clones can accumulate over time. `browser-tools stop --clean` removes the clone data directory and its per-port sync-state file for the stopped browser. `browser-tools stop --prune` sweeps every cached clone that is not currently in use by a running managed Chrome, removing each stale clone directory along with its sync-state and lifecycle files; add `--dry-run` to preview. Prune keeps any clone still owned by a live process and never touches non-clone cache entries such as ai-chat data.
 
 ## Agent ownership
 
-Every Managed Browser is owned by one agent token. For a user-supplied token, export `BROWSER_TOOLS_OWNER_TOKEN` before running `scripts/start.mjs` and reuse that environment for follow-up commands. When no token is provided, start generates a new token and prints it. Store it in the current agent session with `export BROWSER_TOOLS_OWNER_TOKEN="<owner token from start output>"`. Use `--owner-token` only when the environment variable is impractical because command-line arguments can be visible to other local users through process listings.
+Every Managed Browser is owned by one agent token. For a user-supplied token, export `BROWSER_TOOLS_OWNER_TOKEN` before running `browser-tools start` and reuse that environment for follow-up commands. When no token is provided, start generates a new token and prints it. Store it in the current agent session with `export BROWSER_TOOLS_OWNER_TOKEN="<owner token from start output>"`. Use `--owner-token` only when the environment variable is impractical because command-line arguments can be visible to other local users through process listings.
 
-`scripts/start.mjs` also accepts `--owner-id <label>` or `--agent-id <label>` for diagnostics. The owner ID is not a secret and is not enough to connect or stop. The owner token is hashed in the managed-state file, not written in plain text.
+`browser-tools start` also accepts `--owner-id <label>` or `--agent-id <label>` for diagnostics. The owner ID is not a secret and is not enough to connect or stop. The owner token is hashed in the managed-state file, not written in plain text.
 
 Ownership rules:
 
 - Starting without an explicit `--port` never reuses another listening browser. It auto-allocates the next free port and creates a new owned sandbox.
 - Starting with an explicit `--port` reuses only when that browser is Browser Tools managed and the owner token matches.
 - Browser Control and generic extractors refuse to connect when the owner token is missing or wrong.
-- `scripts/stop.mjs` refuses to stop a live browser when the owner token is missing or wrong.
+- `browser-tools stop` refuses to stop a live browser when the owner token is missing or wrong.
 - Per-port lock directories under the configured cache directory serialize concurrent starts so two agents do not claim the same port at the same time.
 
 ## Stop safety
 
-`stop.mjs` is intentionally conservative. It stops only a Managed Browser that `start.mjs` launched and that the caller owns. With `BROWSER_TOOLS_OWNER_TOKEN` set, use `scripts/stop.mjs --dry-run` to verify what would be stopped without sending a signal. The start script writes a PID file and a managed-state file under the configured cache directory, then launches Chrome with a per-run managed token and an owner-token hash.
+`browser-tools stop` is intentionally conservative. It stops only a Managed Browser that `browser-tools start` launched and that the caller owns. With `BROWSER_TOOLS_OWNER_TOKEN` set, use `browser-tools stop --dry-run` to verify what would be stopped without sending a signal. The start command writes a PID file and a managed-state file under the configured cache directory, then launches Chrome with a per-run managed token and an owner-token hash.
 
-The stop script verifies all of these before sending `SIGTERM`:
+The stop command verifies all of these before sending `SIGTERM`:
 
 - managed-state file exists and says `managedBy: browser-tools`
 - PID and port match the managed state
@@ -105,46 +108,56 @@ The stop script verifies all of these before sending `SIGTERM`:
 - managed-state launch args also include the debug port, sandbox user data directory, and managed token
 - owner token passed to stop matches the owner-token hash in managed state
 
-If any check fails, `stop.mjs` refuses to kill the process. This protects the main Chrome process, another agent's Managed Browser, and any browser that was manually started or only reused by `start.mjs`.
+If any check fails, `browser-tools stop` refuses to kill the process. This protects the main Chrome process, another agent's Managed Browser, and any browser that was manually started or only reused by `browser-tools start`.
 
 ## Common workflows
 
 ### Start Chrome
 
 ```bash
-scripts/start.mjs
+browser-tools start
 export BROWSER_TOOLS_OWNER_TOKEN="<owner token from start output>"
-scripts/config.mjs profiles
-scripts/config.mjs profiles --refresh
-scripts/config.mjs active-profiles
-scripts/config.mjs task-profile set finance --profile "<Chrome profile folder or local alias>"
-scripts/start.mjs --task finance
-scripts/start.mjs --profile "<Chrome profile folder or local alias>"
-scripts/start.mjs --profile "<Chrome profile folder or local alias>" --sync
-scripts/start.mjs --profile "<Chrome profile folder or local alias>" --port 9223
-scripts/start.mjs --headless
+browser-tools config profiles
+browser-tools config profiles --refresh
+browser-tools config active-profiles
+browser-tools config task-profile set finance --profile "<Chrome profile folder or local alias>"
+browser-tools start --task finance
+browser-tools start --profile "<Chrome profile folder or local alias>"
+browser-tools start --profile "<Chrome profile folder or local alias>" --sync
+browser-tools start --profile "<Chrome profile folder or local alias>" --port 9223
+browser-tools start --headless
 ```
+
+### Check status
+
+```bash
+browser-tools status
+browser-tools status --port 9223
+browser-tools status --json
+```
+
+`browser-tools status` reads the same managed-state file `browser-tools start` writes and `browser-tools stop` verifies; it never launches or connects to Chrome. It reports whether a managed Chrome instance is verified running for the port, along with PID, profile name, headless/includeGoogle mode, and owner ID (never the owner token).
 
 ### Headless mode
 
-Add `--headless` to `scripts/start.mjs` to run the managed Chrome without opening a visible window. Use it for automation that does not need the user to watch or interact: navigation, evaluation, scraping, extraction, and screenshots all work the same over CDP. It launches Chrome's new headless mode (`--headless=new`), which runs the full browser, so the copied profile, cookies, and extensions load exactly as they do in a windowed launch. Old `--headless` is a separate lightweight engine that ignores extensions and is never used.
+Add `--headless` to `browser-tools start` to run the managed Chrome without opening a visible window. Use it for automation that does not need the user to watch or interact: navigation, evaluation, scraping, extraction, and screenshots all work the same over CDP. It launches Chrome's new headless mode (`--headless=new`), which runs the full browser, so the copied profile, cookies, and extensions load exactly as they do in a windowed launch. Old `--headless` is a separate lightweight engine that ignores extensions and is never used.
 
 A headless launch would otherwise advertise a `HeadlessChrome` User-Agent. When the copied profile is signed in to Google, that headless fingerprint trips Google's session-theft protection and logs the source Chrome profile out, while a windowed launch (normal Chrome UA) does not. So a headless launch overrides the User-Agent, browser-wide, to the normal reduced Chrome UA for the installed version, making a headless clone match a windowed one. The override carries no machine-specific data.
 
 ```bash
-scripts/start.mjs --headless
-scripts/start.mjs --profile "<Chrome profile folder or local alias>" --headless --sync
+browser-tools start --headless
+browser-tools start --profile "<Chrome profile folder or local alias>" --headless --sync
 ```
 
-Headless is a launch-time choice recorded in the managed state. To switch a running browser between windowed and headless, stop it (`scripts/stop.mjs --clean` with the owner token) and start again with or without `--headless`. Pick `--headless` when no user interaction is needed and a windowed launch only when the task intentionally needs the user to see or drive the page.
+Headless is a launch-time choice recorded in the managed state. To switch a running browser between windowed and headless, stop it (`browser-tools stop --clean` with the owner token) and start again with or without `--headless`. Pick `--headless` when no user interaction is needed and a windowed launch only when the task intentionally needs the user to see or drive the page.
 
 For a logged-in browser task where current cookies matter, prefer:
 
 ```bash
-scripts/start.mjs --profile "<Chrome profile folder or local alias>" --sync
+browser-tools start --profile "<Chrome profile folder or local alias>" --sync
 ```
 
-If Chrome already listens on the default debug port, `start.mjs` auto-allocates the next available port and creates a separate per-port sandbox profile copy. If `--port` is explicitly provided, the script reuses that port only when it is a Browser Tools managed browser and the owner token matches.
+If Chrome already listens on the default debug port, `browser-tools start` auto-allocates the next available port and creates a separate per-port sandbox profile copy. If `--port` is explicitly provided, the command reuses that port only when it is a Browser Tools managed browser and the owner token matches.
 
 ### Background tabs and focus
 
@@ -159,16 +172,16 @@ This avoids stealing OS focus from the user when an agent opens pages. Only call
 ### Navigate and inspect
 
 ```bash
-scripts/nav.mjs https://example.com --port <reported port>
-scripts/eval.mjs 'document.title' --port <reported port>
-scripts/eval.mjs 'document.querySelectorAll("a").length' --port <reported port>
-scripts/screenshot.mjs --full --port <reported port>
+browser-tools nav https://example.com --port <reported port>
+browser-tools eval 'document.title' --port <reported port>
+browser-tools eval 'document.querySelectorAll("a").length' --port <reported port>
+browser-tools screenshot --full --port <reported port>
 ```
 
 ### Pick DOM elements
 
 ```bash
-scripts/pick.mjs "Click the price element"
+browser-tools pick "Click the price element"
 ```
 
 In the browser:
