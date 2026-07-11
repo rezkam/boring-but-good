@@ -37,7 +37,7 @@ jobs:
         uses: changesets/action@v1
         with:
           # Runs when "Version Packages" PR is merged
-          publish: npx changeset publish --provenance --access public
+          publish: npx changeset publish
 
           # Creates GitHub Releases with changelog
           createGithubReleases: true
