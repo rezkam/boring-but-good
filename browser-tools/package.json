@@ -1,6 +1,6 @@
 {
   "name": "@rezkam/browser-tools",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Sandboxed, owner-token-protected Chrome automation for AI agents: launch, navigate, evaluate, screenshot, and manage Chrome profiles from a CLI or programmatically.",
   "type": "module",
   "license": "Apache-2.0",

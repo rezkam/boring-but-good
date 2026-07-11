@@ -1,5 +1,11 @@
 # @rezkam/browser-tools
 
+## 0.2.1
+
+### Patch Changes
+
+- 8ea5041: Verify automated npm publishing after the initial package release.
+
 ## 0.2.0
 
 ### Minor Changes
