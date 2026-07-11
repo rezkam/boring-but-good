@@ -1,7 +1,35 @@
 {
-  "name": "browser-tools",
-  "version": "1.0.0",
+  "name": "@rezkam/browser-tools",
+  "version": "0.1.0",
+  "description": "Sandboxed, owner-token-protected Chrome automation for AI agents: launch, navigate, evaluate, screenshot, and manage Chrome profiles from a CLI or programmatically.",
   "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rezkam/boring-but-good.git",
+    "directory": "browser-tools"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "browser-tools": "./bin/browser-tools.mjs"
+  },
+  "exports": {
+    ".": "./scripts/browser-control.mjs",
+    "./browser-control.mjs": "./scripts/browser-control.mjs",
+    "./resource-helper.mjs": "./scripts/resource-helper.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "bin",
+    "scripts",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "test": "node --test test/*.mjs",
     "coverage": "node --test --experimental-test-coverage test/*.mjs",

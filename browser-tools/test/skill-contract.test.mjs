@@ -8,6 +8,7 @@ const ROOT = new URL('..', import.meta.url).pathname;
 const PUBLIC_BROWSER_CONTROL_SCRIPTS = [
   'scripts/config.mjs',
   'scripts/start.mjs',
+  'scripts/status.mjs',
   'scripts/stop.mjs',
   'scripts/nav.mjs',
   'scripts/eval.mjs',
@@ -18,6 +19,12 @@ const GENERIC_EXTRACTOR_SCRIPTS = [
   'scripts/scrape-page.mjs',
   'scripts/extract-article.mjs',
 ];
+// The installed `browser-tools` CLI (bin/browser-tools.mjs) dispatches one subcommand per
+// script above. The skill docs describe the CLI form, not the raw script path, so derive the
+// documented contract from the same script list instead of hand-maintaining a second list.
+const scriptToSubcommand = (script) => script.replace('scripts/', '').replace('.mjs', '');
+const CLI_SUBCOMMANDS = [...PUBLIC_BROWSER_CONTROL_SCRIPTS, ...GENERIC_EXTRACTOR_SCRIPTS].map(scriptToSubcommand);
+
 function readRelative(path) {
   return readFileSync(join(ROOT, path), 'utf-8');
 }
@@ -41,23 +48,34 @@ test('all public scripts named by the Skill Interface exist and are executable',
   }
 });
 
-test('SKILL.md and reference docs document the same public Browser Control and generic extractor surface', () => {
+test('SKILL.md and browser-control.md document every public browser-tools CLI subcommand', () => {
   const skill = readRelative('SKILL.md');
   const browserControl = readRelative('references/browser-control.md');
-  const resourceHelpers = readRelative('references/resource-helpers.md');
 
-  for (const script of PUBLIC_BROWSER_CONTROL_SCRIPTS) {
-    assert.match(skill, new RegExp(script.replace('.', '\\.')));
-    assert.match(browserControl, new RegExp(script.replace('.', '\\.')));
-  }
-
-  for (const script of GENERIC_EXTRACTOR_SCRIPTS) {
-    assert.match(skill, new RegExp(script.replace('.', '\\.')));
-    assert.match(resourceHelpers, new RegExp(script.replace('.', '\\.')));
+  for (const subcommand of CLI_SUBCOMMANDS) {
+    const pattern = new RegExp(`browser-tools ${subcommand}\\b`);
+    assert.match(skill, pattern, `SKILL.md should document \`browser-tools ${subcommand}\``);
+    assert.match(browserControl, pattern, `browser-control.md should document \`browser-tools ${subcommand}\``);
   }
 
   assert.match(skill, /Extract article-like visible links/);
   assert.match(browserControl, /Extract article-like visible links/);
+});
+
+test('SKILL.md documents the npm package setup required to install the browser-tools CLI', () => {
+  const skill = readRelative('SKILL.md');
+
+  assert.match(skill, /npm install -g @rezkam\/browser-tools/);
+  assert.match(skill, /npx @rezkam\/browser-tools/);
+});
+
+test('resource-helpers.md documents the generic extractor scripts the CLI dispatches to', () => {
+  const resourceHelpers = readRelative('references/resource-helpers.md');
+
+  for (const script of GENERIC_EXTRACTOR_SCRIPTS) {
+    assert.match(resourceHelpers, new RegExp(script.replace('.', '\\.')));
+  }
+
   assert.match(resourceHelpers, /Extract article-like visible links and nearby timestamps/);
 });
 

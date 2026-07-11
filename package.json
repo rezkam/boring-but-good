@@ -1,0 +1,7 @@
+{
+  "name": "boring-but-good",
+  "private": true,
+  "workspaces": [
+    "browser-tools"
+  ]
+}
