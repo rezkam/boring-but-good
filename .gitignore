@@ -3,6 +3,16 @@
 
 # Local package installs
 node_modules/
+vendor/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Generated logs and review artifacts
+*.log
+code-review/runs/
+sama_dm_thread_chat_view.html
 
 # Agent local state
 .claude/
