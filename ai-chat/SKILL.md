@@ -6,71 +6,116 @@ compatibility: "Requires the browser-tools skill as a sibling checkout, macOS Ch
 
 # AI Chat
 
-AI Chat is a separate skill for browser-authenticated model providers. It depends on Browser Tools for managed Chrome, Profile Sync, safe DevTools connection, background tabs, screenshots, and cleanup.
+AI Chat is the shared entry point for browser-authenticated AI providers. It depends on Browser Tools for managed Chrome, Profile Sync, safe DevTools connection, background tabs, screenshots, and stop safety.
 
-Use this skill when the task is about using AI provider web sessions as tools, not when the task is normal page browsing.
+Use this skill when the task is about using AI provider web sessions as tools. Do not use it for normal page browsing.
+
+## Browser lifecycle contract
+
+AI Chat owns its normal Browser Tools browser lifecycle.
+
+- Startup: when a provider needs browser access and no healthy AI Chat owned browser exists, AI Chat starts Browser Tools with owner id `ai-chat`, task profile `ai-chat`, and fallback Chrome profile `Default` when no `ai-chat` task profile is configured. If the default port is busy and no explicit `--port` was passed, Browser Tools auto-allocates a free port.
+- Reuse: later AI Chat commands read the private state file `~/.cache/pi-browser-tools/ai-chat-browser.json`, validate Browser Tools managed state, owner token, and copied profile presence, then reconnect to the same browser. The same browser can be reused across Grok, ChatGPT, Gemini, and Perplexity.
+- Refusal: AI Chat refuses unmanaged Chrome, missing owner tokens, wrong owner tokens, browsers owned by another agent, and live owned browsers with an unavailable debug port. Error messages include the reason and recovery path.
+- Stale recovery: stale private state where the process is gone is discarded and a new owned browser is started. Unsafe live state is not killed or replaced.
+- Cleanup: successful requests disconnect from CDP but leave the owned browser open for reuse. Cleanup is explicit and must use Browser Tools stop with the matching owner token from the private AI Chat state. Use `--clean` when you need the next run to resync the copied profile.
+
+By default, AI Chat copies and uses Chrome profile `Default`, so normal logged-in browser cookies are available without extra setup. Optional one-time setup when another Chrome profile is the logged-in provider profile: use the Browser Tools config helper to set task profile `ai-chat` to that Chrome profile alias or folder.
 
 ## Capability map
 
 | Capability | Providers | Notes |
 | --- | --- | --- |
-| Ask a one-off question | Grok, ChatGPT, Gemini, Perplexity | Uses the logged-in browser session or session cookies from it |
-| Continue a conversation | Grok, ChatGPT, Gemini, Perplexity | Save with `--save-conversation`, continue with `--conversation` |
-| Select a model | Grok, ChatGPT, Gemini, Perplexity | Use `--model <id-or-alias>` for exact selection or `--task <task>` for task defaults |
-| List known or discovered models | Gemini, Perplexity, provider adapters over time | Use `--list-models --json`; add `--verify-models` for live account acceptance checks |
-| Deep research | Perplexity | Uses Perplexity `perplexity/deep-research` model and long timeout |
-| Save to provider history | Gemini, Perplexity, provider-dependent others | Perplexity defaults to incognito. Gemini defaults to temporary. Use `--save-to-library` to write provider history where supported |
+| Ask a new question | Grok, ChatGPT, Gemini, Perplexity | Starts or reuses the AI Chat owned Browser Tools browser when needed |
+| Save and continue a conversation | Grok, ChatGPT, Gemini, Perplexity | Save with `--save-conversation`, continue with `--conversation` |
+| Attach an existing provider chat | Grok, ChatGPT, Gemini, Perplexity | Use `--attach-conversation <provider-id-or-url> --save-conversation <local-id>` |
+| Select a model | Grok, ChatGPT, Gemini, Perplexity | Use `--model <id-or-alias>` or `--task <task>` |
+| List known or discovered models | ChatGPT, Gemini, Perplexity, Grok | Use `--list-models --json`; add `--verify-models` where supported |
+| Deep research | Perplexity | Uses `perplexity/deep-research` and a 3600 second timeout unless `--timeout` is explicit |
+| Research filters | Perplexity | `--source-focus`, `--search-focus`, `--time-range`, `--citation-mode`, `--language`, `--timezone` |
+| Files, Spaces, streaming | Perplexity | `--file`, `--space-uuid` or `--space`, `--stream` |
+| Save to provider history | Gemini, Perplexity, provider-dependent others | Perplexity defaults to incognito. Gemini defaults to temporary. Use `--save-to-library` where supported |
 | JSON output with metadata | All | Use `--json` |
-| Evidence screenshots | Browser UI providers, Perplexity Finance page if relevant | Capture screenshots after live verification |
+| Evidence screenshots | Browser UI providers with a final URL | Perplexity and Gemini API transports usually provide JSON and stderr evidence, not screenshots |
 
-## Basic workflow
+## Examples
+
+Run commands from `ai-chat/`.
 
 ```bash
-# Start managed Chrome through Browser Tools first.
-# For Grok, use the default or configured Chrome profile that is logged in to X/Grok.
-# For Gemini, start Browser Tools with the configured Gemini task profile.
-# Use --sync when current login cookies matter or when the managed browser looked logged out.
-# Example: run Browser Tools start with --profile <profile-or-alias> --sync
-# Example: run Browser Tools start with --task gemini --sync
+# New chat. AI Chat starts or reuses its owned Browser Tools browser.
+scripts/ai-chat.mjs --provider chatgpt --model instant --prompt "Give three launch risks" --json --save-conversation launch-risks
 
-# One-off prompt.
-scripts/ai-chat.mjs --provider grok --model fast --prompt "Give me three scenarios" --json --evidence
+# Continue a saved chat by provider-scoped local id.
+scripts/ai-chat.mjs --provider chatgpt --conversation launch-risks --prompt "Rank them by mitigation cost" --json --save-conversation launch-risks
 
-# Save and continue a thread.
-scripts/ai-chat.mjs --provider grok --model fast --prompt "Start researching X" --save-conversation research-x --json
-scripts/ai-chat.mjs --provider grok --conversation research-x --prompt "Now compare it with Y" --json
+# Recheck a saved ChatGPT request that timed out, without sending a new prompt.
+scripts/ai-chat.mjs --provider chatgpt --conversation launch-risks --save-conversation launch-risks --json
 
-# Perplexity deep research.
-scripts/ai-chat.mjs --provider perplexity --model perplexity/deep-research --prompt-file /tmp/question.md --timeout 1800 --json
+# Attach an existing provider link or backend id to a reusable local session.
+scripts/ai-chat.mjs --provider chatgpt --attach-conversation https://chatgpt.com/c/example-id --save-conversation imported-chatgpt --json
+scripts/ai-chat.mjs --provider perplexity --attach-conversation 123e4567-e89b-12d3-a456-426614174000 --save-conversation imported-pplx --json
 
-# Model discovery and history control.
-scripts/ai-chat.mjs --provider perplexity --list-models --json
+# Model selection and model discovery.
+scripts/ai-chat.mjs --provider chatgpt --list-models --json
+scripts/ai-chat.mjs --provider chatgpt --model extra-high --prompt-file /tmp/question.md --json
+scripts/ai-chat.mjs --provider gemini --task reasoning --prompt "Explain this tradeoff" --verify-session --json
 scripts/ai-chat.mjs --provider perplexity --list-models --verify-models --verify-model-timeout 180 --json
-scripts/ai-chat.mjs --provider gemini --list-models --verify-models --json
-scripts/ai-chat.mjs --provider gemini --model flash --prompt "..." --verify-session --json
-scripts/ai-chat.mjs --provider gemini --task reasoning --prompt "..." --json
-scripts/ai-chat.mjs --provider perplexity --task reasoning --prompt "..." --json
-scripts/ai-chat.mjs --provider perplexity --model openai/gpt-5.4-thinking --prompt "..." --save-to-library --json
+scripts/ai-chat.mjs --provider perplexity --model openai/gpt-5.4-thinking --prompt "Find recent evidence" --json
+
+# Perplexity research options with saved continuation state.
+scripts/ai-chat.mjs \
+  --provider perplexity \
+  --prompt-file /tmp/question.md \
+  --source-focus all \
+  --search-focus web \
+  --time-range week \
+  --citation-mode markdown \
+  --language en-US \
+  --timezone UTC \
+  --save-conversation policy-research \
+  --json
+
+# Perplexity deep research. Uses a long timeout by default.
+scripts/ai-chat.mjs --provider perplexity --task deep_research --prompt-file /tmp/question.md --json
+
+# Perplexity files, Spaces, streaming progress, and provider library saving.
+scripts/ai-chat.mjs \
+  --provider perplexity \
+  --prompt "Summarize this file for the project Space" \
+  --file /tmp/report.pdf \
+  --space-uuid 123e4567-e89b-12d3-a456-426614174000 \
+  --stream \
+  --save-to-library \
+  --json
 ```
 
-Stop Chrome with the Browser Tools stop command when you started it for the task.
+## Provider notes
+
+- Perplexity is expected to match the standalone Perplexity skill for the browser-authenticated WebUI API path: managed-browser cookie auth only, Pro-tier model ids and direct tool aliases, Max-tier filtering, account acceptance checks, research filters, deep research, files, Spaces, streaming, and backend UUID continuation with a private read-write token.
+- ChatGPT long-running requests use network SSE and WebSocket state first. Metadata reports stream handoff, timeout, partial or empty response, resumed stream, assistant turn completion, and DOM fallback when fallback is used.
+- Gemini uses WebUI API cookies from the AI Chat owned browser by default. It can fall back to an explicit Chrome profile cookie source. Native continuation can fail with backend error `1097`; metadata must show that and the local transcript fallback.
+- Grok uses browser UI labels and preflights the X/Grok composer before typing. It can verify visible labels, but not a backend model slug. In the current X/Grok app `Fast` is the reliable default; check `--list-models --verify-models` before selecting `Auto` or `Expert`.
 
 ## References
 
-- Read [references/transport.md](references/transport.md) before changing or debugging provider interaction. The architectural rule is network-first, UI-verified.
+- Read [references/orchestration.md](references/orchestration.md) for the provider boundary, owned browser lifecycle, private state contract, and Perplexity parity scope.
+- Read [references/transport.md](references/transport.md) before changing or debugging provider interaction. The rule is network-first, UI-verified.
 - Read [references/providers.md](references/providers.md) before choosing a provider or model.
-- Read [references/perplexity.md](references/perplexity.md) for Perplexity WebUI API features, model ids, thread continuation, deep research, source filters, and save-to-library behavior.
+- Read [references/perplexity.md](references/perplexity.md) for Perplexity WebUI API features, model ids, thread continuation, files, Spaces, streaming, deep research, source filters, and save-to-library behavior.
 - Read [references/gemini.md](references/gemini.md) for Gemini WebUI API transport, model headers, current limitations, and verification rules.
 - Read [references/evaluation.md](references/evaluation.md) before claiming a provider feature works.
 
 ## Operating rules
 
 - Use Browser Tools managed Chrome only. Do not connect to main Chrome or unmanaged DevTools sessions.
-- Browser Tools uses a copied profile. If a provider is logged in in normal Chrome but logged out in managed Chrome, stop the managed browser with `--clean`, restart it with the same profile or task plus `--sync`, and verify the provider session before blaming the adapter.
-- Grok preflights the X/Grok composer before typing. Fresh, wrong, or logged-out profiles fail with an auth/session error instead of waiting at prompt submission.
+- AI Chat starts and reuses its own Browser Tools browser. Do not manually attach it to another agent browser. Do not stop a browser unless Browser Tools owner-token checks prove it is the AI Chat owned browser.
+- Browser Tools uses a copied profile. AI Chat defaults to copied Chrome profile `Default`, or the configured `ai-chat` task profile when set. If a provider is logged in in normal Chrome but logged out in managed Chrome, cleanly stop the AI Chat owned browser, then rerun so Browser Tools resyncs the copied profile.
+- Perplexity auth uses only the managed Browser Tools Chrome session cookie. AI Chat does not read `PERPLEXITY_SESSION_TOKEN` or `PPLX_SESSION_TOKEN`, never prints the cookie value, and reports missing or expired auth with login and profile-sync recovery guidance.
+- Grok preflights the X/Grok composer before typing. Fresh, wrong, or logged-out profiles fail with an auth/session error before prompt submission.
 - Open any browser tabs in the background with `browser.newPage({ background: true })`.
-- Prefer provider APIs and network streams whenever possible. Use browser UI automation to authenticate, trigger, and verify. Read DOM text only as a fallback when structured messages are unavailable.
-- For multi-turn work, save a conversation id on the first turn and continue by id. Do not replay the whole chat history unless the provider lacks thread continuation.
-- For model selection, prefer a provider adapter that can list or verify available models. If the account gates models, report which models were visible or accepted.
-- For live verification, save JSON output and screenshot evidence under `/tmp/...`.
+- Prefer provider APIs and network streams whenever possible. Use browser UI automation to authenticate, trigger, and verify. Read DOM text only as a fallback when structured messages are unavailable, and mark that fallback in metadata.
+- For multi-turn work, save a conversation id on the first turn and continue by id. Attach existing provider links or backend ids with `--attach-conversation` and `--save-conversation`. For ChatGPT timeouts, run `--conversation <id> --save-conversation <id>` without a prompt to recheck the same saved turn. Do not replay the whole chat history unless the provider lacks backend continuation.
+- For model selection, prefer a provider adapter that can list or verify available models. If the account gates models, report which models were visible or accepted. Fallbacks must be explicit in metadata and must not hide a rejected requested model.
+- For live verification, save JSON output, stderr, notes, and screenshots when applicable under `/tmp/ai-chat-verify/...`. Never commit provider responses, model acceptance lists, screenshots, account-visible metadata, conversation records, owner tokens, or read-write tokens.
 - Final answers should include what was verified, what failed, evidence paths, and remaining uncertainty.

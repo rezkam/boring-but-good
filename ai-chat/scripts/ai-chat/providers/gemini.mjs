@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { readManagedStateForPort } from '../../../../browser-tools/scripts/browser-control.mjs';
+import { urlHasAllowedHostname } from './shared.mjs';
 
 import {
   GEMINI_MODELS,
@@ -21,6 +22,38 @@ const COOKIE_SOURCE_CHROME_PROFILE = 'chrome-profile';
 const COOKIE_SOURCE_AUTO = 'auto';
 
 const GEMINI_AUTH_CHECK_TIMEOUT_MS = 30000;
+const GEMINI_APP_HOSTNAMES = ['gemini.google.com'];
+const GEMINI_COOKIE_PAGE_HOSTNAMES = ['gemini.google.com', 'accounts.google.com', 'www.google.com', 'consent.google.com'];
+
+function isGeminiAppUrl(url) {
+  return urlHasAllowedHostname(url, GEMINI_APP_HOSTNAMES);
+}
+
+function isGeminiCookiePageUrl(url) {
+  return urlHasAllowedHostname(url, GEMINI_COOKIE_PAGE_HOSTNAMES);
+}
+
+export function resolveGeminiConversationAttachment({ target }) {
+  const value = String(target || '').trim();
+  if (!value) throw new Error('[gemini] Conversation attachment is empty');
+  if (/^https?:\/\//i.test(value)) {
+    const parsed = new URL(value);
+    const match = parsed.pathname.match(/^\/app\/([^/?#]+)/);
+    const conversationId = match?.[1] || null;
+    return {
+      type: 'url',
+      url: value,
+      providerId: conversationId,
+      providerState: conversationId ? { conversation_state: { conversation_id: conversationId } } : null,
+    };
+  }
+  return {
+    type: 'provider_id',
+    url: null,
+    providerId: value,
+    providerState: { conversation_state: { conversation_id: value } },
+  };
+}
 
 function uniqueStrings(values) {
   return [...new Set(values.filter(value => typeof value === 'string' && value.trim()).map(value => value.trim()))];
@@ -91,17 +124,14 @@ async function discoverGeminiModels({ cookies, cookieContext, timeoutMs }) {
 async function getGoogleCookiesFromManagedBrowserRuntime(browser) {
   if (!browser) return null;
   const pages = await browser.pages();
-  let page = pages.find(candidate => {
-    const url = candidate.url();
-    return url.includes('gemini.google.com') || url.includes('accounts.google.com') || url.includes('google.com');
-  });
+  let page = pages.find(candidate => isGeminiCookiePageUrl(candidate.url()));
   if (!page) page = await browser.newPage({ background: true });
 
   let cookies = browserCookiesToGoogleCookieMap(await page.cookies(...GOOGLE_ORIGINS));
   if (hasRequiredGoogleCookies(cookies)) return cookies;
 
   try {
-    if (!page.url().includes('gemini.google.com')) {
+    if (!isGeminiAppUrl(page.url())) {
       await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 30000 });
     }
   } catch {}
@@ -292,9 +322,24 @@ async function verifyGeminiModels({ cookies, models, timeoutMs }) {
   return result;
 }
 
+const GEMINI_NATIVE_CONTINUATION_ERROR_CODE = 1097;
+
+function normalizedGeminiErrorCode(error) {
+  const code = error?.errorCode ?? error?.error_code ?? null;
+  if (typeof code === 'number' && Number.isInteger(code)) return code;
+  if (typeof code === 'string' && /^\d+$/.test(code.trim())) return Number.parseInt(code, 10);
+  const messageMatch = String(error?.message || '').match(/^Gemini Web returned error (\d+)$/);
+  return messageMatch ? Number.parseInt(messageMatch[1], 10) : null;
+}
+
+export function isGeminiNativeContinuationError(error) {
+  return normalizedGeminiErrorCode(error) === GEMINI_NATIVE_CONTINUATION_ERROR_CODE;
+}
+
 export const geminiProvider = {
   name: 'gemini',
   url: 'https://gemini.google.com/app',
+  trustedConversationHostnames: GEMINI_APP_HOSTNAMES,
   transport: 'webui-api',
 
   defaultModel: 'gemini-3-flash',
@@ -309,6 +354,7 @@ export const geminiProvider = {
     saveFlag: '--save-to-library',
     transportField: 'innerReqList[45]',
   },
+  resolveConversationAttachment: resolveGeminiConversationAttachment,
 
   runRequiresBrowser({ request } = {}) {
     return resolveCookieSource(request) !== COOKIE_SOURCE_CHROME_PROFILE;
@@ -388,10 +434,10 @@ export const geminiProvider = {
       });
     } catch (error) {
       const previousMessages = conversation?.record?.messages || [];
-      if (!previousMessages.length) throw error;
+      if (!previousMessages.length || !isGeminiNativeContinuationError(error)) throw error;
       const nativeContinuationError = {
         message: error.message,
-        error_code: error.errorCode || null,
+        error_code: normalizedGeminiErrorCode(error),
         model: error.model || modelConfig.id,
       };
       const transcript = previousMessages

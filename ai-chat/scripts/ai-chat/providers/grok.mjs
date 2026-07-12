@@ -1,11 +1,107 @@
-import { sleep } from './shared.mjs';
+import { sleep, urlHasAllowedHostname } from './shared.mjs';
 
+const GROK_HOSTNAMES = ['x.com', 'www.x.com'];
 const GROK_AUTH_ERROR_MESSAGE = '[grok] Browser session is not authenticated for X/Grok. Fresh, wrong, or logged-out Browser Tools profiles cannot use Grok. Start Browser Tools with the default or configured Chrome profile that is logged in to X/Grok, for example --profile Default --sync. If managed Chrome is using a stale copied profile, stop it with --clean, restart with the same profile plus --sync, and retry.';
+
+function isGrokHostUrl(url) {
+  return urlHasAllowedHostname(url, GROK_HOSTNAMES);
+}
+
+function isGrokAppUrl(url) {
+  if (!isGrokHostUrl(url)) return false;
+  try {
+    const pathname = new URL(url).pathname;
+    return pathname === '/i/grok' || pathname.startsWith('/i/grok/');
+  } catch {
+    return false;
+  }
+}
+
+function isGrokConversationUrl(url) {
+  if (!isGrokAppUrl(url)) return false;
+  try {
+    return new URL(url).searchParams.has('conversation');
+  } catch {
+    return false;
+  }
+}
+
+export const GROK_MODELS = [
+  { id: 'auto', name: 'Auto', reasoning: 'provider-selected', aliases: [] },
+  { id: 'fast', name: 'Fast', reasoning: 'low-latency', aliases: ['default', 'quick', 'low'] },
+  { id: 'expert', name: 'Expert', reasoning: 'reasoning', aliases: ['think', 'reasoning'] },
+];
+
+function normalizeGrokModelName(value) {
+  return String(value || 'default').trim().toLowerCase().replace(/[\s_]+/g, '-');
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values.filter(value => typeof value === 'string' && value.trim()).map(value => value.trim()))];
+}
+
+export function resolveGrokModel(modelName = 'default') {
+  const normalized = normalizeGrokModelName(modelName);
+  return GROK_MODELS.find(model => {
+    const candidates = [model.id, model.name, ...(model.aliases || [])];
+    return candidates.some(candidate => normalizeGrokModelName(candidate) === normalized);
+  }) || null;
+}
+
+function grokModelUsed(modelName) {
+  return resolveGrokModel(modelName)?.id || String(modelName || 'default');
+}
+
+function grokProviderState(selectedModel, conversationUrl = null) {
+  const model = resolveGrokModel(selectedModel);
+  return {
+    transport: 'browser-ui',
+    selected_model: model?.id || String(selectedModel || 'default'),
+    selected_model_label: model?.name || String(selectedModel || 'default'),
+    selection_verification: model ? 'visible-ui-label' : 'unverified',
+    conversation_url: conversationUrl || null,
+  };
+}
+
+function grokModelRecord(model, { visible = null } = {}) {
+  return {
+    id: model.id,
+    name: model.name,
+    reasoning: model.reasoning,
+    aliases: model.aliases || [],
+    visible,
+    selected_by: uniqueStrings(['--model', model.id, model.name, ...(model.aliases || [])]),
+    verification: visible === null
+      ? { status: 'not-checked' }
+      : { status: visible ? 'visible' : 'not-visible' },
+  };
+}
 
 function compactGrokUrl(url = '') {
   const text = String(url || '').trim();
   if (!text) return '';
   return text.length > 180 ? `${text.slice(0, 177)}...` : text;
+}
+
+export function resolveGrokConversationAttachment({ target }) {
+  const value = String(target || '').trim();
+  if (!value) throw new Error('[grok] Conversation attachment is empty');
+  if (/^https?:\/\//i.test(value)) {
+    const parsed = new URL(value);
+    const conversationId = parsed.searchParams.get('conversation') || null;
+    return {
+      type: 'url',
+      url: value,
+      providerId: conversationId,
+      providerState: conversationId ? { conversation_id: conversationId } : null,
+    };
+  }
+  return {
+    type: 'provider_id',
+    url: `https://x.com/i/grok?conversation=${encodeURIComponent(value)}`,
+    providerId: value,
+    providerState: { conversation_id: value },
+  };
 }
 
 function isGrokLoginUrl(url = '') {
@@ -142,9 +238,9 @@ export function isGrokPlaceholderResponse(input = {}) {
 }
 
 function getGrokFallbackModels(requestedModel) {
-  const normalized = (requestedModel || 'default').toLowerCase();
-  if (normalized === 'expert' || normalized === 'think') return ['auto', 'fast'];
-  if (normalized === 'default' || normalized === 'auto') return ['fast'];
+  const normalized = resolveGrokModel(requestedModel)?.id || normalizeGrokModelName(requestedModel);
+  if (normalized === 'expert') return ['fast'];
+  if (normalized === 'auto') return ['fast'];
   return [];
 }
 
@@ -252,7 +348,15 @@ async function createGrokNetworkTracker(page) {
 export const grokProvider = {
   name: 'grok',
   url: 'https://x.com/i/grok',
+  trustedConversationHostnames: GROK_HOSTNAMES,
+  defaultModel: 'fast',
+  taskModels: {
+    default: 'fast',
+    quick: 'fast',
+    reasoning: 'expert',
+  },
   listModelsRequiresBrowser: true,
+  resolveConversationAttachment: resolveGrokConversationAttachment,
 
   async listModels({ browser, request }) {
     const page = await this.findPage({ browser, continueChat: false });
@@ -261,12 +365,16 @@ export const grokProvider = {
       .map(el => (el.textContent || el.getAttribute('aria-label') || '').trim())
       .filter(text => /^(Auto|Fast|Expert)$/.test(text)));
     const unique = [...new Set(visible)];
-    const known = [
-      { id: 'auto', name: 'Auto', reasoning: 'provider-selected', visible: unique.includes('Auto') },
-      { id: 'fast', name: 'Fast', reasoning: 'low-latency', visible: unique.includes('Fast') },
-      { id: 'expert', name: 'Expert', reasoning: 'reasoning', visible: unique.includes('Expert') },
-    ];
-    return known;
+    return {
+      model_source: 'grok-webui-visible-labels',
+      account_specific: true,
+      verification: {
+        enabled: !!request?.verifyModels,
+        status: 'visible-label-check',
+        note: 'Grok exposes Auto, Fast, and Expert in the Web UI. The adapter can verify the visible label, not a backend model slug.',
+      },
+      models: GROK_MODELS.map(model => grokModelRecord(model, { visible: unique.includes(model.name) })),
+    };
   },
 
   async preflight({ page }) {
@@ -293,8 +401,8 @@ export const grokProvider = {
     return isGrokPlaceholderResponse({ text, rawText });
   },
 
-  fallbackModels({ requestedModel }) {
-    return getGrokFallbackModels(requestedModel);
+  fallbackModels({ requestedModel, initialModel, selectedModel, rejectedModel, rejectedModelUsed }) {
+    return getGrokFallbackModels(rejectedModelUsed || rejectedModel || selectedModel || initialModel || requestedModel);
   },
 
   async recoverResponse({ browser, page, result, prompt }) {
@@ -319,16 +427,16 @@ export const grokProvider = {
 
   async findPage({ browser, continueChat }) {
     const pages = await browser.pages();
-    let page = pages.find(p => p.url().includes('x.com/i/grok'));
+    let page = pages.find(p => isGrokAppUrl(p.url()));
     if (!page) {
-      page = pages.find(p => p.url().includes('x.com'));
+      page = pages.find(p => isGrokHostUrl(p.url()));
       if (!page) {
         page = await browser.newPage({ background: true });
       }
     }
     if (continueChat) {
       // Find the most recently opened grok conversation tab (last in the list)
-      const grokPages = pages.filter(p => p.url().includes('x.com/i/grok'));
+      const grokPages = pages.filter(p => isGrokAppUrl(p.url()));
       if (grokPages.length > 0) page = grokPages[grokPages.length - 1];
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
       await sleep(2000);
@@ -341,8 +449,9 @@ export const grokProvider = {
   },
 
   async setModel({ page, model, thinking }) {
-    const nameMap = { 'default': 'Auto', 'auto': 'Auto', 'fast': 'Fast', 'expert': 'Expert', 'think': 'Expert' };
-    const target = nameMap[(model || 'default').toLowerCase()] || model;
+    const modelConfig = resolveGrokModel(model || 'default');
+    if (!modelConfig) throw new Error(`[grok] Unknown model: ${model || 'default'}. Available models: auto, fast, expert.`);
+    const target = modelConfig.name;
 
     const getCurrentModelLabel = async () => await page.evaluate(() => {
       const labels = ['Auto', 'Fast', 'Expert'];
@@ -498,12 +607,12 @@ export const grokProvider = {
     for (let tabCheck = 0; tabCheck < 8; tabCheck++) {
       await sleep(1500);
       // Check if current page navigated to a conversation
-      if (page.url().includes('conversation=') && !existingConversationUrls.has(page.url())) break;
+      if (isGrokConversationUrl(page.url()) && !existingConversationUrls.has(page.url())) break;
       // Check for a NEW tab (URL not in existingConversationUrls)
       const allPages = await browser.pages();
       const newConvPage = allPages.find(p => {
         const u = p.url();
-        return u.includes('x.com/i/grok?conversation=') && !existingConversationUrls.has(u);
+        return isGrokConversationUrl(u) && !existingConversationUrls.has(u);
       });
       if (newConvPage) {
         page = newConvPage;
@@ -513,7 +622,7 @@ export const grokProvider = {
       }
     }
 
-    if (!page.url().includes('conversation=')) {
+    if (!isGrokConversationUrl(page.url())) {
       console.error('[grok] WARNING: No new conversation tab found');
     }
 
@@ -616,7 +725,18 @@ export const grokProvider = {
         return { text: text.trim(), rawText: rawText.trim(), done: rateLimited, rateLimited };
       }, preSubmitLen, promptSnippet, prompt);
 
-      if (result.rateLimited) return { text: result.text || 'RATE_LIMITED', rawText: result.rawText || result.text || 'RATE_LIMITED', done: true, rateLimited: true, pageUrl: page.url() };
+      if (result.rateLimited) {
+        const pageUrl = page.url();
+        return {
+          text: result.text || 'RATE_LIMITED',
+          rawText: result.rawText || result.text || 'RATE_LIMITED',
+          done: true,
+          rateLimited: true,
+          pageUrl,
+          modelUsed: grokModelUsed(selectedModel),
+          providerState: grokProviderState(selectedModel, pageUrl),
+        };
+      }
 
       const currentLen = result.text.length;
       const stableThreshold = selectedModel === 'expert' ? 3 : 2;
@@ -636,9 +756,18 @@ export const grokProvider = {
       }
 
       if (hasAcceptableText) {
-        if (result.done) return { text: result.text, rawText: result.rawText, done: true, rateLimited: false, pageUrl: page.url() };
-        if (sawStream && streamFinished) return { text: result.text, rawText: result.rawText, done: true, rateLimited: false, pageUrl: page.url() };
-        if (stableCount >= stableThreshold && !sawStream) return { text: result.text, rawText: result.rawText, done: true, rateLimited: false, pageUrl: page.url() };
+        if (result.done || (sawStream && streamFinished) || (stableCount >= stableThreshold && !sawStream)) {
+          const pageUrl = page.url();
+          return {
+            text: result.text,
+            rawText: result.rawText,
+            done: true,
+            rateLimited: false,
+            pageUrl,
+            modelUsed: grokModelUsed(selectedModel),
+            providerState: grokProviderState(selectedModel, pageUrl),
+          };
+        }
       }
       prevLen = currentLen;
 
@@ -648,6 +777,15 @@ export const grokProvider = {
       process.stderr.write(`  [grok] ${currentLen} chars (poll ${attempt + 1}/${maxPolls})${trackerNote}\r`);
       await sleep(pollMs);
     }
-    return { text: '', rawText: '', done: false, rateLimited: false, pageUrl: page.url() };
+    const pageUrl = page.url();
+    return {
+      text: '',
+      rawText: '',
+      done: false,
+      rateLimited: false,
+      pageUrl,
+      modelUsed: grokModelUsed(selectedModel),
+      providerState: grokProviderState(selectedModel, pageUrl),
+    };
   },
 };

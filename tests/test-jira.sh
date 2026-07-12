@@ -449,11 +449,14 @@ fi
 header "Jira: --parent applied in create (regression)"
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Regression: --parent was parsed but never added to the create command
-if grep -q 'PARENT.*CMD\|CMD.*parent' "$JIRA_SCRIPTS/jira-create.sh"; then
-    pass "jira-create.sh: --parent is added to create command"
+# Regression: --parent was parsed but never applied to the created issue.
+# Current behavior sets parent with a follow-up Jira API PUT because Jira Cloud ignores
+# create-time parent overrides for some non-subtask issue types.
+if grep -q 'PARENT_OUTPUT=.*jira-api.sh.*PUT' "$JIRA_SCRIPTS/jira-create.sh" && \
+   grep -q 'parent.*key.*PARENT' "$JIRA_SCRIPTS/jira-create.sh"; then
+    pass "jira-create.sh: --parent is applied with follow-up API update"
 else
-    fail "jira-create.sh: --parent is parsed but never applied to the create command"
+    fail "jira-create.sh: --parent is parsed but never applied to the created issue"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
