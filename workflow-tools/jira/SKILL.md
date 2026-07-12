@@ -7,6 +7,7 @@ description: Manage Jira issues — create, view, update, transition, comment, l
 
 Manage Jira issues using wrapper scripts around the `go-jira` CLI.
 Credentials are handled by go-jira (`~/.jira.d/config.yml` + OS keychain). Scripts never touch secrets directly.
+The ADF conversion helpers use the dependencies declared in `scripts/package.json`. Run `npm ci --prefix scripts` after a manual install. `node_modules/` is local-only and is never committed.
 
 ## Configuration
 

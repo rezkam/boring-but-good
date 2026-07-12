@@ -354,6 +354,21 @@ check_and_install_deps() {
         else
             success "jira ${DIM}(go-jira CLI)${RESET} found."
         fi
+
+        if [ "$INSTALL_JIRA" = "true" ]; then
+            local jira_scripts="${SKILLS_SRC}/workflow-tools/jira/scripts"
+            if ! has_cmd npm; then
+                warn "Skipping jira skill (requires npm for ADF conversion helpers)."
+                INSTALL_JIRA=false
+                _skipped=true
+            elif npm --prefix "$jira_scripts" ci --ignore-scripts; then
+                success "jira ${DIM}(ADF conversion dependencies installed)${RESET}"
+            else
+                warn "Skipping jira skill (failed to install ADF conversion dependencies)."
+                INSTALL_JIRA=false
+                _skipped=true
+            fi
+        fi
     fi
 
     echo ""

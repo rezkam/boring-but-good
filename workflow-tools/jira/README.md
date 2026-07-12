@@ -39,7 +39,7 @@ An agent that can read code but can't file a ticket is only half useful. This sk
 npx skills add rezkam/boring-but-good --skill jira
 ```
 
-Or install manually — run `./setup.sh` from the repo root or see [SKILL.md](SKILL.md) for manual setup.
+Or install manually, run `./setup.sh` from the repo root or see [SKILL.md](SKILL.md) for manual setup. The setup script runs `npm ci` for the ADF conversion helpers. `node_modules/` is local-only and is never committed.
 
 ## Setup
 
