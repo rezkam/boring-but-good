@@ -1,12 +1,58 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { connectBrowser, DEFAULT_PORT, normalizePort, optionValue, hasFlag, timestampedTmpPath } from '../../../browser-tools/scripts/browser-control.mjs';
+import {
+  browserWSEndpoint,
+  connectBrowser,
+  DEFAULT_PORT,
+  managedBrowserOwnershipSafety,
+  managedBrowserSafetyForPort,
+  normalizePort,
+  readManagedStateForPort,
+  requiredOptionValue as optionValue,
+  hasFlag,
+  startChrome,
+  timestampedTmpPath,
+} from '../../../browser-tools/scripts/browser-control.mjs';
 import { readCachedResponse, writeCachedResponse } from '../browser-query-cache.mjs';
 import { aiChatProviders, getAiChatProvider, listAiChatProviders } from './providers/index.mjs';
 
 export const DEFAULT_TIMEOUT_SECONDS = 300;
+export const AI_CHAT_BROWSER_OWNER_ID = 'ai-chat';
+export const AI_CHAT_BROWSER_TASK_NAME = 'ai-chat';
+export const AI_CHAT_DEFAULT_BROWSER_PROFILE_NAME = 'Default';
 export const DEFAULT_CONVERSATION_STORE_DIR = join(homedir(), '.cache', 'pi-browser-tools', 'ai-chat-conversations');
+export const DEFAULT_BROWSER_STATE_FILE = join(homedir(), '.cache', 'pi-browser-tools', 'ai-chat-browser.json');
+export const PRIVATE_STATE_FILE_MODE = 0o600;
+
+function optionValues(args, name) {
+  const values = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] !== name) continue;
+    const value = args[index + 1];
+    if (value === undefined || String(value).startsWith('--')) throw new Error(`Missing value after ${name}`);
+    values.push(value);
+  }
+  return values;
+}
+
+function repeatedOptionValue(args, name) {
+  const values = optionValues(args, name);
+  if (values.length === 0) return null;
+  return values.length === 1 ? values[0] : values;
+}
+
+function parsePositiveIntegerOption(args, name, fallback) {
+  const value = optionValue(args, name, fallback);
+  if (value === fallback) return fallback;
+
+  const normalized = String(value);
+  if (!/^[1-9]\d*$/.test(normalized)) {
+    throw new Error(`Invalid ${name} value: "${value}"`);
+  }
+
+  return Number.parseInt(normalized, 10);
+}
 
 export function parseAiChatArgs(args = process.argv.slice(2)) {
   const providerName = optionValue(args, '--provider', 'grok');
@@ -15,10 +61,11 @@ export function parseAiChatArgs(args = process.argv.slice(2)) {
   const modelName = optionValue(args, '--model', 'default');
   const modelTask = optionValue(args, '--task', null);
   const outFile = optionValue(args, '--out', null);
-  const timeoutSeconds = Number.parseInt(String(optionValue(args, '--timeout', DEFAULT_TIMEOUT_SECONDS)), 10);
+  const timeoutSeconds = parsePositiveIntegerOption(args, '--timeout', DEFAULT_TIMEOUT_SECONDS);
   const conversationTarget = optionValue(args, '--conversation', null);
   const saveConversation = optionValue(args, '--save-conversation', null);
-  const sourceFocus = optionValue(args, '--source-focus', null);
+  const attachConversation = optionValue(args, '--attach-conversation', null);
+  const sourceFocus = repeatedOptionValue(args, '--source-focus');
   const searchFocus = optionValue(args, '--search-focus', null);
   const timeRange = optionValue(args, '--time-range', null);
   const citationMode = optionValue(args, '--citation-mode', null);
@@ -27,14 +74,9 @@ export function parseAiChatArgs(args = process.argv.slice(2)) {
   const chromeProfile = optionValue(args, '--chrome-profile', null);
   const cookieSource = optionValue(args, '--cookie-source', null);
   const evidencePath = optionValue(args, '--evidence-path', null);
-  const verifyModelTimeoutSeconds = Number.parseInt(String(optionValue(args, '--verify-model-timeout', 90)), 10);
-
-  if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1) {
-    throw new Error(`Invalid --timeout value: ${optionValue(args, '--timeout', DEFAULT_TIMEOUT_SECONDS)}`);
-  }
-  if (!Number.isInteger(verifyModelTimeoutSeconds) || verifyModelTimeoutSeconds < 1) {
-    throw new Error(`Invalid --verify-model-timeout value: ${optionValue(args, '--verify-model-timeout', 90)}`);
-  }
+  const files = optionValues(args, '--file');
+  const spaceUuid = optionValue(args, '--space-uuid', optionValue(args, '--space', null));
+  const verifyModelTimeoutSeconds = parsePositiveIntegerOption(args, '--verify-model-timeout', 90);
 
   return {
     providerName,
@@ -45,11 +87,15 @@ export function parseAiChatArgs(args = process.argv.slice(2)) {
     thinking: hasFlag(args, '--thinking'),
     outFile: outFile === true ? null : outFile,
     port: normalizePort(optionValue(args, '--port', DEFAULT_PORT)),
+    explicitPort: args.includes('--port'),
     timeoutSeconds,
+    timeoutExplicit: args.includes('--timeout'),
     jsonOutput: hasFlag(args, '--json'),
+    stream: hasFlag(args, '--stream'),
     continueChat: hasFlag(args, '--continue'),
     conversationTarget: conversationTarget === true ? null : conversationTarget,
     saveConversation: saveConversation === true ? null : saveConversation,
+    attachConversation: attachConversation === true ? null : attachConversation,
     listModels: hasFlag(args, '--list-models'),
     verifyModels: hasFlag(args, '--verify-models'),
     verifyModelTimeoutSeconds,
@@ -58,7 +104,7 @@ export function parseAiChatArgs(args = process.argv.slice(2)) {
     evidencePath: evidencePath === true ? null : evidencePath,
     evidenceFullPage: hasFlag(args, '--evidence-full-page'),
     providerOptions: {
-      sourceFocus: sourceFocus === true ? null : sourceFocus,
+      sourceFocus,
       searchFocus: searchFocus === true ? null : searchFocus,
       timeRange: timeRange === true ? null : timeRange,
       citationMode: citationMode === true ? null : citationMode,
@@ -68,6 +114,8 @@ export function parseAiChatArgs(args = process.argv.slice(2)) {
       verifySession: hasFlag(args, '--verify-session') || hasFlag(args, '--auth-check'),
       chromeProfile: chromeProfile === true ? null : chromeProfile,
       cookieSource: cookieSource === true ? null : cookieSource,
+      files,
+      spaceUuid: spaceUuid === true ? null : spaceUuid,
     },
   };
 }
@@ -86,8 +134,250 @@ export function readPrompt({ promptFile = null, inlinePrompt = null, stdinPath =
   return prompt;
 }
 
+function hasPromptInput(options = {}) {
+  return typeof options.prompt === 'string' || typeof options.inlinePrompt === 'string' || typeof options.promptFile === 'string';
+}
+
+export function resolveAiChatBrowserStateFile(request = {}, deps = {}) {
+  return deps.browserStateFile || request.browserStateFile || process.env.AI_CHAT_BROWSER_STATE_FILE || DEFAULT_BROWSER_STATE_FILE;
+}
+
+export function readAiChatBrowserState(stateFile = DEFAULT_BROWSER_STATE_FILE, fs = defaultBrowserStateFs) {
+  if (!fs.exists(stateFile)) return null;
+  try {
+    return JSON.parse(fs.readFile(stateFile, 'utf-8'));
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error(`Failed to parse AI Chat browser state ${stateFile}: ${error.message}`);
+    throw error;
+  }
+}
+
+function privateModeText(mode) {
+  if (!Number.isFinite(mode)) return 'unknown';
+  return `0${(mode & 0o777).toString(8).padStart(3, '0')}`;
+}
+
+function privatePermissionEnforcementError({ label, path, action }) {
+  return new Error(`Failed to enforce private permissions on ${label} at ${path}: ${action}. Recovery: make sure the file is owned by the current user and chmod 0600 is allowed, then retry.`);
+}
+
+function privatePermissionVerificationError({ label, path, observedMode = null, action = null }) {
+  const detail = action || `expected mode 0600, observed ${privateModeText(observedMode)}`;
+  return new Error(`Failed to verify private permissions on ${label} at ${path}: ${detail}. Recovery: make sure the file is on a filesystem that supports owner-only permissions, then retry.`);
+}
+
+function enforcePrivateFilePermissions(path, fs, label) {
+  if (typeof fs.chmod !== 'function') {
+    throw privatePermissionEnforcementError({ label, path, action: 'chmod 0600 is not available from the fs dependency' });
+  }
+
+  try {
+    fs.chmod(path, PRIVATE_STATE_FILE_MODE);
+  } catch {
+    throw privatePermissionEnforcementError({ label, path, action: 'chmod 0600 failed' });
+  }
+
+  if (typeof fs.stat !== 'function') {
+    throw privatePermissionVerificationError({ label, path, action: 'stat is not available from the fs dependency' });
+  }
+
+  let stats;
+  try {
+    stats = fs.stat(path);
+  } catch {
+    throw privatePermissionVerificationError({ label, path, action: 'stat failed' });
+  }
+
+  const mode = Number(stats?.mode);
+  if (!Number.isFinite(mode) || (mode & 0o777) !== PRIVATE_STATE_FILE_MODE) {
+    throw privatePermissionVerificationError({ label, path, observedMode: mode });
+  }
+}
+
+function writePrivateJsonFile(path, value, fs, label) {
+  fs.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  if (typeof fs.exists === 'function' && fs.exists(path)) enforcePrivateFilePermissions(path, fs, label);
+  fs.writeFile(path, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf-8', mode: PRIVATE_STATE_FILE_MODE });
+  enforcePrivateFilePermissions(path, fs, label);
+}
+
+export function writeAiChatBrowserState(state, stateFile = DEFAULT_BROWSER_STATE_FILE, fs = defaultBrowserStateFs) {
+  writePrivateJsonFile(stateFile, state, fs, 'AI Chat browser state');
+  return state;
+}
+
+export function clearAiChatBrowserState(stateFile = DEFAULT_BROWSER_STATE_FILE, fs = defaultBrowserStateFs) {
+  fs.rm(stateFile, { force: true });
+}
+
+function browserToolsDeps(deps = {}) {
+  return {
+    browserWSEndpoint: deps.browserWSEndpoint || browserWSEndpoint,
+    connectBrowser: deps.connectBrowser || connectBrowser,
+    managedBrowserOwnershipSafety: deps.managedBrowserOwnershipSafety || managedBrowserOwnershipSafety,
+    managedBrowserSafetyForPort: deps.managedBrowserSafetyForPort || managedBrowserSafetyForPort,
+    readManagedStateForPort: deps.readManagedStateForPort || readManagedStateForPort,
+    startChrome: deps.startChrome || startChrome,
+  };
+}
+
+export function aiChatBrowserRecoveryMessage({ port, reason, ownerId, stateFile } = {}) {
+  const ownerText = ownerId ? ` owned by ${ownerId}` : '';
+  const stopText = port ? ` with Browser Tools stop --port ${port}` : ' with Browser Tools stop';
+  const stateText = stateFile ? ` AI Chat browser state: ${stateFile}.` : '';
+  return `Recovery: do not attach to that browser${ownerText}. Use the correct owner token${stopText}, remove stale AI Chat browser state, or choose a different --port. Reason: ${reason || 'unknown'}.${stateText}`;
+}
+
+function aiChatBrowserError(message, { port, reason, ownerId, stateFile } = {}) {
+  const portText = port ? ` on :${port}` : '';
+  return new Error(`${message}${portText}: ${reason || 'unknown'}. ${aiChatBrowserRecoveryMessage({ port, reason, ownerId, stateFile })}`);
+}
+
+function browserProfileMismatchReason({ expectedProfileName = 'configured-or-default-profile', actualProfileName }) {
+  const actual = actualProfileName || 'fresh-profile';
+  return `profile-mismatch expected ${expectedProfileName}, got ${actual}`;
+}
+
+export async function validateAiChatBrowserState(state, { browserTools = browserToolsDeps(), stateFile = DEFAULT_BROWSER_STATE_FILE, expectedProfileName = null, requireProfile = false } = {}) {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) {
+    return { ok: false, stale: true, reason: 'missing-ai-chat-browser-state' };
+  }
+
+  let port;
+  try {
+    port = normalizePort(state.port || DEFAULT_PORT);
+  } catch {
+    return { ok: false, stale: true, reason: 'invalid-ai-chat-browser-port' };
+  }
+
+  const ownerToken = typeof state.ownerToken === 'string' && state.ownerToken.trim() ? state.ownerToken.trim() : null;
+  if (!ownerToken) {
+    return { ok: false, stale: false, port, reason: 'missing-owner-token' };
+  }
+
+  const safety = browserTools.managedBrowserSafetyForPort(port);
+  if (!safety.ok) {
+    const wsEndpoint = await browserTools.browserWSEndpoint(port);
+    if (!wsEndpoint) return { ok: false, stale: true, port, reason: safety.reason || 'stale-managed-state' };
+    return { ok: false, stale: false, port, reason: safety.reason || 'missing-managed-state' };
+  }
+
+  const managedState = browserTools.readManagedStateForPort(port);
+  const ownership = browserTools.managedBrowserOwnershipSafety({ state: managedState, ownerToken });
+  if (!ownership.ok) {
+    return { ok: false, stale: false, port, reason: ownership.reason, ownerId: ownership.ownerId || managedState?.ownerId || null };
+  }
+  if (ownership.ownerId !== AI_CHAT_BROWSER_OWNER_ID) {
+    return { ok: false, stale: false, port, reason: 'owner-id-mismatch', ownerId: ownership.ownerId || null };
+  }
+
+  const actualProfileName = managedState?.profileName || state.profileName || null;
+  if (requireProfile && !actualProfileName) {
+    return {
+      ok: false,
+      stale: false,
+      port,
+      reason: browserProfileMismatchReason({ actualProfileName }),
+      ownerId: ownership.ownerId || null,
+      profileName: actualProfileName,
+      expectedProfileName: expectedProfileName || null,
+    };
+  }
+  if (expectedProfileName && actualProfileName !== expectedProfileName) {
+    return {
+      ok: false,
+      stale: false,
+      port,
+      reason: browserProfileMismatchReason({ expectedProfileName, actualProfileName }),
+      ownerId: ownership.ownerId || null,
+      profileName: actualProfileName,
+      expectedProfileName,
+    };
+  }
+
+  const wsEndpoint = await browserTools.browserWSEndpoint(port);
+  if (!wsEndpoint) {
+    return { ok: false, stale: false, port, reason: 'debug-port-unavailable', ownerId: ownership.ownerId || null };
+  }
+
+  return { ok: true, port, ownerToken, ownerId: ownership.ownerId, managedState, stateFile };
+}
+
+export async function ensureAiChatBrowserSession(request, deps = {}) {
+  if (deps.browser) return { browser: deps.browser, shouldDisconnect: false, request, source: 'injected' };
+
+  const stateFile = resolveAiChatBrowserStateFile(request, deps);
+  const stateFs = deps.browserStateFs || defaultBrowserStateFs;
+  const browserTools = browserToolsDeps(deps);
+  const savedState = readAiChatBrowserState(stateFile, stateFs);
+
+  if (savedState) {
+    const validation = await validateAiChatBrowserState(savedState, { browserTools, stateFile, requireProfile: true });
+    if (validation.ok) {
+      console.error(`[ai-chat] Reusing owned Browser Tools Chrome on :${validation.port}`);
+      try {
+        const browser = await browserTools.connectBrowser(validation.port, { ownerToken: validation.ownerToken, protocolTimeout: 60000 });
+        return { browser, shouldDisconnect: true, request: { ...request, port: validation.port }, source: 'reused', state: savedState };
+      } catch (error) {
+        throw aiChatBrowserError(`Refusing to connect to saved AI Chat browser after validation failed (${error.message})`, {
+          port: validation.port,
+          reason: 'connect-failed',
+          ownerId: validation.ownerId,
+          stateFile,
+        });
+      }
+    }
+
+    if (validation.stale) {
+      console.error(`[ai-chat] Discarding stale AI Chat browser state (${validation.reason}); starting a new owned browser.`);
+      clearAiChatBrowserState(stateFile, stateFs);
+    } else {
+      throw aiChatBrowserError('Refusing to use saved AI Chat browser', {
+        port: validation.port,
+        reason: validation.reason,
+        ownerId: validation.ownerId,
+        stateFile,
+      });
+    }
+  }
+
+  console.error('[ai-chat] Starting Browser Tools Chrome owned by ai-chat');
+  const started = await browserTools.startChrome({
+    port: request.port,
+    taskName: AI_CHAT_BROWSER_TASK_NAME,
+    defaultProfileName: AI_CHAT_DEFAULT_BROWSER_PROFILE_NAME,
+    ownerId: AI_CHAT_BROWSER_OWNER_ID,
+    autoAllocatePort: !request.explicitPort,
+  });
+  if (!started.ownerToken) {
+    throw new Error('Browser Tools did not return an owner token for the AI Chat browser. Recovery: retry, or start Browser Tools manually with an owner token and configure AI Chat state.');
+  }
+
+  const state = writeAiChatBrowserState({
+    version: 1,
+    ownerId: AI_CHAT_BROWSER_OWNER_ID,
+    ownerToken: started.ownerToken,
+    port: started.port,
+    taskName: AI_CHAT_BROWSER_TASK_NAME,
+    profileName: started.profileName || null,
+    requestedProfileName: started.requestedProfileName || null,
+    status: started.status || 'started',
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }, stateFile, stateFs);
+  const browser = await browserTools.connectBrowser(started.port, { ownerToken: started.ownerToken, protocolTimeout: 60000 });
+  return { browser, shouldDisconnect: true, request: { ...request, port: started.port }, source: started.status || 'started', state };
+}
+
 export function buildAiChatRequest(options = {}) {
-  const prompt = options.listModels ? '' : (options.prompt ?? readPrompt(options));
+  const prompt = options.listModels
+    || (options.attachConversation && !hasPromptInput(options))
+    || (options.conversationTarget && !hasPromptInput(options))
+    ? ''
+    : (options.prompt ?? readPrompt(options));
+  const timeoutExplicit = typeof options.timeoutExplicit === 'boolean'
+    ? options.timeoutExplicit
+    : Object.prototype.hasOwnProperty.call(options, 'timeoutSeconds');
   return {
     providerName: options.providerName || 'grok',
     modelName: options.modelName || 'default',
@@ -95,11 +385,16 @@ export function buildAiChatRequest(options = {}) {
     thinking: !!options.thinking,
     outFile: options.outFile || null,
     port: normalizePort(options.port ?? DEFAULT_PORT),
+    explicitPort: !!options.explicitPort,
+    browserStateFile: options.browserStateFile || null,
     timeoutSeconds: options.timeoutSeconds || DEFAULT_TIMEOUT_SECONDS,
+    timeoutExplicit,
     jsonOutput: !!options.jsonOutput,
+    stream: !!options.stream,
     continueChat: !!options.continueChat,
     conversationTarget: options.conversationTarget || null,
     saveConversation: options.saveConversation || null,
+    attachConversation: options.attachConversation || null,
     conversationStoreDir: options.conversationStoreDir || DEFAULT_CONVERSATION_STORE_DIR,
     listModels: !!options.listModels,
     verifyModels: !!options.verifyModels,
@@ -119,8 +414,11 @@ export function buildCacheInput(request) {
     requested_model: request.modelName,
     model_task: request.modelTask,
     thinking: request.thinking,
+    stream: !!request.stream,
     continue_chat: request.continueChat,
     conversation_target: request.conversationTarget,
+    save_conversation: request.saveConversation,
+    attach_conversation: request.attachConversation,
     json_output: request.jsonOutput,
     include_conversation: request.includeConversation,
     provider_options: request.providerOptions || {},
@@ -128,9 +426,153 @@ export function buildCacheInput(request) {
   };
 }
 
+function providerName(provider) {
+  return typeof provider === 'string' ? provider : provider?.name;
+}
+
+function isPerplexityProvider(provider) {
+  return String(providerName(provider) || '').toLowerCase() === 'perplexity';
+}
+
+const SECRET_PROVIDER_STATE_KEYS = new Set([
+  'access_token',
+  'api_key',
+  'apikey',
+  'auth_token',
+  'authorization',
+  'cookie',
+  'id_token',
+  'password',
+  'read_write_token',
+  'refresh_token',
+  'secret',
+  'session_token',
+]);
+
+function normalizedProviderStateKey(key) {
+  return String(key || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function isSecretProviderStateKey(key) {
+  return SECRET_PROVIDER_STATE_KEYS.has(normalizedProviderStateKey(key));
+}
+
+function secretPresenceKey(key) {
+  return `has_${normalizedProviderStateKey(key) || 'secret'}`;
+}
+
+function sanitizeProviderStateValue(value) {
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(item => sanitizeProviderStateValue(item));
+  const safe = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (isSecretProviderStateKey(key)) {
+      safe[secretPresenceKey(key)] = Boolean(item);
+    } else {
+      safe[key] = sanitizeProviderStateValue(item);
+    }
+  }
+  return safe;
+}
+
+export function sanitizeProviderStateForOutput(provider, providerState) {
+  if (!providerState || typeof providerState !== 'object' || Array.isArray(providerState)) return providerState || null;
+  const safeState = sanitizeProviderStateValue(providerState);
+  if (isPerplexityProvider(provider) && Object.prototype.hasOwnProperty.call(providerState, 'read_write_token')) {
+    safeState.has_read_write_token = Boolean(providerState.read_write_token || safeState.has_read_write_token);
+  }
+  return safeState;
+}
+
+const SAFE_ATTACHMENT_METADATA_KEYS = new Set([
+  'filename',
+  'mime_type',
+  'size_bytes',
+  'is_image',
+  'source',
+  'status',
+  'url_present',
+]);
+
+function normalizeAttachmentMetadataKey(key) {
+  return String(key || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .toLowerCase();
+}
+
+function sanitizeAttachmentMetadata(attachments = []) {
+  if (!Array.isArray(attachments)) return [];
+  return attachments
+    .filter(item => item && typeof item === 'object' && !Array.isArray(item))
+    .map((item) => {
+      const safe = {};
+      for (const [key, value] of Object.entries(item)) {
+        const normalizedKey = normalizeAttachmentMetadataKey(key);
+        if (SAFE_ATTACHMENT_METADATA_KEYS.has(normalizedKey)) safe[normalizedKey] = value;
+      }
+      return safe;
+    })
+    .filter(item => Object.keys(item).length > 0);
+}
+
+function providerStateHasSecret(providerState) {
+  return !!providerState && typeof providerState === 'object' && !Array.isArray(providerState) && Object.keys(providerState).some(isSecretProviderStateKey);
+}
+
+function privateProviderStateForConversation(provider, result) {
+  if (result?.privateProviderState) return result.privateProviderState;
+  const providerState = result?.providerState || null;
+  if (providerStateHasSecret(providerState)) return providerState;
+  if (isPerplexityProvider(provider) && providerState?.read_write_token) return providerState;
+  return null;
+}
+
+function isSecretUrlParam(name) {
+  return /(token|secret|session|auth|password|api[_-]?key|apikey)/i.test(String(name || ''));
+}
+
+export function sanitizeConversationUrlForOutput(url) {
+  if (!url || typeof url !== 'string') return url || null;
+  try {
+    const parsed = new URL(url);
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (isSecretUrlParam(key)) parsed.searchParams.set(key, '[redacted]');
+    }
+    return parsed.href;
+  } catch {
+    return url;
+  }
+}
+
+function attachPrivateProviderState(result, privateProviderState) {
+  if (!privateProviderState) return result;
+  Object.defineProperty(result, 'privateProviderState', {
+    value: privateProviderState,
+    enumerable: false,
+    configurable: true,
+  });
+  return result;
+}
+
+function publicProviderResult(result) {
+  return { ...result };
+}
+
 export function buildMetadata({ request, provider, result, fallbackFrom, fallbackTrail, conversation }) {
   const text = result.text || '';
+  const safeFinalUrl = sanitizeConversationUrlForOutput(result.finalUrl || null);
+  const safeConversationUrl = sanitizeConversationUrlForOutput(result.finalUrl || conversation?.url || null);
   const previousMessages = Array.isArray(conversation?.record?.messages) ? conversation.record.messages : [];
+  const searchResults = result.searchResults || [];
+  const attachments = sanitizeAttachmentMetadata(result.attachments || result.providerState?.attachments || []);
+  const providerIsPerplexity = isPerplexityProvider(provider);
+  const providerState = sanitizeProviderStateForOutput(provider, result.providerState || null);
+  const modelFallbackFrom = result.modelFallbackFrom || providerState?.model_fallback_from || fallbackFrom || null;
+  const modelFallbackReason = result.modelFallbackReason || providerState?.model_fallback_reason || (fallbackFrom ? 'rate_limited' : null);
   const conversationMessages = [
     ...previousMessages,
     ...(request.prompt ? [{ role: 'user', content: request.prompt }] : []),
@@ -139,19 +581,24 @@ export function buildMetadata({ request, provider, result, fallbackFrom, fallbac
   return {
     provider: provider.name,
     model: result.modelUsed,
+    selected_model: result.modelUsed,
     requested_model: request.modelName,
     model_task: request.modelTask || null,
     fallback_from: fallbackFrom || null,
     fallback_attempts: fallbackTrail,
+    model_fallback_from: modelFallbackFrom,
+    model_fallback_reason: modelFallbackReason,
     prompt_chars: request.prompt.length,
     response_chars: text.length,
     complete: !!result.done,
     rate_limited: !!result.rateLimited,
-    final_url: result.finalUrl || null,
+    final_url: safeFinalUrl,
     conversation_id: conversation?.id || request.saveConversation || null,
-    conversation_url: result.finalUrl || conversation?.url || null,
-    provider_state: result.providerState || null,
-    search_results: result.searchResults || [],
+    conversation_url: safeConversationUrl,
+    provider_state: providerState,
+    search_results: searchResults,
+    ...(providerIsPerplexity ? { sources: searchResults } : {}),
+    ...(attachments.length ? { attachments } : {}),
     evidence_path: result.evidencePath || null,
     evidence_url: result.evidenceUrl || null,
     conversation_messages: request.includeConversation ? conversationMessages : undefined,
@@ -207,10 +654,115 @@ export function conversationRecordPath({ providerName, id, storeDir = DEFAULT_CO
   return join(storeDir, safeProvider, `${safeId}.json`);
 }
 
-export function resolveConversationReference(request, fs = defaultFs) {
+function isHttpUrl(value) {
+  return /^https?:\/\//i.test(String(value || ''));
+}
+
+function normalizeHostname(value) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/\.$/, '');
+  return normalized || null;
+}
+
+export function trustedConversationHostnamesForProvider(provider = {}) {
+  const configured = [
+    ...(Array.isArray(provider.trustedConversationHostnames) ? provider.trustedConversationHostnames : []),
+    ...(Array.isArray(provider.conversationHostnames) ? provider.conversationHostnames : []),
+  ];
+  if (configured.length === 0 && provider.url) {
+    try {
+      configured.push(new URL(provider.url).hostname);
+    } catch {}
+  }
+  return [...new Set(configured.map(normalizeHostname).filter(Boolean))];
+}
+
+export function validateConversationUrlForProvider(provider, url, { optionName = 'conversation URL' } = {}) {
+  const selectedProvider = providerName(provider) || 'unknown';
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`[${selectedProvider}] Invalid ${optionName} for selected provider ${selectedProvider}: URL could not be parsed. Use a saved local conversation id, a provider backend id, or a ${selectedProvider} conversation URL.`);
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`[${selectedProvider}] Invalid ${optionName} for selected provider ${selectedProvider}: only http and https URLs are supported. Use a saved local conversation id, a provider backend id, or a ${selectedProvider} conversation URL.`);
+  }
+
+  const hostname = normalizeHostname(parsed.hostname);
+  const trustedHostnames = trustedConversationHostnamesForProvider(provider);
+  if (trustedHostnames.length === 0) {
+    throw new Error(`[${selectedProvider}] Cannot validate ${optionName} for selected provider ${selectedProvider}: no trusted conversation hosts are configured. Use a saved local conversation id or a provider backend id instead.`);
+  }
+  if (!trustedHostnames.includes(hostname)) {
+    throw new Error(`[${selectedProvider}] Refusing ${optionName} for selected provider ${selectedProvider}: host "${hostname || 'unknown'}" is not trusted. Use a saved local conversation id, a provider backend id, or a ${selectedProvider} conversation URL on one of: ${trustedHostnames.join(', ')}.`);
+  }
+
+  return url;
+}
+
+export function resolveConversationAttachment(provider, target) {
+  const value = String(target || '').trim();
+  if (!value) throw new Error('conversation attachment cannot be empty');
+
+  const resolved = provider.resolveConversationAttachment?.({ target: value }) || null;
+  const type = resolved?.type || (isHttpUrl(value) ? 'url' : 'provider_id');
+  const url = resolved?.url || (type === 'url' ? value : null);
+  const providerId = resolved?.providerId || resolved?.provider_id || (type === 'provider_id' ? value : null);
+  const providerState = resolved?.privateProviderState || resolved?.providerState || resolved?.provider_state || (providerId ? { provider_backend_id: providerId } : null);
+
+  return {
+    type,
+    value,
+    url,
+    provider_id: providerId,
+    provider_state: providerState,
+    source: resolved?.source || 'attached',
+  };
+}
+
+export function attachConversationReference(request, provider, fs = defaultFs) {
+  if (!request.attachConversation) return null;
+  if (request.conversationTarget) throw new Error('Use either --conversation or --attach-conversation, not both');
+  if (!request.saveConversation) throw new Error('--attach-conversation requires --save-conversation <local-id>');
+
+  const attachment = resolveConversationAttachment(provider, request.attachConversation);
+  if (attachment.url) validateConversationUrlForProvider(provider, attachment.url, { optionName: '--attach-conversation' });
+  const path = conversationRecordPath({ providerName: provider.name, id: request.saveConversation, storeDir: request.conversationStoreDir });
+  const capturedAt = new Date().toISOString();
+  const record = {
+    version: 1,
+    kind: 'ai-chat-conversation',
+    id: request.saveConversation,
+    provider: provider.name,
+    requested_model: request.modelName,
+    model: null,
+    final_url: attachment.url || null,
+    conversation_url: attachment.url || null,
+    provider_id: attachment.provider_id || null,
+    provider_state: attachment.provider_state || null,
+    attachment: {
+      type: attachment.type,
+      source: attachment.source,
+      attached_at: capturedAt,
+    },
+    messages: [],
+    captured_at: capturedAt,
+    updated_at: capturedAt,
+    response_chars: 0,
+  };
+
+  writePrivateJsonFile(path, record, fs, 'AI Chat conversation record');
+  return { path, record, conversation: { id: request.saveConversation, url: record.final_url || record.conversation_url || null, source: path, record } };
+}
+
+export function resolveConversationReference(request, fs = defaultFs, provider = null) {
   const target = request.conversationTarget;
   if (!target) return null;
-  if (/^https?:\/\//i.test(target)) return { id: null, url: target, source: 'url' };
+  if (isHttpUrl(target)) {
+    if (provider) validateConversationUrlForProvider(provider, target, { optionName: '--conversation' });
+    return { id: null, url: target, source: 'url' };
+  }
 
   const path = conversationRecordPath({ providerName: request.providerName, id: target, storeDir: request.conversationStoreDir });
   if (!fs.exists(path)) throw new Error(`Conversation not found: ${target}`);
@@ -219,33 +771,48 @@ export function resolveConversationReference(request, fs = defaultFs) {
   return { id: target, url: record.final_url || record.conversation_url || null, source: path, record };
 }
 
+function providerStateForConversationRecord(provider, result, conversation = null) {
+  const previousProviderState = conversation?.record?.provider_state || null;
+  let recordProviderState = result.privateProviderState || privateProviderStateForConversation(provider, result) || result.providerState || previousProviderState || null;
+  if (previousProviderState?.read_write_token && recordProviderState?.has_read_write_token && !recordProviderState.read_write_token) {
+    recordProviderState = { ...recordProviderState, read_write_token: previousProviderState.read_write_token };
+  }
+  return recordProviderState;
+}
+
 export function saveConversationReference(request, provider, result, metadata, fs = defaultFs, conversation = null) {
   const conversationId = request.saveConversation || conversation?.id;
   if (!conversationId) return null;
   const path = conversationRecordPath({ providerName: provider.name, id: conversationId, storeDir: request.conversationStoreDir });
   const previousMessages = Array.isArray(conversation?.record?.messages) ? conversation.record.messages : [];
+  const recordProviderState = providerStateForConversationRecord(provider, result, conversation);
+  const finalUrl = result.finalUrl || conversation?.record?.final_url || conversation?.url || null;
   const record = {
+    version: conversation?.record?.version || 1,
+    kind: conversation?.record?.kind || 'ai-chat-conversation',
     id: conversationId,
     provider: provider.name,
     requested_model: request.modelName,
     model: result.modelUsed,
-    final_url: result.finalUrl || null,
-    conversation_url: result.finalUrl || null,
-    provider_state: result.providerState || null,
+    final_url: finalUrl,
+    conversation_url: finalUrl,
+    provider_id: conversation?.record?.provider_id || null,
+    provider_state: recordProviderState,
     messages: [
       ...previousMessages,
-      { role: 'user', content: request.prompt, captured_at: metadata.captured_at },
+      ...(request.prompt ? [{ role: 'user', content: request.prompt, captured_at: metadata.captured_at }] : []),
       { role: 'assistant', content: result.text || '', captured_at: metadata.captured_at },
     ],
-    captured_at: metadata.captured_at,
+    captured_at: conversation?.record?.captured_at || metadata.captured_at,
+    updated_at: metadata.captured_at,
     response_chars: metadata.response_chars,
   };
-  fs.mkdir(dirname(path), { recursive: true });
-  fs.writeFile(path, JSON.stringify(record, null, 2), 'utf-8');
+  writePrivateJsonFile(path, record, fs, 'AI Chat conversation record');
   return { path, record };
 }
 
 export async function openConversationPage({ browser, provider, url }) {
+  validateConversationUrlForProvider(provider, url);
   const pages = await browser.pages();
   let page = pages.find((candidate) => candidate.url() === url);
   if (!page) {
@@ -305,6 +872,23 @@ export async function captureEvidenceScreenshot({ browser, provider, result, req
   if (!request?.captureEvidence) return null;
 
   const targetUrl = result?.finalUrl || result?.pageUrl || null;
+  if (!browser) {
+    return {
+      skipped: true,
+      reason: 'browser-unavailable',
+      warning: '[evidence] Skipped screenshot evidence: browser is not available for this provider transport.',
+      targetUrl,
+    };
+  }
+  if (!targetUrl) {
+    return {
+      skipped: true,
+      reason: 'missing-final-url',
+      warning: '[evidence] Skipped screenshot evidence: provider result did not include a final URL.',
+      targetUrl,
+    };
+  }
+
   const path = request.evidencePath || timestampedTmpPath(`ai-chat-${provider?.name || 'provider'}-evidence`, 'png');
   fs.mkdir(dirname(path), { recursive: true });
   const page = await selectEvidencePage({ browser, targetUrl });
@@ -312,23 +896,76 @@ export async function captureEvidenceScreenshot({ browser, provider, result, req
   return { path, url: page.url(), targetUrl };
 }
 
-export function emitCachedResponse({ request, cached, io = defaultIo }) {
+export function cachedResponseText({ request, cached }) {
+  if (typeof cached.rawText === 'string' && cached.rawText.trim()) return cached.rawText;
+  if (request.jsonOutput && typeof cached.output === 'string') {
+    try {
+      const parsed = JSON.parse(cached.output);
+      if (typeof parsed.response === 'string') return parsed.response;
+    } catch {
+      // Fall through to the cached output when older cache entries are not JSON.
+    }
+  }
+  return cached.output || '';
+}
+
+export function buildCachedResponse({ request, cached, conversation = null }) {
+  const cachedMetadata = cached.entry?.metadata || {};
+  const cachedProvider = cachedMetadata.provider || request.providerName;
+  const cachedSearchResults = cachedMetadata.search_results || cachedMetadata.sources || [];
   const metadata = {
-    ...(cached.entry?.metadata || {}),
+    ...cachedMetadata,
+    selected_model: cachedMetadata.selected_model || cachedMetadata.model || null,
+    final_url: sanitizeConversationUrlForOutput(cachedMetadata.final_url || null),
+    conversation_url: sanitizeConversationUrlForOutput(cachedMetadata.conversation_url || null),
+    provider_state: sanitizeProviderStateForOutput(cachedProvider, cachedMetadata.provider_state || null),
+    search_results: cachedSearchResults,
+    ...(isPerplexityProvider(cachedProvider) ? { sources: cachedSearchResults } : {}),
     cache_hit: true,
     cache_key: cached.key,
     cached_at: cached.entry?.created_at,
   };
+  if (!metadata.captured_at) metadata.captured_at = cached.entry?.created_at || new Date().toISOString();
+  if (request.saveConversation || conversation?.id) metadata.conversation_id = request.saveConversation || conversation.id;
+
+  const text = cachedResponseText({ request, cached });
+  if (metadata.response_chars === undefined || metadata.response_chars === null) metadata.response_chars = text.length;
+
+  const result = {
+    text,
+    rawText: cached.rawText || text,
+    done: metadata.complete !== false,
+    rateLimited: !!metadata.rate_limited,
+    placeholderRejected: false,
+    modelUsed: metadata.model || metadata.requested_model || request.modelName,
+    finalUrl: cachedMetadata.final_url || cachedMetadata.conversation_url || cached.entry?.page_url || null,
+    providerState: metadata.provider_state || null,
+    searchResults: cachedSearchResults,
+    evidencePath: metadata.evidence_path || null,
+    evidenceUrl: metadata.evidence_url || null,
+  };
+
+  return {
+    metadata,
+    result: attachPrivateProviderState(result, privateProviderStateForConversation(cachedProvider, { providerState: cachedMetadata.provider_state })),
+  };
+}
+
+export function emitCachedResponse({ request, cached, io = defaultIo, metadata = null, result = null }) {
+  const response = metadata && result ? { metadata, result } : buildCachedResponse({ request, cached });
+  const outputText = request.jsonOutput
+    ? buildOutput({ request, metadata: response.metadata, text: response.result.text }).text
+    : cached.output;
 
   emitOutput({
     request,
-    outputText: cached.output,
-    metadata,
-    rawText: cached.rawText || cached.output,
+    outputText,
+    metadata: response.metadata,
+    rawText: response.result.rawText || response.result.text,
     io,
   });
 
-  return { source: 'cache', metadata, output: cached.output };
+  return { source: 'cache', metadata: response.metadata, result: publicProviderResult(response.result), output: outputText };
 }
 
 export async function runPromptAttempt({ browser, provider, request, selectedModel, conversation = null }) {
@@ -336,6 +973,9 @@ export async function runPromptAttempt({ browser, provider, request, selectedMod
   let page = null;
 
   if (provider.run) {
+    if (request?.conversationTarget && isHttpUrl(request.conversationTarget)) {
+      validateConversationUrlForProvider(provider, request.conversationTarget, { optionName: '--conversation' });
+    }
     console.error(`[${provider.name}] Running provider transport: ${provider.transport || 'direct'}`);
     const result = await provider.run({ browser, request, selectedModel, conversation });
     const normalized = normalizeProviderResult({ result, page: null, provider, request, selectedModel });
@@ -351,10 +991,15 @@ export async function runPromptAttempt({ browser, provider, request, selectedMod
   }
 
   try {
-    if (conversation?.url) {
-      console.error(`[${provider.name}] Opening conversation: ${conversation.url}`);
-      page = await openConversationPage({ browser, provider, url: conversation.url });
+    const conversationUrl = conversation?.url || provider.conversationUrlFromState?.({ conversation, request }) || null;
+    if (conversationUrl) {
+      validateConversationUrlForProvider(provider, conversationUrl);
+      console.error(`[${provider.name}] Opening conversation: ${sanitizeConversationUrlForOutput(conversationUrl)}`);
+      page = await openConversationPage({ browser, provider, url: conversationUrl });
     } else {
+      if (request?.conversationTarget && isHttpUrl(request.conversationTarget)) {
+        validateConversationUrlForProvider(provider, request.conversationTarget, { optionName: '--conversation' });
+      }
       console.error(`[${provider.name}] Finding page...`);
       page = await provider.findPage({ browser, continueChat: request.continueChat, request });
     }
@@ -434,8 +1079,8 @@ export function normalizeProviderResult({ result, page, provider, request, selec
   const finalUrl = result?.finalUrl || result?.pageUrl || page?.url?.() || null;
   const rateLimited = !!result?.rateLimited || !!provider.isRateLimited?.({ text, rawText, result, request, selectedModel });
   const placeholderRejected = !rateLimited && !!provider.isPlaceholderResponse?.({ text, rawText, result, request, selectedModel });
-
-  return {
+  const providerState = sanitizeProviderStateForOutput(provider, result?.providerState || null);
+  const normalized = {
     text,
     done: !placeholderRejected && !!result?.done,
     rawText,
@@ -443,37 +1088,68 @@ export function normalizeProviderResult({ result, page, provider, request, selec
     rateLimited,
     placeholderRejected,
     modelUsed: result?.modelUsed || selectedModel,
-    providerState: result?.providerState || null,
+    providerState,
     searchResults: result?.searchResults || [],
+    attachments: sanitizeAttachmentMetadata(result?.attachments || providerState?.attachments || []),
     evidencePath: result?.evidencePath || null,
     evidenceUrl: result?.evidenceUrl || null,
   };
+
+  return attachPrivateProviderState(normalized, privateProviderStateForConversation(provider, result));
 }
 
-export function resolveInitialModel(provider, request) {
+function savedConversationModel(conversation = null) {
+  const record = conversation?.record || null;
+  const providerState = record?.provider_state || conversation?.providerState || conversation?.provider_state || null;
+  return providerState?.selected_model || providerState?.model || record?.model || record?.requested_model || null;
+}
+
+export function resolveInitialModel(provider, request, conversation = null) {
   if (request.modelName && request.modelName !== 'default') return request.modelName;
   if (request.modelTask && provider.taskModels?.[request.modelTask]) return provider.taskModels[request.modelTask];
+  const conversationModel = savedConversationModel(conversation);
+  if (conversationModel) return conversationModel;
   return provider.defaultModel || request.modelName || 'default';
 }
 
 export async function runWithFallbacks({ browser, provider, request, conversation = null }) {
-  const initialModel = resolveInitialModel(provider, request);
+  const initialModel = resolveInitialModel(provider, request, conversation);
   const fallbackTrail = [initialModel];
   let fallbackFrom = null;
   let result = await runPromptAttempt({ browser, provider, request, selectedModel: initialModel, conversation });
 
   if (result.rateLimited) {
-    const fallbackModels = provider.fallbackModels?.({ requestedModel: request.modelName, request, result }) || [];
+    const rejectedModel = initialModel;
+    const rejectedModelUsed = result.modelUsed || rejectedModel;
+    const fallbackModels = provider.fallbackModels?.({
+      requestedModel: request.modelName,
+      initialModel,
+      selectedModel: initialModel,
+      rejectedModel,
+      rejectedModelUsed,
+      request,
+      result,
+    }) || [];
     for (const fallbackModel of fallbackModels) {
-      fallbackFrom = fallbackFrom || request.modelName;
+      fallbackFrom = fallbackFrom || rejectedModel;
       fallbackTrail.push(fallbackModel);
-      console.error(`[${provider.name}] Quota banner detected on ${result.modelUsed}; retrying with ${fallbackModel}...`);
+      console.error(`[${provider.name}] Quota banner detected on ${result.modelUsed || rejectedModel}; retrying with ${fallbackModel}...`);
       result = await runPromptAttempt({ browser, provider, request, selectedModel: fallbackModel, conversation });
       if (!result.rateLimited) break;
     }
   }
 
   return { result, fallbackFrom, fallbackTrail };
+}
+
+function requestHasFileAttachments(request = {}) {
+  const files = request.providerOptions?.files || request.providerOptions?.attachments || request.providerOptions?.file || [];
+  if (Array.isArray(files)) return files.length > 0;
+  return !!files;
+}
+
+function requestBypassesCache(request = {}) {
+  return !!request.stream || requestHasFileAttachments(request);
 }
 
 export async function runAiChat(request, deps = {}) {
@@ -488,16 +1164,18 @@ export async function runAiChat(request, deps = {}) {
 
   if (request.listModels) {
     let browser = null;
-    let ownsBrowser = false;
+    let browserSession = null;
+    let activeRequest = request;
     try {
       const needsBrowser = typeof provider.listModelsRequiresBrowser === 'function'
         ? provider.listModelsRequiresBrowser({ request })
         : !!provider.listModelsRequiresBrowser;
       if (needsBrowser) {
-        browser = deps.browser || await (deps.connectBrowser || connectBrowser)(request.port, { protocolTimeout: 60000 });
-        ownsBrowser = !deps.browser;
+        browserSession = await ensureAiChatBrowserSession(request, deps);
+        browser = browserSession.browser;
+        activeRequest = browserSession.request;
       }
-      const listResult = await (provider.listModels?.({ browser, request }) || []);
+      const listResult = await (provider.listModels?.({ browser, request: activeRequest }) || []);
       const models = Array.isArray(listResult) ? listResult : (listResult.models || []);
       const extra = Array.isArray(listResult) ? {} : Object.fromEntries(Object.entries(listResult).filter(([key]) => key !== 'models'));
       const output = JSON.stringify({
@@ -505,68 +1183,152 @@ export async function runAiChat(request, deps = {}) {
         default_model: provider.defaultModel || null,
         task_models: provider.taskModels || null,
         history_policy: provider.historyPolicy || null,
-        verify_models: request.verifyModels,
-        verify_model_timeout_seconds: request.verifyModelTimeoutSeconds,
+        verify_models: activeRequest.verifyModels,
+        verify_model_timeout_seconds: activeRequest.verifyModelTimeoutSeconds,
         ...extra,
         models,
         count: models.length,
         captured_at: new Date().toISOString(),
       }, null, 2);
-      emitOutput({ request: { ...request, outFile: request.outFile || null }, outputText: output, metadata: { provider: provider.name, model_count: models.length, captured_at: new Date().toISOString() }, rawText: output, io });
+      emitOutput({ request: { ...activeRequest, outFile: activeRequest.outFile || null }, outputText: output, metadata: { provider: provider.name, model_count: models.length, captured_at: new Date().toISOString() }, rawText: output, io });
       return { source: 'models', provider, models, output };
     } finally {
-      if (ownsBrowser) browser?.disconnect();
+      if (browserSession?.shouldDisconnect) browser?.disconnect();
     }
   }
 
-  const conversation = deps.conversation || resolveConversationReference(request, fs);
+  const attachedConversation = request.attachConversation ? attachConversationReference(request, provider, fs) : null;
+  if (request.conversationTarget && isHttpUrl(request.conversationTarget)) {
+    validateConversationUrlForProvider(provider, request.conversationTarget, { optionName: '--conversation' });
+  }
+  const conversation = deps.conversation || attachedConversation?.conversation || resolveConversationReference(request, fs, provider);
+
+  if (request.attachConversation && !request.prompt) {
+    const metadata = {
+      provider: provider.name,
+      model: null,
+      requested_model: request.modelName,
+      model_task: request.modelTask || null,
+      prompt_chars: 0,
+      response_chars: 0,
+      complete: true,
+      rate_limited: false,
+      final_url: sanitizeConversationUrlForOutput(conversation?.record?.final_url || null),
+      conversation_id: request.saveConversation,
+      conversation_url: sanitizeConversationUrlForOutput(conversation?.record?.conversation_url || null),
+      provider_state: sanitizeProviderStateForOutput(provider, conversation?.record?.provider_state || null),
+      conversation_record_path: attachedConversation.path,
+      attached: true,
+      captured_at: conversation?.record?.captured_at || new Date().toISOString(),
+      cache_hit: false,
+    };
+    const outputText = request.jsonOutput
+      ? JSON.stringify({ ...metadata, response: '' }, null, 2)
+      : `Attached ${provider.name} conversation ${request.saveConversation}`;
+    emitOutput({ request, outputText, metadata, rawText: '', io });
+    return { source: 'conversation-attachment', provider, metadata, result: { text: '', done: true }, output: outputText };
+  }
+
+  if (!request.prompt && conversation && !provider.recheckConversation) {
+    throw new Error(`[${provider.name}] --conversation without --prompt is only supported when the provider can recheck a saved request. Add --prompt to continue this conversation.`);
+  }
+
   const cacheInput = buildCacheInput(request);
-  const useCache = !request.captureEvidence;
+  const useCache = !request.captureEvidence && !!request.prompt && !requestBypassesCache(request);
   const cached = useCache ? cache.read('ai-chat', cacheInput) : null;
-  if (cached) return emitCachedResponse({ request, cached, io });
+  if (cached) {
+    const cachedResponse = buildCachedResponse({ request, cached, conversation });
+    const savedConversation = saveConversationReference(request, provider, cachedResponse.result, cachedResponse.metadata, fs, conversation);
+    if (savedConversation) cachedResponse.metadata.conversation_record_path = savedConversation.path;
+    return emitCachedResponse({ request, cached, io, ...cachedResponse });
+  }
 
   const needsBrowser = provider.runRequiresBrowser
     ? provider.runRequiresBrowser({ request })
     : true;
-  const browser = deps.browser || (needsBrowser ? await (deps.connectBrowser || connectBrowser)(request.port, {
-    protocolTimeout: 60000,
-  }) : null);
-  const ownsBrowser = needsBrowser && !deps.browser;
+  let browserSession = null;
+  let browser = null;
+  let activeRequest = request;
+  if (needsBrowser) {
+    browserSession = await ensureAiChatBrowserSession(request, deps);
+    browser = browserSession.browser;
+    activeRequest = browserSession.request;
+  }
 
   try {
-    const { result, fallbackFrom, fallbackTrail } = await runWithFallbacks({ browser, provider, request, conversation });
-    const metadata = buildMetadata({ request, provider, result, fallbackFrom, fallbackTrail, conversation });
-    const evidence = await captureEvidenceScreenshot({ browser, provider, result, request, fs });
-    if (evidence) {
+    if (!activeRequest.prompt && conversation && provider.recheckConversation) {
+      const selectedModel = resolveInitialModel(provider, activeRequest, conversation);
+      console.error(`[${provider.name}] Rechecking saved conversation: ${conversation.id || sanitizeConversationUrlForOutput(conversation.url) || 'provider-state'}`);
+      const result = normalizeProviderResult({
+        result: await provider.recheckConversation({ browser, request: activeRequest, selectedModel, conversation }),
+        page: null,
+        provider,
+        request: activeRequest,
+        selectedModel,
+      });
+      const metadata = buildMetadata({ request: activeRequest, provider, result, fallbackFrom: null, fallbackTrail: [selectedModel], conversation });
+      metadata.recheck = true;
+      const evidence = await captureEvidenceScreenshot({ browser, provider, result, request: activeRequest, fs });
+      if (evidence?.skipped) {
+        metadata.evidence_skipped_reason = evidence.reason;
+        metadata.evidence_warning = evidence.warning;
+        metadata.evidence_target_url = evidence.targetUrl;
+        result.evidenceWarning = evidence.warning;
+        console.error(evidence.warning);
+      } else if (evidence) {
+        metadata.evidence_path = evidence.path;
+        metadata.evidence_url = evidence.url;
+        metadata.evidence_target_url = evidence.targetUrl;
+        result.evidencePath = evidence.path;
+        result.evidenceUrl = evidence.url;
+      }
+      const savedConversation = saveConversationReference(activeRequest, provider, result, metadata, fs, conversation);
+      if (savedConversation) metadata.conversation_record_path = savedConversation.path;
+      const finalOutput = buildOutput({ request: activeRequest, metadata, text: result.text });
+      emitOutput({ request: activeRequest, outputText: finalOutput.text, metadata, rawText: result.rawText, io });
+      if (activeRequest.outFile) console.error(`[${provider.name}] Saved to ${activeRequest.outFile}`);
+      return { source: 'recheck', provider, result: publicProviderResult(result), metadata, output: finalOutput.text };
+    }
+
+    const { result, fallbackFrom, fallbackTrail } = await runWithFallbacks({ browser, provider, request: activeRequest, conversation });
+    const metadata = buildMetadata({ request: activeRequest, provider, result, fallbackFrom, fallbackTrail, conversation });
+    const evidence = await captureEvidenceScreenshot({ browser, provider, result, request: activeRequest, fs });
+    if (evidence?.skipped) {
+      metadata.evidence_skipped_reason = evidence.reason;
+      metadata.evidence_warning = evidence.warning;
+      metadata.evidence_target_url = evidence.targetUrl;
+      result.evidenceWarning = evidence.warning;
+      console.error(evidence.warning);
+    } else if (evidence) {
       metadata.evidence_path = evidence.path;
       metadata.evidence_url = evidence.url;
       metadata.evidence_target_url = evidence.targetUrl;
       result.evidencePath = evidence.path;
       result.evidenceUrl = evidence.url;
     }
-    const output = buildOutput({ request, metadata, text: result.text });
+    const output = buildOutput({ request: activeRequest, metadata, text: result.text });
 
-    if (useCache && !result.rateLimited && !result.placeholderRejected && result.text.trim()) {
+    if (useCache && result.done && !result.rateLimited && !result.placeholderRejected && result.text.trim()) {
       const cacheWrite = cache.write('ai-chat', cacheInput, {
         output: output.text,
         rawText: result.rawText,
-        pageUrl: result.finalUrl,
+        pageUrl: metadata.final_url || metadata.conversation_url || null,
         metadata,
         extension: output.extension,
       });
       if (cacheWrite) metadata.cache_key = cacheWrite.key;
     }
 
-    const savedConversation = saveConversationReference(request, provider, result, metadata, fs, conversation);
+    const savedConversation = saveConversationReference(activeRequest, provider, result, metadata, fs, conversation);
     if (savedConversation) metadata.conversation_record_path = savedConversation.path;
 
-    const finalOutput = buildOutput({ request, metadata, text: result.text });
-    emitOutput({ request, outputText: finalOutput.text, metadata, rawText: result.rawText, io });
-    if (request.outFile) console.error(`[${provider.name}] Saved to ${request.outFile}`);
+    const finalOutput = buildOutput({ request: activeRequest, metadata, text: result.text });
+    emitOutput({ request: activeRequest, outputText: finalOutput.text, metadata, rawText: result.rawText, io });
+    if (activeRequest.outFile) console.error(`[${provider.name}] Saved to ${activeRequest.outFile}`);
 
-    return { source: 'live', provider, result, metadata, output: finalOutput.text };
+    return { source: 'live', provider, result: publicProviderResult(result), metadata, output: finalOutput.text };
   } finally {
-    if (ownsBrowser) browser.disconnect();
+    if (browserSession?.shouldDisconnect) browser?.disconnect();
   }
 }
 
@@ -589,6 +1351,18 @@ export const defaultFs = {
   mkdir: mkdirSync,
   readFile: readFileSync,
   writeFile: writeFileSync,
+  chmod: chmodSync,
+  stat: statSync,
+};
+
+export const defaultBrowserStateFs = {
+  exists: existsSync,
+  mkdir: mkdirSync,
+  readFile: readFileSync,
+  writeFile: writeFileSync,
+  chmod: chmodSync,
+  stat: statSync,
+  rm: rmSync,
 };
 
 export { aiChatProviders };

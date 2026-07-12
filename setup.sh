@@ -296,6 +296,18 @@ check_and_install_deps() {
     install_tool "jq" "jq" "jq" "JSON processor" "https://jqlang.github.io/jq/download/" || true
 
     # Skill-specific
+    if [ "$INSTALL_CODEX_REVIEW" = "true" ]; then
+        if has_cmd codex; then
+            success "codex ${DIM}(OpenAI Codex CLI)${RESET} found."
+        else
+            warn "${BOLD}codex${RESET} CLI is not installed."
+            info "Install Codex CLI, then re-run this script."
+            warn "Skipping codex skill (requires codex CLI)."
+            INSTALL_CODEX_REVIEW=false
+            _skipped=true
+        fi
+    fi
+
     if [ "$INSTALL_JIRA" = "true" ]; then
         if ! has_cmd jira; then
             warn "${BOLD}jira${RESET} (go-jira CLI) is not installed."
@@ -357,6 +369,7 @@ check_and_install_deps() {
         [ "$INSTALL_SONAR"   = "true" ] && { warn "  sonarqube"; INSTALL_SONAR=false; }
         [ "$INSTALL_ARGOCD"  = "true" ] && { warn "  argocd"; INSTALL_ARGOCD=false; }
         [ "$INSTALL_SKANE"   = "true" ] && { warn "  skanetrafiken"; INSTALL_SKANE=false; }
+        [ "$INSTALL_CODEX_REVIEW" = "true" ] && { warn "  codex"; INSTALL_CODEX_REVIEW=false; }
     elif [ "$_skipped" = "false" ]; then
         success "All required tools available."
     fi
@@ -379,7 +392,7 @@ banner() {
 }
 
 # ── Skill selection ─────────────────────────────────────────────────────────
-INSTALL_DTRACK=false; INSTALL_JENKINS=false; INSTALL_JIRA=false; INSTALL_TO_TASKS=false; INSTALL_SONAR=false; INSTALL_SKANE=false; INSTALL_JAVA_MIG=false; INSTALL_ARGOCD=false
+INSTALL_DTRACK=false; INSTALL_JENKINS=false; INSTALL_JIRA=false; INSTALL_TO_TASKS=false; INSTALL_SONAR=false; INSTALL_SKANE=false; INSTALL_JAVA_MIG=false; INSTALL_ARGOCD=false; INSTALL_CODEX_REVIEW=false
 INSTALL_DIR=""
 AGENT_HARNESS="claude-code"
 
@@ -394,13 +407,14 @@ select_skills() {
     printf "    %b  skanetrafiken           %b\n" "${BOLD}6${RESET}" "${DIM}— Public transport in Skåne (no config needed)${RESET}"
     printf "    %b  argocd                  %b\n" "${BOLD}7${RESET}" "${DIM}— GitOps deployments: sync, status, rollback${RESET}"
     printf "    %b  java-21-to-25-migration %b\n" "${BOLD}8${RESET}" "${DIM}— JDK 21→25 migration (no config needed)${RESET}"
+    printf "    %b  codex                  %b\n" "${BOLD}9${RESET}" "${DIM}— Codex review sessions, reports, and follow-up${RESET}"
     echo ""
 
     local selection
     ask selection "Skills to install" "all"
 
     if [ "$selection" = "all" ]; then
-        INSTALL_DTRACK=true; INSTALL_JENKINS=true; INSTALL_JIRA=true; INSTALL_TO_TASKS=true; INSTALL_SONAR=true; INSTALL_SKANE=true; INSTALL_ARGOCD=true; INSTALL_JAVA_MIG=true
+        INSTALL_DTRACK=true; INSTALL_JENKINS=true; INSTALL_JIRA=true; INSTALL_TO_TASKS=true; INSTALL_SONAR=true; INSTALL_SKANE=true; INSTALL_ARGOCD=true; INSTALL_JAVA_MIG=true; INSTALL_CODEX_REVIEW=true
     else
         for s in $selection; do
             case "$s" in
@@ -412,6 +426,7 @@ select_skills() {
                 6) INSTALL_SKANE=true     ;;
                 7) INSTALL_ARGOCD=true    ;;
                 8) INSTALL_JAVA_MIG=true  ;;
+                9) INSTALL_CODEX_REVIEW=true ;;
                 *) warn "Unknown selection: $s (skipping)" ;;
             esac
         done
@@ -436,6 +451,7 @@ select_skills() {
     [ "$INSTALL_SKANE"    = "true" ] && count=$((count + 1))
     [ "$INSTALL_ARGOCD"   = "true" ] && count=$((count + 1))
     [ "$INSTALL_JAVA_MIG" = "true" ] && count=$((count + 1))
+    [ "$INSTALL_CODEX_REVIEW" = "true" ] && count=$((count + 1))
 
     [ "$count" -eq 0 ] && { warn "No skills selected. Nothing to do."; exit 0; }
     info "Selected ${count} skill(s) to install."
@@ -1147,6 +1163,7 @@ print_summary() {
     [ "$INSTALL_SONAR"     = "true" ] && _summary_skill "sonarqube"
     [ "$INSTALL_ARGOCD"   = "true" ] && _summary_skill "argocd"
     [ "$INSTALL_SKANE"    = "true" ] && _summary_skill "skanetrafiken"
+    [ "$INSTALL_CODEX_REVIEW" = "true" ] && _summary_skill "codex"
 
     # In 'both' mode, also show Pi copies
     if [ "$AGENT_HARNESS" = "both" ]; then
@@ -1158,6 +1175,7 @@ print_summary() {
         [ "$INSTALL_SONAR"     = "true" ] && _summary_pi "sonarqube"
         [ "$INSTALL_ARGOCD"   = "true" ] && _summary_pi "argocd"
         [ "$INSTALL_SKANE"    = "true" ] && _summary_pi "skanetrafiken"
+        [ "$INSTALL_CODEX_REVIEW" = "true" ] && _summary_pi "codex"
     fi
 
     # java-21-to-25-migration: agent and/or skill
@@ -1203,7 +1221,7 @@ show_help() {
     echo "Usage: $0 [--help]"
     echo ""
     echo "Interactive installer for Boring Skills."
-    echo "Sets up: argocd, dependency-track, jenkins, jira, to-tasks, sonarqube, skanetrafiken, java-21-to-25-migration"
+    echo "Sets up: argocd, dependency-track, jenkins, jira, to-tasks, sonarqube, skanetrafiken, java-21-to-25-migration, codex"
     echo ""
     echo "Supports Claude Code and Pi agent harnesses."
     echo "Skills are symlinked — git pull updates them automatically."
@@ -1234,6 +1252,7 @@ main() {
     [ "$INSTALL_SKANE"    = "true" ] && remaining=$((remaining + 1))
     [ "$INSTALL_ARGOCD"   = "true" ] && remaining=$((remaining + 1))
     [ "$INSTALL_JAVA_MIG" = "true" ] && remaining=$((remaining + 1))
+    [ "$INSTALL_CODEX_REVIEW" = "true" ] && remaining=$((remaining + 1))
     if [ "$remaining" -eq 0 ]; then
         echo ""
         warn "No skills remaining after dependency checks."
@@ -1252,6 +1271,7 @@ main() {
     [ "$INSTALL_ARGOCD"   = "true" ] && configure_argocd
     [ "$INSTALL_SKANE"    = "true" ] && install_skill "skanetrafiken"      # no config needed
     [ "$INSTALL_JAVA_MIG" = "true" ] && install_java_migration             # harness-aware install
+    [ "$INSTALL_CODEX_REVIEW" = "true" ] && install_skill "codex"    # no config needed
 
     # Only offer connectivity tests if a service with remote config was installed
     local has_remote=false

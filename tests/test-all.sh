@@ -59,6 +59,7 @@ run_suite "Jenkins"           "$SCRIPT_DIR/test-jenkins.sh"
 run_suite "SonarQube"         "$SCRIPT_DIR/test-sonarqube.sh"
 run_suite "Dependency-Track"  "$SCRIPT_DIR/test-dependency-track.sh"
 run_suite "ArgoCD"            "$SCRIPT_DIR/test-argocd.sh"
+run_suite "Codex"             "$SCRIPT_DIR/test-codex-review.sh"
 
 # ── Global cross-skill checks ──────────────────────────────────────────────
 

@@ -19,6 +19,7 @@ Skills that give AI coding agents (Claude Code, etc.) the ability to interact wi
 | [**browser-tools**](browser-tools/) | Control a sandboxed Chrome browser and generic page extraction through managed Chrome. |
 | [**finance**](finance/) | Fetch browser-authenticated market and macroeconomic data through Browser Tools managed Chrome. |
 | [**ai-chat**](ai-chat/) | Query browser-authenticated AI providers through Browser Tools managed Chrome. |
+| [**codex**](codex/) | Run non-interactive Codex code review sessions, track long-running jobs, and continue review threads with extra prompts. |
 
 ## Getting started
 

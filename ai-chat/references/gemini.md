@@ -4,7 +4,7 @@ Gemini uses a direct WebUI API path through Browser Tools managed Chrome cookies
 
 ## Current capability
 
-- Reads Google cookies from Browser Tools managed Chrome by default. Start Browser Tools with the configured Gemini task profile, for example `browser-tools/scripts/start.mjs --task gemini --sync`.
+- Reads Google cookies from the AI Chat owned Browser Tools managed Chrome by default. AI Chat uses Chrome profile `Default` unless the Browser Tools task profile `ai-chat` is configured. If auth looks stale, cleanly stop the AI Chat owned browser and rerun so Browser Tools resyncs the copied profile.
 - Supports an explicit direct profile fallback with `--cookie-source chrome-profile --chrome-profile <profile-folder>`.
 - Verifies Gemini session state on live runs and model listing. The result separates direct WebUI auth from browser UI readiness.
 - Fetches Gemini page tokens from `https://gemini.google.com/app`.
@@ -52,7 +52,7 @@ Use `--include-conversation` when the caller needs the full messages returned in
 Before claiming a Gemini behavior works:
 
 1. Run `npm test`.
-2. Start Browser Tools with the Gemini-capable task profile and `--sync` when current cookies matter.
+2. Ensure the Browser Tools task profile `ai-chat` points at a Gemini-capable Chrome profile. If current cookies matter and auth looks stale, cleanly stop the AI Chat owned browser and rerun so the profile copy is refreshed.
 3. Run the command with `--json` and save output under `/tmp/ai-chat-verify/gemini/<case>/`.
 4. Verify non-empty response text and useful `provider_state`.
 5. For continuation, verify a second prompt using the same saved conversation id.

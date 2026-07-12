@@ -21,9 +21,10 @@ export function parseBrowserSessionArgs(rawArgs, browserTools) {
   };
 }
 
-export function optionValue(args, name) {
+export function optionValue(args, name, fallback = null) {
   const index = args.indexOf(name);
-  if (index === -1) return null;
+  if (index === -1) return fallback;
   const value = args[index + 1];
-  return value && !value.startsWith('--') ? value : null;
+  if (value === undefined || value.startsWith('--')) throw new Error(`Missing value after ${name}`);
+  return value;
 }
