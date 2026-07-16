@@ -166,7 +166,7 @@ while true; do
         completed|stopped) exit 0 ;;
         failed) exit 2 ;;
         dead) exit 3 ;;
-        running|quiet|stalled|wedged) ;;
+        running|quiet|waiting|stalled|wedged) ;;
     esac
 
     if [[ "$TIMEOUT" -gt 0 ]]; then

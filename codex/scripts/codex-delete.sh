@@ -16,10 +16,9 @@ Usage: codex-delete.sh <run_id> [run_id...] [--force]
 Delete run directories (metadata, logs, reports, archived turns) from the
 skill's run store. Works on both review and mcp runs.
 
-A run with a live process (an MCP server, or a review still running) is
-refused unless --force, which stops the process first. Deleting a run does
-NOT delete the underlying codex thread: transcripts live in ~/.codex/sessions
-and stay resumable with `codex exec resume <thread_id>` if you saved the id.
+A run with an active turn or legacy server is refused unless --force. An idle
+App Server session host is shut down cleanly before its run directory is
+removed. Deleting a run does not delete the durable Codex thread.
 
   --last   delete the most recent run (any kind)
   --all    delete every run; live runs are skipped unless --force
@@ -114,6 +113,21 @@ for RUN_ID in "${RUN_IDS[@]}"; do
         ALIVE="true"
     fi
 
+    SESSION_DIR="$(codex_review_get_meta_field "$RUN_ID" session_dir)"
+    if [[ "$ALIVE" == "true" && -n "$SESSION_DIR" && "$SESSION_DIR" != "null" && -f "$SESSION_DIR/state.json" ]]; then
+        ACTIVE_TURNS="$(jq -r '.activeTurns | length' "$SESSION_DIR/state.json" 2>/dev/null || echo 1)"
+        if [[ "$ACTIVE_TURNS" -eq 0 ]]; then
+            timeout 15 node "$SCRIPT_DIR/codex-app-server.mjs" shutdown --session-dir "$SESSION_DIR" >/dev/null 2>&1 || true
+            for _ in $(seq 1 20); do
+                [[ "$(jq -r '.status // "unknown"' "$SESSION_DIR/state.json" 2>/dev/null)" == "closed" ]] && break
+                sleep 0.1
+            done
+            if [[ "$(jq -r '.status // "unknown"' "$SESSION_DIR/state.json" 2>/dev/null)" == "closed" ]]; then
+                ALIVE="false"
+            fi
+        fi
+    fi
+
     if [[ "$ALIVE" == "true" && "$FORCE" != "true" ]]; then
         if [[ "$KIND" == "mcp" ]]; then
             echo "Run $RUN_ID is a live MCP server (pid $PID). Stop it with codex-mcp-stop.sh $RUN_ID, or pass --force." >&2
@@ -139,7 +153,7 @@ for RUN_ID in "${RUN_IDS[@]}"; do
     rm -rf "$RUN_DIR"
     DELETED=$((DELETED + 1))
     if [[ -n "$THREAD_ID" && "$THREAD_ID" != "null" ]]; then
-        echo "Deleted $RUN_ID ($KIND). Codex thread $THREAD_ID stays on disk; resume with: codex exec resume $THREAD_ID \"<prompt>\""
+        echo "Deleted $RUN_ID ($KIND). Codex thread $THREAD_ID stays on disk and can be resumed through App Server."
     else
         echo "Deleted $RUN_ID ($KIND)."
     fi

@@ -25,6 +25,7 @@ Options:
   --effort <value>          Reasoning effort: minimal, low, medium, high, xhigh
   --config <k=v>            Codex -c config override (repeatable),
                             e.g. --config model_reasoning_effort=low
+  --approval <mode>         decline (default) or interactive
   --workdir <path>          Set working directory for diff resolution
   --wait                    Run in foreground and return when completed
   --help                    Show this message
@@ -44,6 +45,7 @@ EFFORT=""
 CONFIG_FLAGS=()
 WORKDIR="$(pwd)"
 WAIT="false"
+APPROVAL="decline"
 
 validate_effort() {
     case "$1" in
@@ -116,6 +118,11 @@ while [[ $# -gt 0 ]]; do
             CONFIG_FLAGS+=(-c "$2")
             shift 2
             ;;
+        --approval)
+            [[ $# -lt 2 ]] && { echo "--approval requires a value" >&2; exit 1; }
+            APPROVAL="$2"
+            shift 2
+            ;;
         --workdir)
             [[ $# -lt 2 ]] && { echo "--workdir requires a value" >&2; exit 1; }
             WORKDIR="$2"
@@ -146,6 +153,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+case "$APPROVAL" in
+    decline|interactive) ;;
+    *) echo "Unknown approval mode '$APPROVAL'. Use decline or interactive." >&2; exit 1 ;;
+esac
 
 if [[ -n "$CUSTOM_PROMPT_FILE" ]]; then
     if [[ ! -f "$CUSTOM_PROMPT_FILE" ]]; then
@@ -194,104 +206,60 @@ elif [[ -n "$CUSTOM_PROMPT" ]]; then
     FINAL_PROMPT="$CUSTOM_PROMPT"
 fi
 
-# codex-cli 0.142.5 rejects scope flags combined with the [PROMPT] argument
-# at parse time, on BOTH `codex review` and `codex exec review`. Prompt-mode
-# reviews therefore only work on the default scope, which is the uncommitted
-# change set. Refuse the impossible combination instead of silently dropping
-# the prompt (the failure mode this replaced).
-if [[ -n "$FINAL_PROMPT" && "$SCOPE" != "uncommitted" ]]; then
-    echo "codex cannot combine --base/--commit with a preset or custom prompt (scope flags are mutually exclusive with [PROMPT] on codex-cli 0.142.5)." >&2
-    echo "Either run the scoped review without --preset/--prompt and shape it afterward with codex-review-converse.sh, or review the uncommitted scope with the preset." >&2
-    exit 1
-fi
-
 WORKDIR="$(cd "$WORKDIR" && pwd)"
 RUN_ID="$(codex_review_new_run_id)"
 RUN_DIR="$(codex_review_run_dir "$RUN_ID")"
 LOG_FILE="$RUN_DIR/events.log"
+ERROR_FILE="$RUN_DIR/app-server.stderr.log"
 REPORT_FILE="$RUN_DIR/report.md"
 CONV_DIR="$RUN_DIR/conversations"
 mkdir -p "$RUN_DIR" "$CONV_DIR"
 
 codex_review_create_meta "$RUN_ID" "$WORKDIR" "$SCOPE" "$SCOPE_VALUE" "$TITLE" "$PRESET" "$MODEL" "" "$LOG_FILE" "$REPORT_FILE" "$CONV_DIR"
+codex_review_set_meta_field "$RUN_ID" error_log "$ERROR_FILE"
 if [[ -n "$EFFORT" ]]; then
     codex_review_set_meta_field "$RUN_ID" effort "$EFFORT"
 fi
 
-# Direct `codex review` is used when possible. It supports the real review
-# scope flags, but it cannot combine scoped review with a custom prompt and
-# it does not accept --model. Use exec review only for features that direct
-# review cannot express non-interactively.
-USE_EXEC="false"
-if [[ -n "$FINAL_PROMPT" || -n "$MODEL" ]]; then
-    USE_EXEC="true"
-fi
-
-if [[ "$USE_EXEC" == "true" ]]; then
-    CODEX_CMD=(codex exec review --json --output-last-message "$REPORT_FILE")
-else
-    CODEX_CMD=(codex review)
-fi
-
-if [[ "$SCOPE" == "uncommitted" ]]; then
-    # With a prompt, the --uncommitted flag must be omitted (it conflicts
-    # with [PROMPT]); uncommitted is the default scope anyway, verified by
-    # probing which git commands the review harness runs.
-    if [[ -z "$FINAL_PROMPT" ]]; then
-        CODEX_CMD+=(--uncommitted)
+THREAD_FILE="$RUN_DIR/thread.id"
+SESSION_DIR="$RUN_DIR/app-server-session"
+CLIENT_OUTPUT_FILE="$RUN_DIR/app-server-result.json"
+HOST_OUTPUT_FILE="$RUN_DIR/app-server-host.json"
+HOST_CMD=(node "$SCRIPT_DIR/codex-app-server.mjs" start --session-dir "$SESSION_DIR" --events "$LOG_FILE" --approval "$APPROVAL")
+APP_SERVER_CMD=(node "$SCRIPT_DIR/codex-app-server.mjs" review --session-dir "$SESSION_DIR" --scope "$SCOPE" --workdir "$WORKDIR" --thread-out "$THREAD_FILE" --report "$REPORT_FILE")
+codex_review_set_meta_field "$RUN_ID" session_dir "$SESSION_DIR"
+codex_review_set_meta_field "$RUN_ID" control_dir "$SESSION_DIR"
+codex_review_set_meta_field "$RUN_ID" approval "$APPROVAL"
+[[ -n "$SCOPE_VALUE" ]] && APP_SERVER_CMD+=(--scope-value "$SCOPE_VALUE")
+[[ -n "$TITLE" ]] && APP_SERVER_CMD+=(--title "$TITLE")
+[[ -n "$FINAL_PROMPT" ]] && APP_SERVER_CMD+=(--prompt "$FINAL_PROMPT")
+[[ -n "$MODEL" ]] && APP_SERVER_CMD+=(--model "$MODEL")
+[[ -n "$EFFORT" ]] && APP_SERVER_CMD+=(--effort "$EFFORT")
+for flag_index in "${!CONFIG_FLAGS[@]}"; do
+    if [[ "${CONFIG_FLAGS[$flag_index]}" == "-c" ]] && [[ -n "${CONFIG_FLAGS[$((flag_index + 1))]:-}" ]]; then
+        APP_SERVER_CMD+=(--config "${CONFIG_FLAGS[$((flag_index + 1))]}")
+        HOST_CMD+=(--config "${CONFIG_FLAGS[$((flag_index + 1))]}")
     fi
-elif [[ "$SCOPE" == "base" ]]; then
-    CODEX_CMD+=(--base "$SCOPE_VALUE")
-elif [[ "$SCOPE" == "commit" ]]; then
-    CODEX_CMD+=(--commit "$SCOPE_VALUE")
-fi
-if [[ -n "$TITLE" ]]; then
-    CODEX_CMD+=(--title "$TITLE")
-fi
-if [[ "$USE_EXEC" == "true" && -n "$MODEL" ]]; then
-    CODEX_CMD+=(-m "$MODEL")
-fi
-# Both `codex review` and `codex exec review` accept -c overrides
-# (verified on codex-cli 0.142.5), so config flags apply to either runner.
-if [[ ${#CONFIG_FLAGS[@]} -gt 0 ]]; then
-    CODEX_CMD+=("${CONFIG_FLAGS[@]}")
-fi
+done
+codex_review_set_meta_field "$RUN_ID" runner "codex-app-server-review"
 
-codex_review_set_meta_field "$RUN_ID" runner "$([[ "$USE_EXEC" == "true" ]] && echo "codex-exec-review" || echo "codex-review")"
-
-SESS_BASE="${CODEX_HOME:-$HOME/.codex}/sessions"
-PRE_MARKER="$RUN_DIR/.pre_sessions_stamp"
-codex_review_stamp_sessions "$SESS_BASE" > "$PRE_MARKER"
+if ! (cd "$WORKDIR" && "${HOST_CMD[@]}" >"$HOST_OUTPUT_FILE" 2>>"$ERROR_FILE"); then
+    codex_review_update_status "$RUN_ID" "failed" 1
+    echo "App Server session host failed to start. Check: $ERROR_FILE" >&2
+    exit 1
+fi
+HOST_PID="$(jq -r '.pid' "$SESSION_DIR/state.json")"
+codex_review_set_meta_field "$RUN_ID" pid "$HOST_PID" number
+codex_review_set_meta_field "$RUN_ID" host_pid "$HOST_PID" number
 
 run_review() {
-    local report_file="$1"
-    local log_file="$2"
-
-    if [[ "$USE_EXEC" == "true" ]]; then
-        if [[ -n "$FINAL_PROMPT" ]]; then
-            # The custom instructions are a POSITIONAL argument to
-            # `codex exec review`; stdin is only read when that argument is
-            # `-`. Piping without `-` silently drops the whole prompt
-            # (verified on codex-cli 0.142.5 by grepping the session rollout).
-            printf '%s' "$FINAL_PROMPT" | "${CODEX_CMD[@]}" - >"$log_file" 2>&1
-        else
-            "${CODEX_CMD[@]}" >"$log_file" 2>&1
-        fi
-        return $?
-    fi
-
-    # Direct review writes the human report to stdout and progress/errors to stderr.
-    "${CODEX_CMD[@]}" >"$report_file" 2>"$log_file"
+    "${APP_SERVER_CMD[@]}" >"$CLIENT_OUTPUT_FILE" 2>>"$ERROR_FILE"
 }
 
 record_session_id() {
     local session_id=""
-    session_id="$(codex_review_extract_session_id_from_log "$LOG_FILE" || true)"
-    if [[ -z "$session_id" ]]; then
-        session_id="$(codex_review_extract_thread_id "$LOG_FILE" || true)"
-    fi
-    if [[ -z "$session_id" ]]; then
-        session_id="$(codex_review_find_new_session "$SESS_BASE" "$PRE_MARKER" || true)"
+    if [[ -f "$THREAD_FILE" ]]; then
+        session_id="$(tr -d '[:space:]' < "$THREAD_FILE")"
     fi
     if [[ -n "$session_id" ]]; then
         codex_review_set_meta_field "$RUN_ID" thread_id "$session_id"
@@ -301,11 +269,10 @@ record_session_id() {
 
 if [[ "$WAIT" == "true" ]]; then
     codex_review_set_meta_field "$RUN_ID" status "running"
-    codex_review_set_meta_field "$RUN_ID" pid "$$" number
     codex_review_update_timestamp "$RUN_ID"
 
     cd "$WORKDIR"
-    if run_review "$REPORT_FILE" "$LOG_FILE"; then
+    if run_review; then
         EXIT_CODE=0
     else
         EXIT_CODE=$?
@@ -334,7 +301,7 @@ SESSION_ID=""
     codex_review_update_timestamp "$RUN_ID"
 
     cd "$WORKDIR"
-    if run_review "$REPORT_FILE" "$LOG_FILE"; then
+    if run_review; then
         EXIT_CODE=0
     else
         EXIT_CODE=$?
@@ -349,7 +316,7 @@ SESSION_ID=""
     fi
 ) >/dev/null 2>&1 &
 RUN_PID=$!
-codex_review_set_meta_field "$RUN_ID" pid "$RUN_PID" number
+codex_review_set_meta_field "$RUN_ID" turn_client_pid "$RUN_PID" number
 
 for _ in $(seq 1 30); do
     SESSION_ID="$(record_session_id || true)"
@@ -363,18 +330,25 @@ cat <<EOF
 run_id: $RUN_ID
 status: running
 session_id: ${SESSION_ID:-pending}
-runner: $([[ "$USE_EXEC" == "true" ]] && echo "codex exec review" || echo "codex review")
+runner: codex app-server review/start
 workdir: $WORKDIR
 log_file: $LOG_FILE
+error_log: $ERROR_FILE
 report_file: $REPORT_FILE
+session_dir: $SESSION_DIR
 scope: $SCOPE ${SCOPE_VALUE:+($SCOPE_VALUE)}
-pid: $RUN_PID
+host_pid: $HOST_PID
 
 Use this command to check progress:
   $SCRIPT_DIR/codex-review-status.sh $RUN_ID
 
 Use this command when done:
   $SCRIPT_DIR/codex-review-report.sh $RUN_ID
+
+Steer or interrupt the active review on its owning connection:
+  node $SCRIPT_DIR/codex-app-server.mjs steer --session-dir $SESSION_DIR --prompt "<instruction>"
+  node $SCRIPT_DIR/codex-app-server.mjs interrupt --session-dir $SESSION_DIR
+  node $SCRIPT_DIR/codex-app-server.mjs pending --session-dir $SESSION_DIR
 
 If you want to add an adversarial or security follow up prompt:
   $SCRIPT_DIR/codex-review-converse.sh $RUN_ID "Your additional request"
