@@ -1,0 +1,8 @@
+# Copy to tests/forbidden-patterns.local (gitignored) and add the real values.
+# One extended-regex per line; blank lines and lines starting with # are ignored.
+# These are matched case-insensitively against published skill files.
+#
+# Add the identifiers that must never leak into the public repo, for example:
+#   your-employer-name
+#   your\.username
+#   YOURPROJECTKEY-[0-9]

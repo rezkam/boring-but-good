@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/forbidden.sh"
 # Master test runner for boring-but-good
 # Runs all per-skill test suites and reports combined results.
 #
@@ -78,7 +79,7 @@ done < <(find "$REPO_DIR" -mindepth 2 -maxdepth 3 -name SKILL.md -type f | sort)
 # Check no company/user/system-specific data anywhere in skill dirs
 LEAKS=""
 for d in $SKILL_DIRS; do
-    found=$(grep -rniE 'telavox|reza\.kamali|kamali.fard' "$d" --include='*.sh' --include='*.md' --exclude-dir=node_modules 2>/dev/null)
+    found=$(grep -rniE "$FORBIDDEN_RE" "$d" --include='*.sh' --include='*.md' --exclude-dir=node_modules 2>/dev/null)
     [ -n "$found" ] && LEAKS="${LEAKS}${found}\n"
 done
 if [ -n "$LEAKS" ]; then

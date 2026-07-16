@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/forbidden.sh"
 # Test suite for the ArgoCD skill
 # Tests: argument validation, error messages, script structure
 # RULE: Live tests are READ-ONLY. Never create, modify, or delete data in live systems.
@@ -37,7 +38,7 @@ if head -1 "$SKILLMD" | grep -q '^---$'; then pass "Has YAML frontmatter"; else 
 if grep -q '^name: argocd' "$SKILLMD"; then pass "Name field is 'argocd'"; else fail "Name field missing or wrong"; fi
 if grep -q '^description:' "$SKILLMD"; then pass "Has description"; else fail "Missing description"; fi
 
-if grep -qiE 'telavox|reza\.kamali|/Users/' "$SKILLMD"; then
+if grep -qiE "$FORBIDDEN_RE" "$SKILLMD"; then
     fail "SKILL.md contains company/user/system-specific data"
 else
     pass "No company/user/system-specific data in SKILL.md"
@@ -57,7 +58,7 @@ for script in "$ARGOCD_SCRIPTS"/*.sh; do
     if grep -q 'set -e' "$script"; then pass "${name}: has set -e"; else fail "${name}: missing set -e"; fi
     if grep -q '_config.sh\|argocd-api.sh' "$script"; then pass "${name}: loads config"; else fail "${name}: doesn't load config"; fi
 
-    if grep -qiE 'telavox|reza\.kamali|/Users/' "$script"; then
+    if grep -qiE "$FORBIDDEN_RE" "$script"; then
         fail "${name}: contains company/user/system-specific data"
     else
         pass "${name}: no company/user/system-specific data"
@@ -73,7 +74,7 @@ CONFIG="${ARGOCD_SCRIPTS}/_config.sh"
 if bash -n "$CONFIG" 2>/dev/null; then pass "_config.sh: bash syntax OK"; else fail "_config.sh: bash syntax error"; fi
 if zsh -n "$CONFIG" 2>/dev/null; then pass "_config.sh: zsh syntax OK"; else fail "_config.sh: zsh syntax error"; fi
 if grep -q '\.boring/argocd' "$CONFIG"; then pass "_config.sh: uses ~/.boring/argocd/"; else fail "_config.sh: should use ~/.boring/argocd/"; fi
-if grep -qiE 'telavox|reza\.kamali|/Users/' "$CONFIG"; then
+if grep -qiE "$FORBIDDEN_RE" "$CONFIG"; then
     fail "_config.sh: contains company/user/system-specific data"
 else
     pass "_config.sh: no company/user/system-specific data"
@@ -166,7 +167,7 @@ if [ -d "$REFS_DIR" ]; then
         [ -f "$ref" ] || continue
         name=$(basename "$ref")
         if [ -s "$ref" ]; then pass "${name}: non-empty"; else fail "${name}: is empty"; fi
-        if grep -qiE 'telavox|reza\.kamali|/Users/' "$ref"; then
+        if grep -qiE "$FORBIDDEN_RE" "$ref"; then
             fail "${name}: contains company/user/system-specific data"
         else
             pass "${name}: no company/user/system-specific data"

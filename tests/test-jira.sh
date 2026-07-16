@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/forbidden.sh"
 # Test suite for the Jira skill
 # Tests: argument validation, error messages, output parsing, failure modes
 # RULE: Live tests are READ-ONLY. Never create, modify, or delete data in live systems.
@@ -65,7 +66,7 @@ else
 fi
 
 # No company/user/system-specific data
-if grep -qiE 'telavox|reza\.kamali|USS-[0-9]' "$SKILLMD"; then
+if grep -qiE "$FORBIDDEN_RE" "$SKILLMD"; then
     fail "SKILL.md contains company/user-specific data"
 else
     pass "No company/user-specific data in SKILL.md"
@@ -124,7 +125,7 @@ for script in "$JIRA_SCRIPTS"/*.sh; do
     fi
 
     # No company-specific data
-    if grep -qiE 'telavox|reza\.kamali|USS-[0-9]' "$script"; then
+    if grep -qiE "$FORBIDDEN_RE" "$script"; then
         fail "${name}: contains company/user-specific data"
     else
         pass "${name}: no company/user-specific data"
@@ -165,7 +166,7 @@ else
     fail "_config.sh: doesn't load default labels"
 fi
 
-if grep -qiE 'telavox|reza\.kamali|USS-[0-9]|/Users/' "$JIRA_SCRIPTS/_config.sh"; then
+if grep -qiE "$FORBIDDEN_RE" "$JIRA_SCRIPTS/_config.sh"; then
     fail "_config.sh: contains company/user-specific data"
 else
     pass "_config.sh: no company/user-specific data"
@@ -690,7 +691,7 @@ if [ -d "$REFS_DIR" ]; then
         else
             fail "${name}: is empty"
         fi
-        if grep -qiE 'telavox|reza\.kamali|USS-[0-9]|/Users/' "$ref"; then
+        if grep -qiE "$FORBIDDEN_RE" "$ref"; then
             fail "${name}: contains company/user/system-specific data"
         else
             pass "${name}: no company/user/system-specific data"

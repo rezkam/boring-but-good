@@ -28,3 +28,6 @@ browser-tools/v2-*.mjs
 browser-tools/dashboard-shots.mjs
 finance/config/*.local.json
 ai-chat/config/*.local.json
+
+# Local-only forbidden-pattern list for the anonymization guards (identity/employer/internal keys).
+tests/forbidden-patterns.local

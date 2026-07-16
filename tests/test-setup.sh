@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/forbidden.sh"
 # Test suite for setup.sh
 # Tests: syntax, structure, harness detection, java-21-to-25-migration install logic, codex install logic, summary
 # RULE: ALL tests are READ-ONLY. No files are created, modified, or deleted outside $SANDBOX.
@@ -55,7 +56,7 @@ else
     pass "No hardcoded home directory paths"
 fi
 
-if grep -qiE 'telavox|reza\.kamali|kamali.fard' "$SETUP"; then
+if grep -qiE "$FORBIDDEN_RE" "$SETUP"; then
     fail "Company/user-specific data in setup.sh"
 else
     pass "No company/user-specific data"
@@ -468,7 +469,7 @@ else
     fail "Description too long: ${DESC_LEN} chars (pi limit is 1024)"
 fi
 
-if grep -qiE 'telavox|reza\.kamali|/Users/' "$SKILLMD"; then
+if grep -qiE "$FORBIDDEN_RE" "$SKILLMD"; then
     fail "SKILL.md contains company/user/system-specific data"
 else
     pass "No company/user/system-specific data in SKILL.md"

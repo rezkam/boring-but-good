@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/forbidden.sh"
 # Test suite for the Dependency-Track skill
 # Tests: argument validation, error messages, script structure
 # RULE: Live tests are READ-ONLY. Never create, modify, or delete data in live systems.
@@ -38,7 +39,7 @@ if head -1 "$SKILLMD" | grep -q '^---$'; then pass "Has YAML frontmatter"; else 
 if grep -q '^name: dependency-track' "$SKILLMD"; then pass "Name field is 'dependency-track'"; else fail "Name field missing or wrong"; fi
 if grep -q '^description:' "$SKILLMD"; then pass "Has description"; else fail "Missing description"; fi
 
-if grep -qiE 'telavox|reza\.kamali|/Users/' "$SKILLMD"; then
+if grep -qiE "$FORBIDDEN_RE" "$SKILLMD"; then
     fail "SKILL.md contains company/user/system-specific data"
 else
     pass "No company/user/system-specific data in SKILL.md"
@@ -57,7 +58,7 @@ for script in "$DT_SCRIPTS"/*.sh; do
     if grep -q 'set -e' "$script"; then pass "${name}: has set -e"; else fail "${name}: missing set -e"; fi
     if grep -q '_config.sh\|dtrack-api.sh' "$script"; then pass "${name}: loads config"; else fail "${name}: doesn't load config"; fi
 
-    if grep -qiE 'telavox|reza\.kamali|/Users/' "$script"; then
+    if grep -qiE "$FORBIDDEN_RE" "$script"; then
         fail "${name}: contains company/user/system-specific data"
     else
         pass "${name}: no company/user/system-specific data"
@@ -72,7 +73,7 @@ CONFIG="${DT_SCRIPTS}/_config.sh"
 
 if bash -n "$CONFIG" 2>/dev/null; then pass "_config.sh: bash syntax OK"; else fail "_config.sh: bash syntax error"; fi
 if grep -q '\.boring/dependency' "$CONFIG"; then pass "_config.sh: uses ~/.boring/dependency-track/"; else fail "_config.sh: should use ~/.boring/dependency-track/"; fi
-if grep -qiE 'telavox|reza\.kamali|/Users/' "$CONFIG"; then
+if grep -qiE "$FORBIDDEN_RE" "$CONFIG"; then
     fail "_config.sh: contains company/user/system-specific data"
 else
     pass "_config.sh: no company/user/system-specific data"
@@ -131,7 +132,7 @@ if [ -d "$REFS_DIR" ]; then
         [ -f "$ref" ] || continue
         name=$(basename "$ref")
         if [ -s "$ref" ]; then pass "${name}: non-empty"; else fail "${name}: is empty"; fi
-        if grep -qiE 'telavox|reza\.kamali|/Users/' "$ref"; then
+        if grep -qiE "$FORBIDDEN_RE" "$ref"; then
             fail "${name}: contains company/user/system-specific data"
         else
             pass "${name}: no company/user/system-specific data"
