@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Coordinator Error Discovery</title>
+<style>
+  :root{
+    --c-dispatch:#2563eb; --c-assist:#059669; --c-think:#7c3aed;
+    --c-tool:#d97706; --c-result:#0d9488; --c-sugg:#9333ea; --c-ann:#f59e0b;
+    --bg:#fafaf9; --fg:#1c1917; --muted:#78716c; --border:#e7e5e4;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.5 -apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--fg)}
+  #topbar{position:sticky;top:0;z-index:50;display:flex;gap:8px;align-items:center;
+    padding:8px 14px;background:#fff;border-bottom:1px solid var(--border)}
+  #topbar h1{font-size:15px;margin:0 12px 0 0}
+  .tab{padding:5px 14px;border:1px solid var(--border);border-radius:6px;background:#fff;cursor:pointer;font-size:13px}
+  .tab.active{background:var(--fg);color:#fff;border-color:var(--fg)}
+  #toast{position:fixed;bottom:16px;right:16px;z-index:99;display:flex;flex-direction:column;gap:6px}
+  .toastmsg{background:#1c1917;color:#fff;padding:8px 14px;border-radius:8px;font-size:13px;opacity:.95}
+  main{display:none}
+  main.active{display:block}
+
+  /* ---- review view ---- */
+  #review{display:none}
+  #review.active{display:grid;grid-template-columns:230px minmax(0,1fr)}
+  #sidebar{border-right:1px solid var(--border);background:#fff;height:calc(100vh - 46px);
+    overflow-y:auto;padding:8px}
+  .sitem{padding:6px 8px;border-radius:6px;cursor:pointer;margin-bottom:2px;font-size:12px}
+  .sitem:hover{background:#f5f5f4}
+  .sitem.current{background:#eef2ff}
+  .sitem .sid{font-family:ui-monospace,monospace;font-size:11px}
+  .sitem .smeta{color:var(--muted);font-size:11px}
+  .chip{display:inline-block;padding:0 6px;border-radius:8px;font-size:10.5px;font-weight:600;
+    margin-right:4px;vertical-align:1px}
+  .chip.role{background:#e0e7ff;color:#3730a3}.chip.camp{background:#ecfdf5;color:#065f46}
+  .chip.model{background:#f5f5f4;color:#44403c}.chip.died{background:#fee2e2;color:#b91c1c}
+  .chip.retry{background:#ffedd5;color:#c2410c}.chip.schema{background:#fef9c3;color:#854d0e}
+  .chip.flag{background:#f1f5f9;color:#475569;font-weight:500}
+  .chip.anncount{background:#fef3c7;color:#92400e}
+
+  #article-wrap{display:flex;justify-content:center;height:calc(100vh - 46px);overflow-y:auto}
+  #article-cols{display:flex;gap:16px;padding:20px 12px;max-width:1060px;width:100%}
+  #article{flex:1;min-width:0;max-width:760px}
+  #margin{width:250px;flex-shrink:0;position:relative}
+  .mnote{position:absolute;width:100%;background:#fff;border:1px solid var(--border);
+    border-left:3px solid var(--c-ann);border-radius:6px;padding:6px 8px;font-size:12px;
+    box-shadow:0 1px 2px rgba(0,0,0,.05)}
+  .mnote.sugg{border-left-color:var(--c-sugg)}
+  .mnote .mq{color:var(--muted);font-style:italic;display:block;margin-bottom:3px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mnote .tag{font-size:10px;font-weight:700;color:var(--c-sugg);text-transform:uppercase}
+  .mnote .btns{margin-top:4px;display:flex;gap:6px}
+  .mnote button{font-size:11px;padding:2px 8px;border:1px solid var(--border);border-radius:4px;
+    background:#fff;cursor:pointer}
+  .mnote button.acc{background:#059669;color:#fff;border-color:#059669}
+  .mnote .hb{visibility:hidden}
+  .mnote:hover .hb{visibility:visible}
+  .mnote.linked{outline:2px solid var(--c-ann)}
+  .mnote.sugg.linked{outline-color:var(--c-sugg)}
+
+  #rechead{background:#fff;border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:18px}
+  #rechead .rid{font-family:ui-monospace,monospace;font-size:12px;color:var(--muted)}
+  #rechead .flags{margin-top:6px}
+
+  .blk{border-left:3px solid var(--border);background:#fff;border-radius:0 8px 8px 0;
+    padding:8px 12px;margin-bottom:16px;white-space:pre-wrap;overflow-wrap:break-word}
+  .blk .rl{display:block;font-size:10.5px;font-weight:700;text-transform:uppercase;
+    letter-spacing:.04em;margin-bottom:4px;white-space:normal}
+  .blk-dispatch{border-left-color:var(--c-dispatch)} .blk-dispatch .rl{color:var(--c-dispatch)}
+  .blk-assist{border-left-color:var(--c-assist)} .blk-assist .rl{color:var(--c-assist)}
+  .blk-think{border-left-color:var(--c-think);background:#faf5ff;font-style:italic}
+  .blk-think .rl{color:var(--c-think);font-style:normal}
+  .blk-result{border-left-color:var(--c-result);background:#f0fdfa} .blk-result .rl{color:var(--c-result)}
+  .blk-sys{border-left-color:var(--border);color:var(--muted);font-size:12px}
+  .toolgroup{border:1px solid #fde d5;border:1px solid #fed7aa;border-radius:8px;margin-bottom:16px;overflow:hidden}
+  .toolgroup .blk{margin-bottom:0;border-radius:0}
+  .blk-tooluse{border-left-color:var(--c-tool);font-family:ui-monospace,monospace;font-size:12px}
+  .blk-tooluse .rl{color:var(--c-tool);font-family:-apple-system,sans-serif}
+  .blk-toolres{border-left-color:#fbbf24;font-family:ui-monospace,monospace;font-size:12px;
+    border-top:1px dashed #fed7aa}
+  .blk-toolres .rl{color:#b45309;font-family:-apple-system,sans-serif}
+  .blk-toolres.err{background:#fef2f2;border-left-color:#dc2626}
+  .collapsed-body{display:none}
+  .summline{color:var(--muted);cursor:pointer;font-style:italic}
+  .trunc-note{color:var(--muted);font-size:11px;font-style:italic}
+
+  .hl{background:#fde68a;border-radius:2px;cursor:pointer}
+  .hl.sugg{background:#f3e8ff;border-bottom:2px dashed var(--c-sugg)}
+  .hl.linked{outline:2px solid var(--c-ann)}
+  .hl.sugg.linked{outline-color:var(--c-sugg)}
+  .pending-hl{background:#bfdbfe}
+
+  #popover{position:absolute;z-index:60;background:#fff;border:1px solid var(--border);
+    border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12);padding:8px;display:none;width:300px}
+  #popover textarea{width:100%;height:56px;font:12px/1.4 inherit;border:1px solid var(--border);
+    border-radius:4px;padding:4px;resize:vertical}
+  #popover .hint{font-size:11px;color:var(--muted)}
+
+  /* ---- map view ---- */
+  #map.active{display:block;padding:10px}
+  #maptip{position:fixed;z-index:70;background:#1c1917;color:#fff;padding:6px 10px;border-radius:6px;
+    font-size:12px;display:none;pointer-events:none;max-width:340px}
+  #maplegend{font-size:12px;color:var(--muted);padding:4px 10px}
+
+  /* ---- progress view ---- */
+  #progress.active{display:block;padding:20px;max-width:1100px;margin:0 auto}
+  #treemap{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:26px}
+  .mode{border:1px solid var(--border);border-radius:10px;background:#fff;padding:10px 12px;min-width:220px}
+  .mode h3{margin:0 0 2px;font-size:13.5px}
+  .mode .mdesc{font-size:12px;color:var(--muted);margin-bottom:6px}
+  .mode .mnotei{font-size:12px;padding:2px 0;cursor:pointer;border-top:1px dashed var(--border)}
+  .mode .mnotei:hover{color:var(--c-dispatch)}
+  .mode .cnt{float:right;font-weight:700}
+  #suggq .srow{display:flex;gap:8px;align-items:flex-start;padding:8px;border:1px solid var(--border);
+    border-radius:8px;background:#fff;margin-bottom:6px;font-size:13px}
+  #suggq .srow .q{cursor:pointer;color:var(--c-dispatch)}
+  #suggq .modehead{font-weight:700;margin:14px 0 6px}
+  #suggctl{display:flex;gap:10px;align-items:center;margin-bottom:10px}
+  #suggctl button{padding:5px 12px;border:1px solid var(--border);border-radius:6px;background:#fff;cursor:pointer}
+  #suggctl button.acc{background:#059669;color:#fff;border-color:#059669}
+</style>
+</head>
+<body>
+<div id="topbar">
+  <h1>Coordinator Error Discovery</h1>
+  <button class="tab active" data-v="review">Review</button>
+  <button class="tab" data-v="map">Map</button>
+  <button class="tab" data-v="progress">Progress</button>
+  <span id="statusline" style="margin-left:auto;color:var(--muted);font-size:12px"></span>
+</div>
+
+<main id="review" class="active">
+  <div id="sidebar"></div>
+  <div id="article-wrap"><div id="article-cols">
+    <div id="article"></div>
+    <div id="margin"></div>
+  </div></div>
+</main>
+
+<main id="map"><div id="maplegend"></div><svg id="mapsvg" width="100%" height="620"></svg></main>
+
+<main id="progress">
+  <h2 style="font-size:16px">Failure modes</h2>
+  <div id="treemap"></div>
+  <h2 style="font-size:16px">Agent suggestions to review</h2>
+  <div id="suggctl">
+    <label><input type="checkbox" id="selall"> Select all</label>
+    <button class="acc" id="accsel">Accept selected</button>
+    <button id="dissel">Dismiss selected</button>
+  </div>
+  <div id="suggq"></div>
+</main>
+
+<div id="popover">
+  <textarea placeholder="What is wrong here? (free text, Enter to save)"></textarea>
+  <div class="hint">Enter to save. Esc to cancel.</div>
+</div>
+<div id="maptip"></div>
+<div id="toast"></div>
+
+<script>
+const api = p => fetch('/api/'+p).then(r=>r.json());
+const post = (p,b) => fetch('/api/'+p,{method:'POST',body:JSON.stringify(b)});
+let INDEX={}, STATS={}, SAMPLES=[], ANN={}, SUGG=[], PATTERNS={}, GRAPH=[];
+let cur=null, recCache={}, pendingRange=null;
+
+function toast(m){const d=document.createElement('div');d.className='toastmsg';d.textContent=m;
+  document.getElementById('toast').appendChild(d);setTimeout(()=>d.remove(),4200);}
+
+/* ---------- boot ---------- */
+let BACKUP_KEY='ea-ann-backup';
+function hstr(s){let h=0;for(let i=0;i<s.length;i++){h=(Math.imul(h,31)+s.charCodeAt(i))|0;}return (h>>>0).toString(36);}
+async function boot(){
+  const ix = await api('index'); INDEX=ix.records; STATS=ix.stats;
+  // Namespace the local backup per dataset so annotations from one dataset are
+  // never restored onto a different one served from the same localhost origin.
+  BACKUP_KEY='ea-ann-backup:'+hstr(JSON.stringify(ix));
+  const s = await api('samples'); SAMPLES=s.sample_ids;
+  ANN = await api('annotations');
+  const bak = localStorage.getItem(BACKUP_KEY);
+  if(bak && !Object.keys(ANN).length){ try{const b=JSON.parse(bak); if(Object.keys(b).length){ANN=b; saveAnn();}}catch(e){} }
+  SUGG = await api('suggestions'); PATTERNS = await api('patterns'); GRAPH = await api('graph');
+  renderSidebar(); openRecord(SAMPLES[0]); renderMap(); renderProgress(); status();
+  setInterval(pollLoop, 3000);
+}
+function status(){
+  const na=Object.values(ANN).reduce((a,v)=>a+v.length,0);
+  const nr=Object.keys(ANN).filter(k=>ANN[k].length).length;
+  document.getElementById('statusline').textContent =
+    `${SAMPLES.length} samples | ${na} annotations on ${nr} records | ${SUGG.filter(s=>s.status==='pending').length} pending suggestions`;
+}
+async function pollLoop(){
+  try{
+    const s = await api('samples');
+    if(JSON.stringify(s.sample_ids)!==JSON.stringify(SAMPLES)){
+      const added=s.sample_ids.filter(x=>!SAMPLES.includes(x)).length;
+      SAMPLES=s.sample_ids; renderSidebar(); if(added)toast(`${added} new sample(s) added`); }
+    const g = await api('suggestions');
+    if(JSON.stringify(g)!==JSON.stringify(SUGG)){
+      const np=g.filter(x=>x.status==='pending').length-SUGG.filter(x=>x.status==='pending').length;
+      SUGG=g; renderProgress(); if(cur)renderMargins(); if(np>0)toast(`${np} new agent suggestion(s)`); }
+    const p = await api('patterns');
+    if(JSON.stringify(p)!==JSON.stringify(PATTERNS)){PATTERNS=p; renderProgress();}
+    status();
+  }catch(e){}
+}
+// Serialize per-file saves: one POST in flight at a time, coalescing rapid
+// changes to the latest state so an older snapshot can never overwrite a newer.
+const _saving={}, _pending={};
+function queueSave(name, getBody){
+  if(_saving[name]){ _pending[name]=getBody; return; }
+  _saving[name]=true;
+  post(name, getBody()).finally(()=>{
+    _saving[name]=false;
+    const g=_pending[name]; _pending[name]=null;
+    if(g) queueSave(name, g);
+  });
+}
+function saveAnn(){ queueSave('annotations',()=>ANN); localStorage.setItem(BACKUP_KEY,JSON.stringify(ANN)); status(); }
+function saveSugg(){ queueSave('suggestions',()=>SUGG); }
+
+/* ---------- sidebar ---------- */
+function renderSidebar(){
+  const sb=document.getElementById('sidebar'); sb.innerHTML='';
+  SAMPLES.forEach(id=>{
+    const m=INDEX[id]; if(!m)return;
+    const d=document.createElement('div'); d.className='sitem'+(id===cur?' current':'');
+    const na=(ANN[id]||[]).length;
+    d.innerHTML=`<span class="sid">${m.wf.slice(3,9)}/${m.agent.slice(0,6)}</span> `+
+      `<span class="chip role">${m.phase_role}</span><span class="chip camp">${m.campaign}</span>`+
+      (m.died?'<span class="chip died">died</span>':'')+
+      (m.retry_of_dead?'<span class="chip retry">retry</span>':'')+
+      (na?`<span class="chip anncount">${na}</span>`:'')+
+      `<div class="smeta">${m.n_turns} turns · ${m.n_tool_calls} tools · ${(m.model||'').replace('claude-','')}</div>`;
+    d.onclick=()=>openRecord(id);
+    sb.appendChild(d);
+  });
+}
+
+/* ---------- record rendering ---------- */
+async function getRecord(id){
+  if(!recCache[id]) recCache[id]=await fetch('/api/record?id='+encodeURIComponent(id)).then(r=>r.json());
+  return recCache[id];
+}
+function outlierFlags(m){
+  const f=[];
+  for(const k of ['n_events','n_tool_calls','prompt_len','result_len']){
+    if(m[k]>STATS[k].p90) f.push(k.replace('n_','').replace('_',' ')+' > p90');
+    else if(m[k]<STATS[k].p10) f.push(k.replace('n_','').replace('_',' ')+' < p10');
+  }
+  return f.slice(0,3);
+}
+async function openRecord(id){
+  cur=id; renderSidebar();
+  const r=await getRecord(id), m=INDEX[id];
+  const art=document.getElementById('article'); art.innerHTML='';
+  const head=document.createElement('div'); head.id='rechead';
+  head.innerHTML=`<div class="rid">${esc(r.id)}</div>
+    <div style="font-weight:700">${esc(r.wf_name||r.wf)}</div>
+    <div class="flags">
+      <span class="chip camp">${esc(r.campaign)}</span><span class="chip role">${esc(r.phase_role)}</span>
+      <span class="chip model">${esc(r.model||'?')}</span>
+      ${r.died?'<span class="chip died">DIED'+(r.api_error?': '+esc(r.api_error.slice(0,60)):'')+'</span>':''}
+      ${m.retry_of_dead?'<span class="chip retry">RETRY (inherited a dead agent’s worktree state)</span>':''}
+      ${r.uses_schema?'<span class="chip schema">structured output</span>':''}
+      ${outlierFlags(m).map(f=>`<span class="chip flag">${f}</span>`).join('')}
+      <span class="chip flag">${r.n_turns} turns</span>
+      <span class="chip flag">${r.n_tool_calls} tool calls (${r.n_edits} edits)</span>
+      ${r.duration_s?`<span class="chip flag">${Math.round(r.duration_s)}s</span>`:''}
+    </div>`;
+  art.appendChild(head);
+
+  // blocks: bi 0 = dispatch prompt; 1..n = turns; last = result
+  addBlock(art, 0, 'blk-dispatch', 'Dispatch prompt (coordinator-authored)', r.prompt||'(empty)');
+  let bi=1, i=0;
+  while(i<r.turns.length){
+    const t=r.turns[i];
+    if(t.kind==='tool_use'){
+      const grp=document.createElement('div'); grp.className='toolgroup'; art.appendChild(grp);
+      addBlock(grp, bi++, 'blk-tooluse', 'Tool call: '+t.tool, t.text, t.trunc);
+      if(i+1<r.turns.length && r.turns[i+1].kind==='tool_result'){
+        const tr=r.turns[i+1];
+        addBlock(grp, bi++, 'blk-toolres'+(tr.error?' err':''), 'Tool result'+(tr.error?' (ERROR)':''), tr.text, tr.trunc, true);
+        i+=2;
+      } else i+=1;
+      continue;
+    }
+    const cls = t.kind==='thinking'?'blk-think': t.kind==='tool_result'?'blk-toolres':
+      (t.role==='assistant'?'blk-assist': t.role==='system'?'blk-sys':'blk-sys');
+    const lbl = t.kind==='thinking'?'Thinking': t.kind==='tool_result'?'Tool result':
+      (t.role==='assistant'?'Assistant':'System');
+    addBlock(art, bi++, cls, lbl, t.text, t.trunc, t.kind==='tool_result');
+    i+=1;
+  }
+  addBlock(art, bi, 'blk-result', r.died?'Result: NONE (agent died; coordinator saw silence)':'Result returned to coordinator',
+    r.result || (r.died?'(no result event in journal)':'(empty result)'));
+  renderHighlights(); renderMargins();
+}
+function addBlock(parent, bi, cls, label, text, trunc, collapsible){
+  const d=document.createElement('div'); d.className='blk '+cls; d.dataset.bi=bi;
+  const rl=document.createElement('span'); rl.className='rl'; rl.textContent=label; d.appendChild(rl);
+  const body=document.createElement('span'); body.className='bktext'; body.textContent=text||''; d.appendChild(body);
+  if(trunc){const tn=document.createElement('div');tn.className='trunc-note';tn.textContent='[truncated for review UI]';d.appendChild(tn);}
+  if(collapsible && (text||'').length>300){
+    body.classList.add('collapsed-body');
+    const sm=document.createElement('div'); sm.className='summline';
+    sm.textContent='▸ '+(text||'').slice(0,140).replace(/\n/g,' ')+' … (click to expand)';
+    sm.onclick=()=>{const c=body.classList.toggle('collapsed-body');
+      sm.textContent=(c?'▸ ':'▾ ')+(c?(text.slice(0,140).replace(/\n/g,' ')+' … (click to expand)'):'collapse');
+      renderMargins();};
+    d.insertBefore(sm, body);
+  }
+  parent.appendChild(d);
+}
+
+/* ---------- highlights + annotation ---------- */
+function blockEl(bi){return document.querySelector(`.blk[data-bi="${bi}"]`);}
+function textNodeAt(block, offset){
+  const body=block.querySelector('.bktext');
+  const w=document.createTreeWalker(body, NodeFilter.SHOW_TEXT); let acc=0,node;
+  while((node=w.nextNode())){
+    if(acc+node.length>=offset) return [node, offset-acc];
+    acc+=node.length;
+  }
+  return [null,0];
+}
+function absOffset(block, node, off){
+  const body=block.querySelector('.bktext');
+  if(!body.contains(node)) return -1;
+  const w=document.createTreeWalker(body, NodeFilter.SHOW_TEXT); let acc=0,n;
+  while((n=w.nextNode())){ if(n===node) return acc+off; acc+=n.length; }
+  return -1;
+}
+function wrapRange(bi,start,end,cls,refId){
+  const block=blockEl(bi); if(!block)return;
+  const [sn,so]=textNodeAt(block,start); const [en,eo]=textNodeAt(block,end);
+  if(!sn||!en)return;
+  try{
+    const rg=document.createRange(); rg.setStart(sn,so); rg.setEnd(en,eo);
+    const sp=document.createElement('span'); sp.className=cls; sp.dataset.ref=refId;
+    rg.surroundContents(sp);
+  }catch(e){/* range crosses nodes (overlapping highlights): mark start node parent */
+    const sp=document.createElement('span'); sp.className=cls; sp.dataset.ref=refId;
+    try{const rg=document.createRange(); rg.setStart(sn,so); rg.setEnd(sn,sn.length); rg.surroundContents(sp);}catch(e2){}
+  }
+}
+function renderHighlights(){
+  document.querySelectorAll('.hl,.pending-hl').forEach(s=>{
+    const p=s.parentNode; while(s.firstChild)p.insertBefore(s.firstChild,s); p.removeChild(s); p.normalize();
+  });
+  (ANN[cur]||[]).forEach(a=>wrapRange(a.bi,a.start,a.end,'hl','a'+a.id));
+  SUGG.filter(s=>s.record_id===cur&&s.status==='pending').forEach(s=>wrapRange(s.bi,s.start,s.end,'hl sugg','s'+s.id));
+  document.querySelectorAll('.hl').forEach(h=>{
+    h.onmouseenter=()=>link(h.dataset.ref,true); h.onmouseleave=()=>link(h.dataset.ref,false);
+  });
+}
+function link(ref,on){
+  document.querySelectorAll(`[data-ref="${ref}"]`).forEach(e=>e.classList.toggle('linked',on));
+  const mn=document.getElementById('mn-'+ref); if(mn)mn.classList.toggle('linked',on);
+}
+function renderMargins(){
+  const mg=document.getElementById('margin'); mg.innerHTML='';
+  const items=[];
+  (ANN[cur]||[]).forEach(a=>items.push({ref:'a'+a.id, ann:a}));
+  SUGG.filter(s=>s.record_id===cur&&s.status==='pending').forEach(s=>items.push({ref:'s'+s.id, sugg:s}));
+  const mgRect=mg.getBoundingClientRect(); let lastBottom=0;
+  items.map(it=>{
+    const hl=document.querySelector(`.hl[data-ref="${it.ref}"]`);
+    it.top = hl? hl.getBoundingClientRect().top - mgRect.top : 0;
+    return it;
+  }).sort((a,b)=>a.top-b.top).forEach(it=>{
+    const d=document.createElement('div'); d.className='mnote'+(it.sugg?' sugg':''); d.id='mn-'+it.ref;
+    const quote=(it.ann?it.ann.quote:it.sugg.quote)||'';
+    if(it.sugg){
+      d.innerHTML=`<span class="tag">agent suggestion · ${esc(it.sugg.mode)}</span>
+        <span class="mq">“${esc(quote.slice(0,80))}”</span><div>${esc(it.sugg.note||'')}</div>
+        <div class="btns"><button class="acc">Accept</button><button class="dis">Dismiss</button></div>`;
+      d.querySelector('.acc').onclick=()=>{acceptSugg(it.sugg.id);};
+      d.querySelector('.dis').onclick=()=>{dismissSugg(it.sugg.id);};
+    } else {
+      d.innerHTML=`<span class="mq">“${esc(quote.slice(0,80))}”</span><div class="ntext">${esc(it.ann.note)}</div>
+        <div class="btns hb"><button class="ed">Edit</button><button class="del">Delete</button></div>`;
+      d.querySelector('.del').onclick=()=>{ANN[cur]=ANN[cur].filter(x=>x.id!==it.ann.id);saveAnn();renderHighlights();renderMargins();};
+      d.querySelector('.ed').onclick=()=>{const nn=prompt('Edit note:',it.ann.note);if(nn!=null){it.ann.note=nn;saveAnn();renderMargins();}};
+    }
+    d.onmouseenter=()=>link(it.ref,true); d.onmouseleave=()=>link(it.ref,false);
+    mg.appendChild(d);
+    let top=Math.max(it.top, lastBottom+6); if(top<0)top=lastBottom+6;
+    d.style.top=top+'px'; lastBottom=top+d.offsetHeight;
+  });
+  mg.style.minHeight=(lastBottom+40)+'px';
+}
+function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
+
+function acceptSugg(id, save=true){
+  const s=SUGG.find(x=>x.id===id); if(!s)return;
+  s.status='accepted';
+  (ANN[s.record_id]=ANN[s.record_id]||[]).push({id:Date.now()+Math.floor(Math.random()*999),
+    bi:s.bi,start:s.start,end:s.end,quote:s.quote,note:'['+s.mode+'] '+(s.note||''),ts:new Date().toISOString()});
+  if(save){ saveAnn(); saveSugg(); if(s.record_id===cur){renderHighlights();renderMargins();} renderProgress(); }
+}
+function dismissSugg(id, save=true){
+  const s=SUGG.find(x=>x.id===id); if(!s)return; s.status='dismissed';
+  if(save){ saveSugg(); if(s.record_id===cur){renderHighlights();renderMargins();} renderProgress(); }
+}
+
+/* selection -> popover */
+const pop=document.getElementById('popover'); const popTa=pop.querySelector('textarea');
+document.getElementById('article').addEventListener('mouseup',e=>{
+  setTimeout(()=>{
+    const sel=window.getSelection();
+    if(!sel.rangeCount||sel.isCollapsed)return;
+    const rg=sel.getRangeAt(0);
+    const blk=rg.startContainer.parentElement?.closest('.blk');
+    if(!blk||!blk.contains(rg.endContainer))return;
+    const bi=+blk.dataset.bi;
+    const s=absOffset(blk,rg.startContainer,rg.startOffset);
+    const en=absOffset(blk,rg.endContainer,rg.endOffset);
+    if(s<0||en<0||en<=s)return;
+    // pending highlight BEFORE focusing input (keeps selection visible)
+    clearPending();
+    wrapRange(bi,s,en,'pending-hl','pending');
+    pendingRange={bi,start:s,end:en,quote:blk.querySelector('.bktext').textContent.slice(s,en)};
+    const r=rg.getBoundingClientRect();
+    pop.style.display='block';
+    pop.style.left=Math.min(window.innerWidth-320,r.left+window.scrollX)+'px';
+    pop.style.top=(r.bottom+window.scrollY+6)+'px';
+    popTa.value=''; popTa.focus();
+  },10);
+});
+function clearPending(){
+  document.querySelectorAll('.pending-hl').forEach(s=>{const p=s.parentNode;
+    while(s.firstChild)p.insertBefore(s.firstChild,s);p.removeChild(s);p.normalize();});
+}
+function closePop(save){
+  if(save&&pendingRange&&popTa.value.trim()){
+    (ANN[cur]=ANN[cur]||[]).push({id:Date.now(),...pendingRange,note:popTa.value.trim(),ts:new Date().toISOString()});
+    saveAnn();
+  }
+  pop.style.display='none'; pendingRange=null; clearPending(); renderHighlights(); renderMargins();
+}
+popTa.addEventListener('keydown',e=>{
+  if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();closePop(true);}
+  if(e.key==='Escape')closePop(false);
+});
+document.addEventListener('mousedown',e=>{
+  if(pop.style.display==='block'&&!pop.contains(e.target))closePop(false);
+});
+
+/* ---------- map ---------- */
+const CLC=['#2563eb','#059669','#d97706','#dc2626','#7c3aed','#0d9488','#db2777','#65a30d','#475569','#b45309'];
+function renderMap(){
+  const svg=document.getElementById('mapsvg'); svg.innerHTML='';
+  const W=svg.clientWidth||1000,H=620,P=40;
+  const xs=GRAPH.map(g=>g.x),ys=GRAPH.map(g=>g.y);
+  const xmin=Math.min(...xs),xmax=Math.max(...xs),ymin=Math.min(...ys),ymax=Math.max(...ys);
+  const sx=v=>P+(v-xmin)/(xmax-xmin||1)*(W-2*P), sy=v=>P+(v-ymin)/(ymax-ymin||1)*(H-2*P);
+  const tip=document.getElementById('maptip');
+  GRAPH.forEach(g=>{
+    const inSample=SAMPLES.includes(g.id), annotated=(ANN[g.id]||[]).length>0;
+    let el;
+    if(g.died){el=document.createElementNS('http://www.w3.org/2000/svg','rect');
+      const s=inSample?12:8; el.setAttribute('x',sx(g.x)-s/2);el.setAttribute('y',sy(g.y)-s/2);
+      el.setAttribute('width',s);el.setAttribute('height',s);}
+    else{el=document.createElementNS('http://www.w3.org/2000/svg','circle');
+      el.setAttribute('cx',sx(g.x));el.setAttribute('cy',sy(g.y));el.setAttribute('r',inSample?7:4);}
+    el.setAttribute('fill',annotated?'#f59e0b':CLC[g.cluster%10]);
+    el.setAttribute('opacity',inSample?1:.6);
+    if(inSample){el.setAttribute('stroke','#1c1917');el.setAttribute('stroke-width','1.8');el.style.cursor='pointer';
+      el.addEventListener('click',()=>{document.querySelector('[data-v=review]').click();openRecord(g.id);});}
+    el.addEventListener('mousemove',e=>{
+      const m=INDEX[g.id];
+      tip.style.display='block';tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY+10)+'px';
+      tip.textContent=`${g.id} · ${g.campaign}/${g.role} · cluster ${g.cluster}`+
+        (g.died?' · DIED':'')+` · ${(ANN[g.id]||[]).length} ann`;});
+    el.addEventListener('mouseleave',()=>tip.style.display='none');
+    svg.appendChild(el);
+  });
+  document.getElementById('maplegend').textContent=
+    'color = cluster · square = died agent · large + dark border = in sample (click to open) · orange = annotated';
+}
+
+/* ---------- progress ---------- */
+function renderProgress(){
+  const tm=document.getElementById('treemap'); tm.innerHTML='';
+  const modes=Object.entries(PATTERNS);
+  if(!modes.length)tm.innerHTML='<div style="color:var(--muted)">No failure modes yet. Annotate and the agent will organize them.</div>';
+  modes.sort((a,b)=>(b[1].count||0)-(a[1].count||0)).forEach(([name,m])=>{
+    const d=document.createElement('div'); d.className='mode';
+    d.style.flexGrow=Math.max(1,m.count||1);
+    d.innerHTML=`<h3>${esc(name)} <span class="cnt">${m.count||0}</span></h3><div class="mdesc">${esc(m.description||'')}</div>`;
+    (m.example_quotes||[]).slice(0,6).forEach((q,qi)=>{
+      const n=document.createElement('div'); n.className='mnotei';
+      n.textContent='“'+q.slice(0,90)+'”';
+      const rid=(m.example_ids||[])[qi];
+      if(rid&&INDEX[rid])n.onclick=()=>{document.querySelector('[data-v=review]').click();openRecord(rid);};
+      d.appendChild(n);
+    });
+    tm.appendChild(d);
+  });
+  const sq=document.getElementById('suggq'); sq.innerHTML='';
+  const pend=SUGG.filter(s=>s.status==='pending');
+  const byMode={};
+  pend.forEach(s=>{(byMode[s.mode]=byMode[s.mode]||[]).push(s);});
+  Object.entries(byMode).forEach(([mode,list])=>{
+    const h=document.createElement('div');h.className='modehead';h.textContent=mode+` (${list.length})`;sq.appendChild(h);
+    list.forEach(s=>{
+      const row=document.createElement('div');row.className='srow';
+      row.innerHTML=`<input type="checkbox" class="sck" data-id="${s.id}">
+        <div><span class="q">“${esc((s.quote||'').slice(0,110))}”</span>
+        <span style="color:var(--muted)"> &middot; ${esc(s.record_id)}</span><div>${esc(s.note||'')}</div></div>`;
+      row.querySelector('.q').onclick=()=>{document.querySelector('[data-v=review]').click();openRecord(s.record_id);};
+      sq.appendChild(row);
+    });
+  });
+  if(!pend.length)sq.innerHTML='<div style="color:var(--muted)">No pending suggestions.</div>';
+}
+document.getElementById('selall').onchange=e=>document.querySelectorAll('.sck').forEach(c=>c.checked=e.target.checked);
+function bulkSugg(fn){
+  const ids=[...document.querySelectorAll('.sck:checked')].map(c=>+c.dataset.id);
+  ids.forEach(id=>fn(id,false));
+  saveAnn(); saveSugg(); if(cur){renderHighlights();renderMargins();} renderProgress();
+}
+document.getElementById('accsel').onclick=()=>bulkSugg(acceptSugg);
+document.getElementById('dissel').onclick=()=>bulkSugg(dismissSugg);
+
+/* ---------- tabs + keys ---------- */
+document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('main').forEach(x=>x.classList.remove('active'));
+  t.classList.add('active');document.getElementById(t.dataset.v).classList.add('active');
+  if(t.dataset.v==='map')renderMap(); if(t.dataset.v==='progress')renderProgress();
+});
+document.addEventListener('keydown',e=>{
+  if(e.target.tagName==='TEXTAREA'||pop.style.display==='block')return;
+  const i=SAMPLES.indexOf(cur);
+  if(e.key==='n'&&i<SAMPLES.length-1)openRecord(SAMPLES[i+1]);
+  if(e.key==='p'&&i>0)openRecord(SAMPLES[i-1]);
+});
+window.addEventListener('resize',()=>{if(cur)renderMargins();});
+boot();
+</script>
+</body>
+</html>

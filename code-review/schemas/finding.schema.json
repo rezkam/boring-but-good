@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CodeReviewFinding",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "file",
+    "line",
+    "lens",
+    "claim",
+    "evidence",
+    "impact",
+    "review_mode",
+    "scope_relation",
+    "confidence",
+    "confidence_reason",
+    "validation"
+  ],
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "Short issue title."
+    },
+    "file": {
+      "type": "string",
+      "description": "Path to the affected file."
+    },
+    "line": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Primary line number for the issue."
+    },
+    "end_line": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optional end line for a range."
+    },
+    "lens": {
+      "type": "string",
+      "enum": [
+        "instructions",
+        "correctness",
+        "data-contract",
+        "errors",
+        "security",
+        "performance",
+        "tests",
+        "types",
+        "comments",
+        "maintainability"
+      ]
+    },
+    "claim": {
+      "type": "string",
+      "description": "Specific claim being made."
+    },
+    "evidence": {
+      "type": "string",
+      "description": "Observed code evidence."
+    },
+    "impact": {
+      "type": "string",
+      "description": "Realistic impact if the issue is not fixed."
+    },
+    "review_mode": {
+      "type": "string",
+      "enum": ["diff", "baseline"],
+      "description": "Diff review for changed code, baseline review for named files or existing guidelines."
+    },
+    "scope_relation": {
+      "type": "string",
+      "enum": [
+        "introduced-by-change",
+        "made-worse-by-change",
+        "in-scope-existing",
+        "out-of-scope",
+        "pre-existing-not-worse"
+      ],
+      "description": "How the issue relates to the selected review mode."
+    },
+    "confidence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "confidence_reason": {
+      "type": "string",
+      "description": "Short rationale for the confidence score."
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["critical", "high", "medium", "low"]
+    },
+    "validation": {
+      "type": "string",
+      "description": "Command or test that would catch the issue."
+    },
+    "suggested_fix": {
+      "type": "string",
+      "description": "Minimal fix direction."
+    },
+    "refutation_result": {
+      "type": "string",
+      "description": "Why the finding survived or failed skeptical verification."
+    },
+    "should_report": {
+      "type": "boolean",
+      "description": "True only when final confidence is 80 or higher and the issue is actionable in the selected review mode."
+    }
+  }
+}

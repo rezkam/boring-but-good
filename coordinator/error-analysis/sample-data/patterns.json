@@ -1,0 +1,159 @@
+{
+ "silent-death-retry-inheritance": {
+  "description": "Agent dies mid-run (API connection closed etc.), runtime silently retries; the retry inherits the dead agent's uncommitted worktree edits without provenance. Coordinator has no visibility unless it reads the journal. HUMAN PROTOCOL: retries are coordinator-owned and INFORMED: the retry dispatch says a prior attempt died, instructs the agent to reconstruct what happened from the worktree state and continue (not redo), verifying inherited work as foreign.",
+  "count": 1,
+  "example_ids": [
+   "wf_1fb7a744-9ff__a0f03139db987242f",
+   "wf_cf17598f-1aa__aa557dbe2063a25f0",
+   "wf_cf17598f-1aa__ae65e8c4cde4a8428"
+  ],
+  "example_quotes": [
+   "API Error: Connection closed mid-response. The response above may be incomplete.",
+   "API Error: Connection closed mid-response. The response above may be incomplete.",
+   "already implemented in source** (uncommitted, working tree only) \u2014 presumably by a prior pass. What was missing was test"
+  ]
+ },
+ "structured-output-schema-abort": {
+  "description": "Agent completes its real work, then burns retries failing to satisfy a closed output schema until the retry cap aborts it; the phase's work is discarded. Recurring scar: known since 2026-06-26, recurred in slice 2B.",
+  "count": 0,
+  "example_ids": [
+   "wf_1fb7a744-9ff__a287504c6873e4fb0",
+   "wf_1fb7a744-9ff__a74575e0c690972ca",
+   "wf_6540b12c-cac__af8b0c0115fd37927"
+  ],
+  "example_quotes": [
+   "{\n \"input\": \"{\\n  \\\"status\\\": \\\"done\\\",\\n  \\\"commit\\\": \\\"c3289ea\\\",\\n  \\\"testsPassed\\\": true,\\n  \\\"typecheckPassed\\\": tr",
+   "{\n \"input\": \"{\\n  \\\"status\\\": \\\"done\\\",\\n  \\\"commit\\\": \\\"00fdcac\\\",\\n  \\\"testsPassed\\\": true,\\n  \\\"typecheckPassed\\\": tr",
+   "{\n \"gateLogicCorrect\": \"Yes. applyScenarioTriggerGate marks gate_status='fail' when the scenario is directional (isDirec"
+  ]
+ },
+ "prompt-interpolation-undefined": {
+  "description": "Dispatch prompt built with an undefined template variable ('worktree: undefined', 'cd undefined/...') under a 'trust these' header; no pre-dispatch lint of rendered prompts. HUMAN REFINEMENT: every dispatch must carry the FULL resolved worktree path; the coordinator always works in an isolated worktree, canonical home ~/.agents/coordinator/worktrees/<instance> (fallback: isolated temp clone in ~/.agents/coordinator/clones/<instance>), named per campaign instance, because local run artifacts (databases) live in it.",
+  "count": 19,
+  "example_ids": [
+   "wf_1fb7a744-9ff__a002b3d299a8ad2e5",
+   "wf_1fb7a744-9ff__a02b197da38faffb5",
+   "wf_1fb7a744-9ff__a0c83d7ae44f917b2",
+   "wf_1fb7a744-9ff__a0f03139db987242f",
+   "wf_1fb7a744-9ff__a130a22987dadb1ec",
+   "wf_1fb7a744-9ff__a173c8c223829fd2d",
+   "wf_1fb7a744-9ff__ad93f36e0f4046ba1"
+  ],
+  "example_quotes": [
+   "worktree: undefined (branch feat/feed-retrieval-slice1). Work ONLY inside this worktree. You are the only agent running ",
+   "worktree: undefined (branch feat/feed-retrieval-slice1). Work ONLY inside this worktree. You are the only agent running ",
+   "worktree: undefined (branch feat/feed-retrieval-slice1). Work ONLY inside this worktree. You are the only agent running ",
+   "worktree: undefined (branch feat/feed-retrieval-slice1). Work ONLY inside this worktree. You are the only agent running ",
+   "worktree: undefined (branch feat/feed-retrieval-slice1). Work ONLY inside this worktree. You are the only agent running ",
+   "worktree: undefined (branch feat/feed-retrieval-slice1). Work ONLY inside this worktree. You are the only agent running ",
+   "agent burned turns rediscovering the worktree path the prompt omitted ('Found the worktree at ...')"
+  ]
+ },
+ "happy-path-live-verify": {
+  "description": "Live verification accepted because the run went green, although the specific scenario the change targets never executed (noted as a caveat instead of treated as verification failure).",
+  "count": 0,
+  "example_ids": [],
+  "example_quotes": []
+ },
+ "over-asking-on-fix-scope": {
+  "description": "Coordinator escalates confirmed-defect fix-scope decisions that have an obvious conservative default, instead of fixing under the P0-P2 bar and logging a deviation.",
+  "count": 0,
+  "example_ids": [],
+  "example_quotes": []
+ },
+ "provider-empty-response": {
+  "description": "LLM provider returns empty output (quota window / flake); analyst parse fails or run degrades. Environmental, needs classify-and-retry rather than code suspicion.",
+  "count": 0,
+  "example_ids": [
+   "wf_1108241d-df2__afe861787466f2778",
+   "wf_651625a3-a59__ad964b0e6851bdfc3",
+   "wf_6619ff0c-108__a00dd466f289b54bd",
+   "wf_6619ff0c-108__af30b3dbbf58e7626",
+   "wf_6b647d7c-1b7__a5adc885bb3b88324",
+   "wf_97bc6111-01f__a50c3e2e3cd0dc56d"
+  ],
+  "example_quotes": [
+   "parse_failed_labels: orderedLabels(wrapperParseFailedLabels),\n        missing_report_labels: orderedLabels(missingReport",
+   "parse_failed'] === true || typeof raw['error'] === 'string') {\n166-    return { report: raw, diagnostics };\n167-  }\n168-",
+   "parse_failed\":true,\"error\":\"missing \\\"fundamentals\\\" key\"},\"sentiment\":{\"parse_failed\":true,\"error\":\"missing \\\"sentiment",
+   "parse_failed'] === true;\n    const failed = hasError || hasParseFailed;\n    if (failed) {\n      const why = hasError ? '",
+   "parse_failed_labels: orderedLabels(wrapperParseFailedLabels),\n612\t        missing_report_labels: orderedLabels(missingRe",
+   "parse_failed?: boolean; call_failed?: boolean }>;\n2157\t    },\n2158\t  ): Promise<{ textual_contradictions_proposed: numbe"
+  ]
+ },
+ "(confirmed-good, not a failure)": {
+  "description": "Reviewer confirmations that an agent behaved correctly (true-positive findings, clean runs). Coverage dossier, kept out of the failure modes.",
+  "count": 3,
+  "example_ids": [
+   "wf_91360f13-1c1__a64be0cbefb6241d9",
+   "wf_91360f13-1c1__af6a104f5de949aec",
+   "wf_4d7cf52e-e77__a2093c24b3d681a62"
+  ],
+  "example_quotes": [
+   "calling lack of tests p2 is right i see no issues in this run",
+   "i see not problems",
+   "good report shape: verdict/gatesGreen/testsBite/liveVerifyMatches + verified narrative"
+  ]
+ },
+ "severity-miscalibration-in-review": {
+  "description": "Review/verify agents under-grade real defects (e.g. a client-interface defect graded P3), pushing them below the P0-P2 fix bar so they ship as tracked debt instead of being fixed. Severity rubric lacks an anchor for interface/contract defects.",
+  "count": 4,
+  "example_ids": [
+   "wf_19464700-0cf__ab06c73aa44099e31",
+   "wf_75fe045a-ea5__a8cd18a39fd474e19"
+  ],
+  "example_quotes": [
+   "--top/--limit forwarding graded P3; reviewer: 'should be p2 not p3'"
+  ]
+ },
+ "dispatch-lacks-role-framing": {
+  "description": "Dispatch prompts issue bare prohibitions (do NOT run git / npm / live runs) without framing the working relationship: you are a subagent; a main agent (coordinator) reviews your work on disk, owns git and the campaign; your goal is only to implement the change. Framing gives the agent the model behind the constraints instead of a rule list.",
+  "count": 1,
+  "example_ids": [
+   "wf_b8d8afe9-1ec__ad9168d8bcef67c36"
+  ],
+  "example_quotes": [
+   "'Do NOT run git...; the coordinator owns git' with no role framing; human: 'explain to it that you are working as a subagent'"
+  ]
+ },
+ "dispatch-outsources-context-to-docs": {
+  "description": "Dispatch prompt requires the agent to go read a large plan/design document (READ FIRST: ...plan.html) instead of inlining the distilled, task-scoped context (schemas, contracts, acceptance criteria). Burns agent context/time on scope it does not own; the coordinator holds the plan and should distill. Doc pointers are acceptable only as optional reference.",
+  "count": 1,
+  "example_ids": [
+   "wf_b8d8afe9-1ec__ad9168d8bcef67c36"
+  ],
+  "example_quotes": [
+   "READ FIRST (in the worktree): The plan docs/research/feed-retrieval-slice2b-plan-2026-07-14.html: ticket C3 ..."
+  ]
+ },
+ "schema-satisfied-with-junk": {
+  "description": "Agent satisfies the closed report schema with placeholder values ('test', empty strings), producing a well-formed, validation-passing report that carries zero information about what happened or what changed. Dual failure of structured-output-schema-abort: schemas abort honest work AND validate junk. Reports must carry a mandatory what-happened/what-changed narrative; coordinator judges by disk regardless.",
+  "count": 1,
+  "example_ids": [
+   "wf_6b647d7c-1b7__af788ed544f98fd0e"
+  ],
+  "example_quotes": [
+   "{\"doc\":\"test\",\"edited\":true,\"changeSummary\":\"test\",\"staleRemaining\":\"test\",...}"
+  ]
+ },
+ "ad-hoc-adversarial-definition": {
+  "description": "Review/verify dispatches define 'adversarial' ad hoc ('BREAK the work, trust nothing') instead of invoking the canonical kit at boring-but-good/code-review/ (ADVERSARIAL_CODE_REVIEW_PROMPT.md + RUBRIC.md: confidence, severity anchors, false-positive filters, report thresholds; REFUTER_PROMPT.md). Per-dispatch improvised rubrics cause the severity miscalibration and undefined verdict vocabulary observed elsewhere.",
+  "count": 1,
+  "example_ids": [
+   "wf_95d8f3a9-a70__a3cd7300f82b5325c"
+  ],
+  "example_quotes": [
+   "'You are an adversarial code reviewer..., lens: prune-seams. Your job is to BREAK the work' (ad hoc, no rubric reference)"
+  ]
+ },
+ "unadjudicated-agent-deviations": {
+  "description": "An agent reports deviations (work beyond or different from the dispatch, e.g. deleting extra test files) and the report is filed without the coordinator explicitly judging each deviation: good decision (ratify + log) or bad (remediate/revert). Deviations are notes about scope, and scope verdicts are the coordinator's job before a slice closes.",
+  "count": 1,
+  "example_ids": [
+   "wf_1108241d-df2__afe861787466f2778"
+  ],
+  "example_quotes": [
+   "deviations: 'Beyond the exact function names in item 2, I also had to delete/trim 3 test files...' (never adjudicated)"
+  ]
+ }
+}

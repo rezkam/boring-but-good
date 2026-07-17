@@ -1,0 +1,11 @@
+# Raw agent transcripts and derived review data: local only, never published.
+error-analysis/error_discovery_data/
+error-analysis/*.log
+
+# Session-specific working notes (project-specific content, kept local).
+error-analysis/edits-backlog.md
+error-analysis/skill-patch-proposal.md
+retrospective-*.md
+
+# Local real->fake scrub map (contains real tokens): never commit.
+error-analysis/scrub-map.local.json
