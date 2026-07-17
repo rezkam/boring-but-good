@@ -119,6 +119,7 @@ function handle(message) {
 
   switch (message.method) {
     case "initialize":
+      if (scenario === "startup-close") process.exit(1);
       send({ id: message.id, result: { serverInfo: { version: "0.144.1" } } });
       return;
     case "initialized":
@@ -146,6 +147,7 @@ function handle(message) {
       } else {
         send(response);
         if (scenario === "complete" || scenario === "review-turn-id-mismatch" || scenario.startsWith("model-")) completed();
+        if (scenario === "delayed-complete") setTimeout(() => completed("DELAYED_COMPLETE_OK"), 5_000);
         if (scenario === "approvals") sendApprovalRequests();
         if (scenario === "auto-resolve") {
           send({ id: 904, method: "item/tool/requestUserInput", params: { threadId: THREAD_ID, turnId: TURN_ID, itemId: "input-1", questions: [], autoResolutionMs: 25 } });
@@ -256,7 +258,11 @@ function handle(message) {
       send({ id: message.id, result: { data: MODELS, nextCursor: null } });
       return;
     case "account/logout":
-      send({ id: message.id, result: {} });
+      if (scenario === "delayed-request") {
+        setTimeout(() => send({ id: message.id, result: {} }), 300);
+      } else {
+        send({ id: message.id, result: {} });
+      }
       return;
     default:
       if (message.id !== undefined) send({ id: message.id, error: { code: -32601, message: `unknown method ${message.method}` } });

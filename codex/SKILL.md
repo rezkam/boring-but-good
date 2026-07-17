@@ -23,10 +23,12 @@ Do not close the host after a completed turn. Do not create a second App Server 
 
 ## Managed session workflow
 
-Create a private session directory and start its host:
+Create a private session directory under the user state directory and start its host:
 
 ```bash
-SESSION_DIR="$(mktemp -d /tmp/codex-agent.XXXXXX)"
+SESSION_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/boring-but-good/codex-app-server"
+mkdir -p "$SESSION_ROOT" && chmod 700 "$SESSION_ROOT"
+SESSION_DIR="$(mktemp -d "$SESSION_ROOT/session.XXXXXX")"
 node scripts/codex-app-server.mjs start \
   --session-dir "$SESSION_DIR" \
   --events "$SESSION_DIR/events.jsonl" \
@@ -70,7 +72,7 @@ Close an idle host explicitly:
 node scripts/codex-app-server.mjs shutdown --session-dir "$SESSION_DIR"
 ```
 
-Shutdown refuses an active turn or unresolved server request. Interrupt or respond first. Use `--force` only when deliberate cancellation is acceptable.
+Shutdown refuses an active turn, unresolved server request, or another local command lease. Interrupt, respond, or wait first. Once shutdown is accepted, the host stops accepting commands before it drains work. Use `--force` only when deliberate cancellation and invalidation of other requests is acceptable.
 
 ## Reverse requests
 
@@ -153,13 +155,16 @@ codex app-server generate-json-schema --out /tmp/codex-app-server-schema
 1. Persist the thread id as soon as `thread/start` or `thread/resume` returns.
 2. Archive every notification with a monotonic local sequence.
 3. Treat `turn/start` as acceptance, not completion.
-4. Hold a session lease for every local command. Do not shut down with active leases.
+4. Hold a session lease for every local command. Non-force shutdown must reject while another lease exists, and accepted shutdown must atomically close command admission.
 5. On transport close, reject all pending RPCs and local waiters with the same close error.
 6. Never replay an accepted turn after timeout or transport close. It may have run commands or changed files. After a timeout, interrupt once and wait only for a bounded terminal-notification grace period. Close the client and managed host if completion remains unknown.
 7. Resume a durable thread only from a new, empty session directory. Never reuse a stale inbox.
 8. Recover a completed assistant item after close only when no command, file change, MCP call, or dynamic tool remains unresolved.
+9. Authenticate every filesystem IPC command. The host key belongs in the user state directory, outside the session tree and normal workspace-write roots. Never copy it into arguments, state, events, logs, or command payloads.
 
 Use `read-only` for discussion and review. Use `workspace-write` for scoped implementation. `danger-full-access` requires an explicit user decision and an isolated worktree.
+
+Directory mode `0700` alone is not an authorization boundary against a workspace-write process running as the same user. Managed commands use a per-session HMAC credential and reject forged or replayed command ids. `danger-full-access` can read same-user state, including command credentials, so filesystem authentication cannot isolate a danger-full-access agent from its controller. Use an OS-level identity or container boundary when that isolation is required.
 
 ## Compatibility
 
@@ -174,6 +179,6 @@ tests/run-tests.sh --offline
 tests/run-tests.sh
 ```
 
-The offline fake server covers handshake ordering, persistent connection reuse, loaded-thread continuation, notification races, ordered events, native reviews, multi-process steering and interruption, interactive reverse requests, safe automatic request responses, lease-aware shutdown, generic requests, timeout without replay, transport close, and tracked wrapper lifecycle. The live suite exercises the installed App Server.
+The offline fake server covers handshake ordering, persistent connection reuse, loaded-thread continuation, notification races, ordered events, native reviews, multi-process steering and interruption, interactive reverse requests, safe automatic request responses, atomic lease-aware shutdown, authenticated and replay-resistant filesystem IPC, generic requests, orphaned waiter reconciliation, timeout without replay, transport close, and tracked wrapper lifecycle. The live suite exercises the installed App Server.
 
 Official reference: [Codex App Server](https://learn.chatgpt.com/docs/app-server).

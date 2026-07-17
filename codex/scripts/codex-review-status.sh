@@ -72,6 +72,7 @@ if [[ "$FOLLOW" == "true" ]]; then
     exit 0
 fi
 
+codex_skill_reconcile_orphaned_run "$RUN_ID"
 STATUS="$(codex_review_get_meta_field "$RUN_ID" status)"
 PID="$(codex_review_get_meta_field "$RUN_ID" pid)"
 SESSION_ID="$(codex_review_get_meta_field "$RUN_ID" thread_id)"

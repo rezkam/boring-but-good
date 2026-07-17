@@ -56,18 +56,52 @@ if [[ ! -f "$META_FILE" ]]; then
     exit 1
 fi
 
+codex_skill_reconcile_orphaned_run "$RUN_ID"
 STATUS="$(codex_review_get_meta_field "$RUN_ID" status)"
 REPORT_FILE="$(codex_review_get_meta_field "$RUN_ID" report_file)"
 PID="$(codex_review_get_meta_field "$RUN_ID" pid)"
 
-if [[ "$WAIT" == "true" && "$STATUS" == "running" ]]; then
+if [[ "$WAIT" == "true" && ( "$STATUS" == "running" || "$STATUS" == "queued" ) ]]; then
     while true; do
+        codex_skill_reconcile_orphaned_run "$RUN_ID"
+        STATUS="$(codex_review_get_meta_field "$RUN_ID" status)"
+        [[ "$STATUS" != "running" && "$STATUS" != "queued" ]] && break
+
+        turn_client_pid="$(codex_review_get_meta_field "$RUN_ID" turn_client_pid)"
+        if [[ -n "$turn_client_pid" && "$turn_client_pid" != "null" ]]; then
+            if kill -0 "$turn_client_pid" 2>/dev/null; then
+                sleep 2
+                continue
+            fi
+
+            session_dir="$(codex_review_get_meta_field "$RUN_ID" session_dir)"
+            host_busy="false"
+            host_pid=""
+            host_status="unknown"
+            if [[ -n "$session_dir" && "$session_dir" != "null" && -f "$session_dir/state.json" ]]; then
+                host_pid="$(jq -r '.pid // empty' "$session_dir/state.json" 2>/dev/null || true)"
+                host_status="$(jq -r '.status // "unknown"' "$session_dir/state.json" 2>/dev/null || echo unknown)"
+                host_busy="$(jq -r '
+                    ((.activeTurns // []) | length > 0)
+                    or ((.pendingRequests // []) | length > 0)
+                    or ((.leaseCount // 0) > 0)
+                ' "$session_dir/state.json" 2>/dev/null || echo false)"
+            fi
+            if [[ "$host_busy" == "true" && ( "$host_status" == "ready" || "$host_status" == "closing" ) ]] \
+                && [[ -n "$host_pid" ]] && kill -0 "$host_pid" 2>/dev/null; then
+                sleep 2
+                continue
+            fi
+
+            codex_review_update_status "$RUN_ID" "failed" 1
+            STATUS="failed"
+            break
+        fi
         if [[ -n "$PID" && "$PID" != "null" ]] && kill -0 "$PID" 2>/dev/null; then
             sleep 2
             continue
         fi
 
-        STATUS="$(codex_review_get_meta_field "$RUN_ID" status)"
         if [[ "$STATUS" == "running" ]]; then
             if [[ -s "$REPORT_FILE" ]]; then
                 STATUS="completed"

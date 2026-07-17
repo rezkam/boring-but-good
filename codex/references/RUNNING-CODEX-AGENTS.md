@@ -12,7 +12,11 @@ session/
   outbox/          atomic local command responses
 ```
 
-The directory is mode `0700`; files are mode `0600`. Prompts and server request payloads can be sensitive. Do not place a session directory in a shared location.
+The directory is mode `0700`; files are mode `0600`. Prompts and server request payloads can be sensitive. Keep persistent sessions under `${XDG_STATE_HOME:-$HOME/.local/state}/boring-but-good/codex-app-server`, not in `/tmp` or a repository.
+
+The host generates a separate mode `0600` command key under the user state directory, outside the session tree and normal workspace-write roots. Clients HMAC-sign the canonical command body. The host requires a canonical UUID filename that matches the signed command id, consumes each id once, and constructs outbox paths only from the validated filename. The raw key never belongs in CLI arguments, state, events, logs, inbox files, or outbox files. Terminal shutdown and failed startup remove it.
+
+Mode `0700` is not an authorization boundary against another same-UID process that can reach the directory, so authentication is required even with the safer default location. A `danger-full-access` turn can read same-user credentials and cannot be isolated by this filesystem design. Use a separate OS identity or container when the agent must not reach controller credentials.
 
 Filesystem IPC does not replace the App Server protocol. It lets multiple local processes talk to the one host that owns App Server stdio. Only that host reads and writes JSON-RPC.
 
@@ -24,7 +28,7 @@ Filesystem IPC does not replace the App Server protocol. It lets multiple local 
 4. Submit turns, reviews, steering, interrupts, and generic requests through the host.
 5. Read all notifications and reverse requests until the matching turn is terminal.
 6. Keep the host alive while the agent may receive another message.
-7. Shut down only when no turn, reverse request, or local command lease is active.
+7. Shut down only when no turn, reverse request, or other local command lease is active. Accepted shutdown closes command admission atomically before draining tasks. Force shutdown may invalidate other requests.
 
 Calling `turn` again with a thread already loaded by the host sends `turn/start` directly. `thread/resume` is for loading durable history into a new host after recovery.
 
@@ -106,5 +110,7 @@ Never replay an accepted turn automatically. Only a failure before turn acceptan
 Tracked exec and review runs store their session under `runs/<run_id>/app-server-session/`. Their metadata points to the host PID, session directory, thread id, event log, error log, and reports.
 
 The initial turn client can exit while the host remains ready. A completed run therefore means the turn is terminal, not that the agent connection is gone.
+
+New tracked metadata stores the persistent host in `pid` and the initial short waiter in `turn_client_pid`. If that waiter disappears after acceptance, status may persist `completed` from a non-empty report only when session state is valid, is `ready`, `closing`, or `closed`, and proves zero active turns, pending requests, and command leases. Legacy metadata without `turn_client_pid` retains the dead-wrapper fallback. Never infer completion while any of those host activities remains.
 
 `codex-delete.sh` shuts down an idle host before deleting a run. It refuses an active host unless forced. Deleting run artifacts does not delete the durable Codex thread.

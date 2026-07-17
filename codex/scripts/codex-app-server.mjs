@@ -3,14 +3,16 @@
  * Dependency-free host and client for `codex app-server --listen stdio://`.
  *
  * A session host keeps one bidirectional App Server connection alive. Other
- * processes use a private filesystem control plane to submit requests, read
+ * processes use an authenticated filesystem control plane to submit requests, read
  * state, steer active turns, and answer server-initiated requests. The files
  * are local IPC only. The host remains the sole owner of the JSON-RPC stream.
  */
 import { appendFile, chmod, mkdir, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { unlinkSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { dirname, resolve } from "node:path";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 
 const CLIENT_INFO = {
@@ -26,6 +28,9 @@ const SESSION_START_TIMEOUT_MS = 10_000;
 const SESSION_HEARTBEAT_MS = 2_000;
 const SESSION_STALE_MS = 10_000;
 const SERVER_REQUEST_CLEARED = Symbol("server request cleared by app-server");
+const COMMAND_VERSION = 1;
+const COMMAND_FILE_PATTERN = /^([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/;
+const COMMAND_MAC_PATTERN = /^[0-9a-f]{64}$/;
 
 function usage() {
   process.stderr.write(`Usage:
@@ -44,7 +49,7 @@ function usage() {
 Shared options:
   --workdir DIR          Thread and turn working directory
   --thread-out FILE      Write the durable thread id here as soon as known
-  --session-dir DIR      Private control plane for one long-lived App Server host
+  --session-dir DIR      Authenticated control plane for one long-lived App Server host
   --control-dir DIR      Legacy one-turn control channel for isolated mode
   --events FILE          Append every app-server notification as JSONL
   --report FILE          Write final assistant or review text
@@ -155,6 +160,93 @@ async function readJson(path, label) {
 function sessionPath(options) {
   const path = options["session-dir"];
   return path ? resolve(path) : null;
+}
+
+function sessionCredentialRoot() {
+  if (process.env.CODEX_APP_SERVER_AUTH_ROOT) return resolve(process.env.CODEX_APP_SERVER_AUTH_ROOT);
+  const stateRoot = process.env.XDG_STATE_HOME
+    ? resolve(process.env.XDG_STATE_HOME)
+    : resolve(homedir(), ".local", "state");
+  return join(stateRoot, "boring-but-good", "codex-app-server-auth");
+}
+
+function sessionCredentialPath(path) {
+  const name = createHash("sha256").update(resolve(path)).digest("hex");
+  return join(sessionCredentialRoot(), `${name}.key`);
+}
+
+async function createSessionCredential(path) {
+  const root = sessionCredentialRoot();
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  await chmod(root, 0o700);
+  const credentialPath = sessionCredentialPath(path);
+  await unlink(credentialPath).catch((error) => {
+    if (error?.code !== "ENOENT") throw error;
+  });
+  const key = randomBytes(32).toString("hex");
+  await writeFile(credentialPath, `${key}\n`, { flag: "wx", mode: 0o600 });
+  return { credentialPath, key };
+}
+
+async function readSessionCredential(path) {
+  const credentialPath = sessionCredentialPath(path);
+  const key = (await readFile(credentialPath, "utf8")).trim();
+  if (!COMMAND_MAC_PATTERN.test(key)) fail("session command credential is invalid");
+  return { credentialPath, key };
+}
+
+async function removeSessionCredential(path) {
+  await unlink(sessionCredentialPath(path)).catch((error) => {
+    if (error?.code !== "ENOENT") throw error;
+  });
+}
+
+function stableJson(value) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) fail("session command contains a non-finite number");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => entry === undefined ? "null" : stableJson(entry)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.keys(value)
+      .filter((key) => value[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`);
+    return `{${entries.join(",")}}`;
+  }
+  fail("session command contains a non-JSON value");
+}
+
+function sessionCommandBody(id, action, payload, submittedAt) {
+  return JSON.parse(JSON.stringify({ version: COMMAND_VERSION, id, action, payload, submittedAt }));
+}
+
+function signSessionCommand(body, key) {
+  return createHmac("sha256", Buffer.from(key, "hex"))
+    .update(stableJson(body))
+    .digest("hex");
+}
+
+function commandIsAuthenticated(command, key) {
+  if (command?.version !== COMMAND_VERSION || command?.auth?.algorithm !== "hmac-sha256") return false;
+  if (!COMMAND_MAC_PATTERN.test(command.auth.mac ?? "")) return false;
+  let expected;
+  try {
+    expected = signSessionCommand(sessionCommandBody(
+      command.id,
+      command.action,
+      command.payload,
+      command.submittedAt,
+    ), key);
+  } catch {
+    return false;
+  }
+  const actualBytes = Buffer.from(command.auth.mac, "hex");
+  const expectedBytes = Buffer.from(expected, "hex");
+  return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes);
 }
 
 function delay(milliseconds) {
@@ -896,10 +988,17 @@ async function sendSessionCommand(options, action, payload = {}, timeoutMs = 60_
   if (!Number.isFinite(heartbeatTime) || Date.now() - heartbeatTime > SESSION_STALE_MS) {
     fail("session host heartbeat is stale");
   }
+  const { key } = await readSessionCredential(path).catch(() => {
+    fail("session command credential is unavailable");
+  });
   const id = randomUUID();
   const commandPath = `${path}/inbox/${id}.json`;
   const responsePath = `${path}/outbox/${id}.json`;
-  await writeJsonAtomic(commandPath, { id, action, payload, submittedAt: new Date().toISOString() });
+  const body = sessionCommandBody(id, action, payload, new Date().toISOString());
+  await writeJsonAtomic(commandPath, {
+    ...body,
+    auth: { algorithm: "hmac-sha256", mac: signSessionCommand(body, key) },
+  });
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -964,21 +1063,29 @@ async function runStart(options) {
     if (error?.code === "EEXIST") fail("session directory is already claimed by another host start");
     throw error;
   }
-  const child = spawn(process.execPath, managerArgsFromOptions(options), {
-    detached: true,
-    stdio: "ignore",
-    env: process.env,
-  });
-  child.unref();
-  const deadline = Date.now() + SESSION_START_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const state = await readFile(`${path}/state.json`, "utf8").then(JSON.parse).catch(() => null);
-    if (state?.status === "ready") return state;
-    if (state?.status === "closed") fail(state.error ?? "session host failed during startup");
-    if (child.exitCode !== null) fail(`session host exited during startup with code ${child.exitCode}`);
-    await delay(SESSION_SCAN_MS);
+  let child;
+  try {
+    await createSessionCredential(path);
+    child = spawn(process.execPath, managerArgsFromOptions(options), {
+      detached: true,
+      stdio: "ignore",
+      env: process.env,
+    });
+    child.unref();
+    const deadline = Date.now() + SESSION_START_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const state = await readFile(`${path}/state.json`, "utf8").then(JSON.parse).catch(() => null);
+      if (state?.status === "ready") return state;
+      if (state?.status === "closed") fail(state.error ?? "session host failed during startup");
+      if (child.exitCode !== null) fail(`session host exited during startup with code ${child.exitCode}`);
+      await delay(SESSION_SCAN_MS);
+    }
+    throw new Error("session host did not become ready within 10 seconds");
+  } catch (error) {
+    if (child && child.exitCode === null) child.kill("SIGTERM");
+    await removeSessionCredential(path);
+    throw error;
   }
-  throw new Error("session host did not become ready within 10 seconds");
 }
 
 async function runSessionStatus(options) {
@@ -1033,6 +1140,17 @@ async function runServe(options) {
       throw error;
     }
   }
+  const credential = options.claimed
+    ? await readSessionCredential(path)
+    : await createSessionCredential(path);
+  const cleanupCredentialOnExit = () => {
+    try {
+      unlinkSync(credential.credentialPath);
+    } catch (error) {
+      if (error?.code !== "ENOENT") return;
+    }
+  };
+  process.once("exit", cleanupCredentialOnExit);
   await mkdir(`${path}/inbox`, { recursive: true, mode: 0o700 });
   await mkdir(`${path}/outbox`, { recursive: true, mode: 0o700 });
   await chmod(path, 0o700);
@@ -1055,9 +1173,10 @@ async function runServe(options) {
   let stateWrite = Promise.resolve();
   const persistState = () => {
     state.updatedAt = new Date().toISOString();
+    const snapshot = JSON.parse(JSON.stringify(state));
     stateWrite = stateWrite.then(
-      () => writeJsonAtomic(`${path}/state.json`, state),
-      () => writeJsonAtomic(`${path}/state.json`, state),
+      () => writeJsonAtomic(`${path}/state.json`, snapshot),
+      () => writeJsonAtomic(`${path}/state.json`, snapshot),
     );
     return stateWrite;
   };
@@ -1128,9 +1247,13 @@ async function runServe(options) {
   };
 
   let shutdownRequested = false;
+  let acceptingCommands = true;
   let signalReceived = null;
   const requestSignalShutdown = (signal) => {
     signalReceived = signal;
+    acceptingCommands = false;
+    state.status = "closing";
+    void persistState();
     shutdownRequested = true;
   };
   process.once("SIGTERM", () => requestSignalShutdown("SIGTERM"));
@@ -1198,9 +1321,13 @@ async function runServe(options) {
         return { requestId: String(payload.requestId), accepted: true };
       }
       case "shutdown":
-        if (!payload.force && (activeTurns.size > 0 || pendingServerRequests.size > 0)) {
-          fail("session has an active turn or pending server request. Interrupt or respond before shutdown, or use --force");
+        if (!payload.force && (activeTurns.size > 0 || pendingServerRequests.size > 0 || state.leaseCount > 1)) {
+          fail("session has an active turn, pending server request, or another command lease. Interrupt, respond, or wait before shutdown, or use --force");
         }
+        acceptingCommands = false;
+        shutdownRequested = true;
+        state.status = "closing";
+        void persistState();
         if (payload.force) {
           for (const active of activeTurns.values()) {
             await client.request("turn/interrupt", { threadId: active.threadId, turnId: active.turnId }, 10_000).catch(() => undefined);
@@ -1211,7 +1338,6 @@ async function runServe(options) {
           closingNormally = true;
           await client.close();
         }
-        shutdownRequested = true;
         return { shuttingDown: true };
       default:
         fail(`unsupported session action: ${command.action}`);
@@ -1219,29 +1345,82 @@ async function runServe(options) {
   };
 
   const tasks = new Set();
+  const consumedCommandIds = new Set();
+  const activeCommandIds = new Set();
+  const writeCommandResponse = (id, value) => writeJsonAtomic(join(path, "outbox", `${id}.json`), value);
   const scanCommands = async () => {
-    const names = await readdir(`${path}/inbox`).catch((error) => error?.code === "ENOENT" ? [] : Promise.reject(error));
-    for (const name of names.filter((entry) => entry.endsWith(".json")).sort()) {
-      const commandPath = `${path}/inbox/${name}`;
+    const inboxPath = join(path, "inbox");
+    const names = await readdir(inboxPath).catch((error) => error?.code === "ENOENT" ? [] : Promise.reject(error));
+    for (const name of names.sort()) {
+      const commandPath = join(inboxPath, name);
+      if (!name.endsWith(".json")) continue;
+      const filenameMatch = COMMAND_FILE_PATTERN.exec(name);
+      if (!filenameMatch) {
+        await rm(commandPath, { force: true, recursive: true });
+        continue;
+      }
+      const fileId = filenameMatch[1];
       let command;
       try {
-        command = JSON.parse(await readFile(commandPath, "utf8"));
+        const serialized = await readFile(commandPath, "utf8");
         await unlink(commandPath);
+        try {
+          command = JSON.parse(serialized);
+        } catch {
+          await writeCommandResponse(fileId, {
+            id: fileId,
+            error: { message: "session command contains invalid JSON" },
+          });
+          continue;
+        }
       } catch (error) {
         if (error?.code === "ENOENT") continue;
         throw error;
       }
+      if (command?.id !== fileId) {
+        await writeCommandResponse(fileId, {
+          id: fileId,
+          error: { message: "session command id does not match its canonical filename" },
+        });
+        continue;
+      }
+      if (!commandIsAuthenticated(command, credential.key)) {
+        await writeCommandResponse(fileId, {
+          id: fileId,
+          error: { message: "session command authentication failed" },
+        });
+        continue;
+      }
+      if (consumedCommandIds.has(fileId)) {
+        if (!activeCommandIds.has(fileId)) {
+          await writeCommandResponse(fileId, {
+            id: fileId,
+            error: { message: "session command replay rejected" },
+          });
+        }
+        continue;
+      }
+      consumedCommandIds.add(fileId);
+      if (!acceptingCommands) {
+        await writeCommandResponse(fileId, {
+          id: fileId,
+          error: { message: "session is closing and no longer accepts commands" },
+        });
+        continue;
+      }
       state.leaseCount += 1;
       void persistState();
+      activeCommandIds.add(fileId);
       let task;
       task = executeCommand(command)
-        .then((result) => writeJsonAtomic(`${path}/outbox/${command.id}.json`, { id: command.id, result }))
-        .catch((error) => writeJsonAtomic(`${path}/outbox/${command.id}.json`, {
-          id: command.id,
+        .then((result) => writeCommandResponse(fileId, { id: fileId, result }))
+        .catch((error) => writeCommandResponse(fileId, {
+          id: fileId,
           error: { message: error instanceof Error ? error.message : String(error) },
         }))
         .finally(() => {
           tasks.delete(task);
+          activeCommandIds.delete(fileId);
           state.leaseCount -= 1;
           void persistState();
         });
@@ -1344,6 +1523,8 @@ async function runServe(options) {
     state.leaseCount = 0;
     await persistState();
     await stateWrite;
+    await removeSessionCredential(path);
+    process.removeListener("exit", cleanupCredentialOnExit);
   }
   return state;
 }

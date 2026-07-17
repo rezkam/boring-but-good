@@ -196,6 +196,7 @@ if [[ -z "$SESSION_ID" || "$SESSION_ID" == "null" ]]; then
     codex_review_set_meta_field "$RUN_ID" thread_id "$SESSION_ID"
 fi
 
+codex_skill_reconcile_orphaned_run "$RUN_ID"
 RUN_STATUS="$(codex_review_get_meta_field "$RUN_ID" status)"
 SESSION_DIR="$(codex_review_get_meta_field "$RUN_ID" session_dir)"
 if [[ -z "$SESSION_DIR" || "$SESSION_DIR" == "null" ]]; then

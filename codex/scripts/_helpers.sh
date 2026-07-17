@@ -561,6 +561,45 @@ codex_skill_status_json() {
           report_file: $report_file}'
 }
 
+# Persist completion when a tracked turn waiter disappeared after App Server
+# accepted the turn but the persistent host finished it. New App Server runs
+# record the short waiter separately from the long-lived host. Legacy runs do
+# not, so they retain the old dead-pid plus report fallback.
+codex_skill_reconcile_orphaned_run() {
+    local run_id="$1"
+    local meta_file kind status report_file turn_client_pid session_dir legacy_pid
+
+    meta_file="$(codex_review_meta_file "$run_id")"
+    [[ -f "$meta_file" ]] || return 0
+    kind="$(jq -r '.kind // "review"' "$meta_file")"
+    status="$(codex_review_get_meta_field "$run_id" status)"
+    [[ "$kind" == "exec" || "$kind" == "review" ]] || return 0
+    [[ "$status" == "running" || "$status" == "queued" ]] || return 0
+
+    report_file="$(codex_review_get_meta_field "$run_id" report_file)"
+    [[ -n "$report_file" && "$report_file" != "null" && -s "$report_file" ]] || return 0
+
+    turn_client_pid="$(codex_review_get_meta_field "$run_id" turn_client_pid)"
+    if [[ -n "$turn_client_pid" && "$turn_client_pid" != "null" ]]; then
+        kill -0 "$turn_client_pid" 2>/dev/null && return 0
+        session_dir="$(codex_review_get_meta_field "$run_id" session_dir)"
+        [[ -n "$session_dir" && "$session_dir" != "null" && -f "$session_dir/state.json" ]] || return 0
+        jq -e '
+            (.status == "ready" or .status == "closing" or .status == "closed")
+            and ((.activeTurns // []) | length == 0)
+            and ((.pendingRequests // []) | length == 0)
+            and (.leaseCount == 0)
+        ' "$session_dir/state.json" >/dev/null 2>&1 || return 0
+        codex_review_update_status "$run_id" "completed"
+        return 0
+    fi
+
+    legacy_pid="$(codex_review_get_meta_field "$run_id" pid)"
+    if [[ -z "$legacy_pid" || "$legacy_pid" == "null" ]] || ! kill -0 "$legacy_pid" 2>/dev/null; then
+        codex_review_update_status "$run_id" "completed"
+    fi
+}
+
 # Gather liveness + progress for a run of ANY kind and print it, either as the
 # one canonical JSON object (codex_skill_status_json) or the human summary.
 # This is the single implementation behind codex-status.sh and
@@ -579,25 +618,9 @@ codex_emit_status() {
         return 1
     fi
 
-    local kind meta_status
-    kind="$(jq -r '.kind // "review"' "$meta_file")"
-    meta_status="$(codex_review_get_meta_field "$run_id" status)"
+    codex_skill_reconcile_orphaned_run "$run_id"
 
-    # Reconcile an orphaned run: the wrapper is gone but a non-empty report
-    # was left behind, so the work actually finished. Persist it as completed
-    # instead of reporting it dead.
-    if [[ "$kind" == "exec" || "$kind" == "review" ]] && [[ "$meta_status" == "running" || "$meta_status" == "queued" ]]; then
-        local pid_r report_r pid_alive_r="false"
-        pid_r="$(codex_review_get_meta_field "$run_id" pid)"
-        report_r="$(codex_review_get_meta_field "$run_id" report_file)"
-        if [[ -n "$pid_r" && "$pid_r" != "null" ]] && kill -0 "$pid_r" 2>/dev/null; then
-            pid_alive_r="true"
-        fi
-        if [[ "$pid_alive_r" != "true" && -s "$report_r" ]]; then
-            codex_review_update_status "$run_id" "completed"
-        fi
-    fi
-
+    local kind
     kind="$(jq -r '.kind // "review"' "$meta_file")"
     local status pid thread_id log_file error_file report_file created_at exit_code workdir
     local baseline_commit baseline_dirty turn_count
