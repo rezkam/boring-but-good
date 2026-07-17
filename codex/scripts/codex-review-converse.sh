@@ -26,7 +26,7 @@ resume when not passed explicitly. Pass --effort/--model to override.
 
 Options:
   --workdir <dir>   directory to resume in (default: the run's recorded workdir)
-  --effort <value>  Reasoning effort: minimal, low, medium, high, xhigh
+  --effort <value>  Reasoning effort advertised by the selected model
                     (default: the run's recorded effort)
   --model <name>    model to resume with (default: the run's recorded model)
 
@@ -42,16 +42,6 @@ EFFORT=""
 PROMPT=""
 WORKDIR=""
 CONFIG_FLAGS=()
-
-validate_effort() {
-    case "$1" in
-        minimal|low|medium|high|xhigh) ;;
-        *)
-            echo "Unknown effort '$1'. Use minimal, low, medium, high, or xhigh." >&2
-            exit 1
-            ;;
-    esac
-}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -72,7 +62,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --effort)
             [[ $# -lt 2 ]] && { echo "--effort requires a value" >&2; exit 1; }
-            validate_effort "$2"
             EFFORT="$2"
             CONFIG_FLAGS+=(-c "model_reasoning_effort=$2")
             shift 2
@@ -80,9 +69,7 @@ while [[ $# -gt 0 ]]; do
         --config)
             [[ $# -lt 2 ]] && { echo "--config requires a key=value" >&2; exit 1; }
             if [[ "$2" == model_reasoning_effort=* ]]; then
-                effort_value="${2#*=}"
-                validate_effort "$effort_value"
-                EFFORT="$effort_value"
+                EFFORT="${2#*=}"
             fi
             CONFIG_FLAGS+=(-c "$2")
             shift 2
@@ -161,7 +148,6 @@ fi
 if [[ -z "$EFFORT" ]]; then
     META_EFFORT="$(codex_review_get_meta_field "$RUN_ID" effort)"
     if [[ -n "$META_EFFORT" && "$META_EFFORT" != "null" ]]; then
-        validate_effort "$META_EFFORT"
         EFFORT="$META_EFFORT"
         CONFIG_FLAGS+=(-c "model_reasoning_effort=$META_EFFORT")
     fi

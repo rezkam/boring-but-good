@@ -48,7 +48,7 @@ Shared options:
   --events FILE          Append every app-server notification as JSONL
   --report FILE          Write final assistant or review text
   --model MODEL          Model override
-  --effort EFFORT        minimal, low, medium, high, or xhigh
+  --effort EFFORT        Reasoning effort advertised by the selected model
   --sandbox MODE         read-only, workspace-write, or danger-full-access
   --network              Allow network for workspace-write turns
   --approval MODE        interactive, decline, accept, or accept-for-session
@@ -248,6 +248,12 @@ class CodexAppServerClient {
     return response;
   }
 
+  getModelCapabilities() {
+    this.modelCapabilitiesPromise ??= this.request("model/list", {}, 60_000)
+      .then(normalizeModelCapabilities);
+    return this.modelCapabilitiesPromise;
+  }
+
   request(method, params = undefined, timeoutMs = 0) {
     if (this.closed) {
       return Promise.reject(this.closeError ?? new AppServerClosedError("codex app-server client is closed"));
@@ -403,6 +409,47 @@ class CodexAppServerClient {
     this.pending.clear();
     for (const handler of this.closeHandlers) handler(this.closeError);
   }
+}
+
+function normalizeModelCapabilities(result) {
+  if (!Array.isArray(result?.data)) {
+    fail("model/list returned no model data");
+  }
+  return result.data.flatMap((model) => {
+    if (typeof model?.id !== "string" || model.id.length === 0) return [];
+    const supportedReasoningEfforts = Array.isArray(model.supportedReasoningEfforts)
+      ? [...new Set(model.supportedReasoningEfforts.flatMap((entry) =>
+          typeof entry?.reasoningEffort === "string" && entry.reasoningEffort.length > 0
+            ? [entry.reasoningEffort]
+            : []))]
+      : [];
+    return [{
+      id: model.id,
+      isDefault: model.isDefault === true,
+      supportedReasoningEfforts,
+    }];
+  });
+}
+
+async function validateReasoningEffort(client, options) {
+  if (!Object.prototype.hasOwnProperty.call(options, "effort")) return;
+  const models = await client.getModelCapabilities();
+  const hasExplicitModel = Object.prototype.hasOwnProperty.call(options, "model");
+  const selected = hasExplicitModel
+    ? models.find((model) => model.id === options.model)
+    : models.find((model) => model.isDefault);
+  if (!selected) {
+    const available = models.map((model) => model.id).join(", ") || "none";
+    if (hasExplicitModel) {
+      fail(`Model '${options.model}' is not advertised by model/list. Available models: ${available}.`);
+    }
+    fail(`model/list did not advertise a default model. Available models: ${available}.`);
+  }
+  if (!selected.supportedReasoningEfforts.includes(options.effort)) {
+    const advertised = selected.supportedReasoningEfforts.join(", ") || "none";
+    fail(`Reasoning effort '${options.effort}' is not advertised for model '${selected.id}'. Advertised efforts: ${advertised}.`);
+  }
+  options.model = selected.id;
 }
 
 function sandboxPolicy(options) {
@@ -621,6 +668,7 @@ async function waitForTurn(client, options, turnId, threadId) {
 async function runTurnOnClient(client, options, useLegacyControl = false) {
   if (options.new && options.thread) fail("turn accepts either --new or --thread ID, not both");
   const prompt = await readPrompt(options);
+  await validateReasoningEffort(client, options);
   let controlChannel;
   try {
     const threadId = await establishThread(client, options);
@@ -689,6 +737,7 @@ async function runReviewOnClient(client, options, useLegacyControl = false) {
   else options.instructions = reviewInstructions;
   options.new = true;
   options.sandbox ??= "read-only";
+  await validateReasoningEffort(client, options);
   let controlChannel;
   try {
     const threadId = await establishThread(client, options);
@@ -1255,9 +1304,6 @@ async function main() {
   }
   if (options.sandbox && !["read-only", "workspace-write", "danger-full-access"].includes(options.sandbox)) {
     fail("--sandbox must be read-only, workspace-write, or danger-full-access");
-  }
-  if (options.effort && !["minimal", "low", "medium", "high", "xhigh"].includes(options.effort)) {
-    fail("--effort must be minimal, low, medium, high, or xhigh");
   }
   if (options.approval && !["interactive", "decline", "accept", "accept-for-session"].includes(options.approval)) {
     fail("--approval must be interactive, decline, accept, or accept-for-session");

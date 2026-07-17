@@ -23,7 +23,7 @@ Options:
   --sandbox <mode>     read-only | workspace-write (default) | danger-full-access
   --network            allow network inside workspace-write (dependency fetches)
   --model <name>       model override
-  --effort <value>     reasoning effort: minimal, low, medium, high, xhigh
+  --effort <value>     reasoning effort advertised by the selected model
   --config k=v         repeatable codex -c override (e.g. model_reasoning_effort=low)
   --approval <mode>    decline (default) or interactive
   --title <text>       label shown in the run list
@@ -51,24 +51,14 @@ WAIT="false"
 CONFIG_FLAGS=()
 APPROVAL="decline"
 
-validate_effort() {
-    case "$1" in
-        minimal|low|medium|high|xhigh) ;;
-        *)
-            echo "Unknown effort '$1'. Use minimal, low, medium, high, or xhigh." >&2
-            exit 1
-            ;;
-    esac
-}
-
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --workdir) [[ $# -lt 2 ]] && { echo "--workdir requires a path" >&2; exit 1; }; WORKDIR="$2"; shift 2 ;;
         --sandbox) [[ $# -lt 2 ]] && { echo "--sandbox requires a mode" >&2; exit 1; }; SANDBOX="$2"; shift 2 ;;
         --network) NETWORK="true"; shift ;;
         --model) [[ $# -lt 2 ]] && { echo "--model requires a value" >&2; exit 1; }; MODEL="$2"; shift 2 ;;
-        --effort) [[ $# -lt 2 ]] && { echo "--effort requires a value" >&2; exit 1; }; validate_effort "$2"; EFFORT="$2"; CONFIG_FLAGS+=(-c "model_reasoning_effort=$2"); shift 2 ;;
-        --config) [[ $# -lt 2 ]] && { echo "--config requires a key=value" >&2; exit 1; }; if [[ "$2" == model_reasoning_effort=* ]]; then effort_value="${2#*=}"; validate_effort "$effort_value"; EFFORT="$effort_value"; fi; CONFIG_FLAGS+=(-c "$2"); shift 2 ;;
+        --effort) [[ $# -lt 2 ]] && { echo "--effort requires a value" >&2; exit 1; }; EFFORT="$2"; CONFIG_FLAGS+=(-c "model_reasoning_effort=$2"); shift 2 ;;
+        --config) [[ $# -lt 2 ]] && { echo "--config requires a key=value" >&2; exit 1; }; if [[ "$2" == model_reasoning_effort=* ]]; then EFFORT="${2#*=}"; fi; CONFIG_FLAGS+=(-c "$2"); shift 2 ;;
         --approval) [[ $# -lt 2 ]] && { echo "--approval requires a value" >&2; exit 1; }; APPROVAL="$2"; shift 2 ;;
         --title) [[ $# -lt 2 ]] && { echo "--title requires a value" >&2; exit 1; }; TITLE="$2"; shift 2 ;;
         --prompt-file) [[ $# -lt 2 ]] && { echo "--prompt-file requires a path" >&2; exit 1; }; PROMPT_FILE="$2"; shift 2 ;;

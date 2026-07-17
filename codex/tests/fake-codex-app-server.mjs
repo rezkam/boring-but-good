@@ -8,6 +8,28 @@ const TURN_ID = "00000000-0000-0000-0000-000000000002";
 const PROVISIONAL_REVIEW_TURN_ID = "00000000-0000-0000-0000-000000000003";
 const OTHER_THREAD_ID = "00000000-0000-0000-0000-000000000004";
 const OTHER_TURN_ID = "00000000-0000-0000-0000-000000000005";
+const MODELS = [
+  {
+    id: "fake-default-model",
+    model: "fake-default-model",
+    displayName: "Fake Default Model",
+    description: "Default fake model with the complete advertised effort range.",
+    isDefault: true,
+    defaultReasoningEffort: "medium",
+    supportedReasoningEfforts: ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+      .map((reasoningEffort) => ({ reasoningEffort, description: `Fake ${reasoningEffort} effort` })),
+  },
+  {
+    id: "fake-explicit-model",
+    model: "fake-explicit-model",
+    displayName: "Fake Explicit Model",
+    description: "Non-default fake model with a smaller capability set.",
+    isDefault: false,
+    defaultReasoningEffort: "high",
+    supportedReasoningEfforts: ["high", "ultra"]
+      .map((reasoningEffort) => ({ reasoningEffort, description: `Fake ${reasoningEffort} effort` })),
+  },
+];
 const scenario = process.env.FAKE_APP_SERVER_SCENARIO ?? "complete";
 const logFile = process.env.FAKE_APP_SERVER_LOG;
 const pidFile = process.env.FAKE_CODEX_PID_FILE;
@@ -21,6 +43,10 @@ function send(message) {
 
 function record(message) {
   if (logFile) appendFileSync(logFile, `${JSON.stringify(message)}\n`, "utf8");
+}
+
+if (process.argv.includes("-c")) {
+  record({ method: "fake/appServerArgs", params: { args: process.argv.slice(2) } });
 }
 
 function completed(text = "APP_SERVER_FAKE_OK") {
@@ -153,7 +179,7 @@ function handle(message) {
       }
       return;
     case "model/list":
-      send({ id: message.id, result: { data: [{ id: "fake-model" }] } });
+      send({ id: message.id, result: { data: MODELS, nextCursor: null } });
       return;
     case "account/logout":
       send({ id: message.id, result: {} });

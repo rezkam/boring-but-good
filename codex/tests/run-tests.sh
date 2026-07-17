@@ -113,9 +113,6 @@ VALID_EFFORTS="minimal, low, medium, high, or xhigh"
 out="$("$SCRIPTS_DIR/codex-review-start.sh" --preset bogus 2>&1)"; code=$?
 assert_exit_nonzero "review-start rejects unknown preset" "$code" "$out" "Unknown preset"
 
-out="$("$SCRIPTS_DIR/codex-review-start.sh" --effort bogus 2>&1)"; code=$?
-assert_exit_nonzero "review-start rejects unknown effort" "$code" "$out" "$VALID_EFFORTS"
-
 out="$("$SCRIPTS_DIR/codex-mcp-start.sh" --sandbox bogus 2>&1)"; code=$?
 assert_exit_nonzero "mcp-start rejects unknown sandbox" "$code" "$out" "Unknown sandbox"
 
@@ -185,9 +182,6 @@ assert_exit_nonzero "exec-start rejects missing prompt" "$code" "$out" "No task 
 out="$("$SCRIPTS_DIR/codex-exec-start.sh" --sandbox bogus "do things" 2>&1)"; code=$?
 assert_exit_nonzero "exec-start rejects unknown sandbox" "$code" "$out" "Unknown sandbox"
 
-out="$("$SCRIPTS_DIR/codex-exec-start.sh" --effort bogus "do things" 2>&1)"; code=$?
-assert_exit_nonzero "exec-start rejects unknown effort" "$code" "$out" "$VALID_EFFORTS"
-
 out="$("$SCRIPTS_DIR/codex-exec-start.sh" --workdir /nonexistent-dir-xyz "do things" 2>&1)"; code=$?
 assert_exit_nonzero "exec-start rejects missing workdir" "$code" "$out" "Workdir not found"
 
@@ -242,6 +236,18 @@ check "new turn writes final report" $?
 jq -e 'select(.method == "item/completed")' "$APP_SERVER_EVENTS" >/dev/null 2>&1 \
     && jq -e 'select(.method == "turn/completed")' "$APP_SERVER_EVENTS" >/dev/null 2>&1
 check "event archive includes item and terminal notifications" $?
+
+: > "$APP_SERVER_LOG"
+app_server_out="$(fake_client complete turn --new --prompt "advertised max effort" --sandbox read-only \
+    --effort max 2>&1)"; code=$?
+if [[ "$code" -eq 0 ]] \
+    && jq -e 'select(.method == "model/list")' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && jq -e 'select(.method == "turn/start") | .params.effort == "max" and .params.model == "fake-default-model"' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "app-server accepts max when the default model advertises it" 0
+else
+    check "app-server accepts max when the default model advertises it" 1 \
+        "exit=$code output: $(printf '%s' "$app_server_out" | head -c 200)"
+fi
 
 : > "$APP_SERVER_LOG"
 app_server_out="$(fake_client notification-race turn --new --prompt "race" --sandbox read-only 2>&1)"; code=$?
@@ -333,7 +339,7 @@ fi
 
 : > "$APP_SERVER_LOG"
 app_server_out="$(fake_client complete request --method model/list 2>&1)"; code=$?
-if [[ "$code" -eq 0 ]] && printf '%s' "$app_server_out" | jq -e '.result.data[0].id == "fake-model"' >/dev/null 2>&1; then
+if [[ "$code" -eq 0 ]] && printf '%s' "$app_server_out" | jq -e '.result.data[0].id == "fake-default-model"' >/dev/null 2>&1; then
     check "generic request returns protocol result" 0
 else
     check "generic request returns protocol result" 1 "exit=$code output: $(printf '%s' "$app_server_out" | head -c 200)"
@@ -412,7 +418,7 @@ assert_exit_nonzero "client rejects unknown approval modes" "$code" "$app_server
 app_server_out="$(fake_client complete turn --new --prompt "sandbox" --sandbox misspelled 2>&1)"; code=$?
 assert_exit_nonzero "client rejects unknown sandbox instead of falling through" "$code" "$app_server_out" "--sandbox must be"
 app_server_out="$(fake_client complete turn --new --prompt "effort" --effort enormous 2>&1)"; code=$?
-assert_exit_nonzero "client rejects unknown reasoning effort" "$code" "$app_server_out" "--effort must be"
+assert_exit_nonzero "client rejects effort not advertised by the selected model" "$code" "$app_server_out" "not advertised for model 'fake-default-model'"
 app_server_out="$(fake_client complete turn --new --prompt "one" --prompt-file "$WORK/missing" 2>&1)"; code=$?
 assert_exit_nonzero "client rejects conflicting prompt sources" "$code" "$app_server_out" "either --prompt or --prompt-file"
 printf '%s\n' '[]' > "$WORK/invalid-params.json"
@@ -440,7 +446,7 @@ if [[ "$code" -eq 0 && "$turn_code" -eq 0 && "$followup_code" -eq 0 && "$request
     && [[ "$(jq -r 'select(.method == "turn/start") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "2" ]] \
     && [[ "$(jq -r 'select(.method == "thread/resume") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "0" ]] \
     && printf '%s' "$managed_status" | jq -e '.status == "ready" and .processAlive == true and (.threads | length) == 1' >/dev/null 2>&1 \
-    && printf '%s' "$managed_models" | jq -e '.data[0].id == "fake-model"' >/dev/null 2>&1; then
+    && printf '%s' "$managed_models" | jq -e '.data[0].id == "fake-default-model"' >/dev/null 2>&1; then
     check "managed session reuses one initialized connection across operations" 0
 else
     check "managed session reuses one initialized connection across operations" 1 "turn=$managed_turn followup=$managed_followup status=$managed_status"
@@ -454,6 +460,74 @@ if [[ "$(jq -r '.status' "$MANAGED_DIR/state.json")" == "closed" ]]; then
 else
     check "managed session shuts down cleanly after its leases finish" 1
 fi
+
+# Explicit efforts are validated against model/list on the host connection.
+# Every advertised value must pass, and repeated managed turns must reuse the
+# first normalized capability result instead of querying once per turn.
+MANAGED_EFFORT_DIR="$WORK/managed-efforts"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=complete \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_EFFORT_DIR" \
+    --approval decline >/dev/null 2>&1
+managed_effort_failures=0
+for advertised_effort in minimal low medium high xhigh max ultra; do
+    node "$SCRIPTS_DIR/codex-app-server.mjs" turn --session-dir "$MANAGED_EFFORT_DIR" \
+        --new --prompt "managed $advertised_effort" --sandbox read-only \
+        --effort "$advertised_effort" >/dev/null 2>&1 || managed_effort_failures=$((managed_effort_failures + 1))
+done
+managed_explicit_model="$(node "$SCRIPTS_DIR/codex-app-server.mjs" turn \
+    --session-dir "$MANAGED_EFFORT_DIR" --new --prompt "explicit model" --sandbox read-only \
+    --model fake-explicit-model --effort ultra 2>&1)"; managed_explicit_model_code=$?
+if [[ "$managed_effort_failures" -eq 0 ]] \
+    && jq -s -e '[.[] | select(.method == "turn/start" and .params.model == "fake-default-model") | .params.effort] | sort == ["high","low","max","medium","minimal","ultra","xhigh"]' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "managed turns accept every effort advertised by the default model" 0
+else
+    check "managed turns accept every effort advertised by the default model" 1 \
+        "failures=$managed_effort_failures rpc: $(tail -c 400 "$APP_SERVER_LOG")"
+fi
+if [[ "$(jq -r 'select(.method == "model/list") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "1" ]] \
+    && [[ "$(jq -r 'select(.method == "thread/start" and .params.model == "fake-default-model") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "7" ]]; then
+    check "managed effort validation caches model capabilities and selects the default model" 0
+else
+    check "managed effort validation caches model capabilities and selects the default model" 1 \
+        "model/list=$(jq -r 'select(.method == "model/list") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')"
+fi
+if [[ "$managed_explicit_model_code" -eq 0 ]] \
+    && jq -e 'select(.method == "turn/start") | .params.model == "fake-explicit-model" and .params.effort == "ultra"' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "managed effort validation selects an explicit advertised model" 0
+else
+    check "managed effort validation selects an explicit advertised model" 1 \
+        "exit=$managed_explicit_model_code output: $(printf '%s' "$managed_explicit_model" | head -c 160)"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_EFFORT_DIR" >/dev/null 2>&1
+
+# Capability failures must be terminal before any operation starts. Use one
+# host to also prove failed validations share the same cached model list.
+MANAGED_INVALID_EFFORT_DIR="$WORK/managed-invalid-efforts"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=complete \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_INVALID_EFFORT_DIR" \
+    --approval decline >/dev/null 2>&1
+unsupported_effort_out="$(node "$SCRIPTS_DIR/codex-app-server.mjs" turn \
+    --session-dir "$MANAGED_INVALID_EFFORT_DIR" --new --prompt "unsupported" \
+    --sandbox read-only --effort impossible 2>&1)"; unsupported_effort_code=$?
+unknown_model_out="$(node "$SCRIPTS_DIR/codex-app-server.mjs" review \
+    --session-dir "$MANAGED_INVALID_EFFORT_DIR" --scope uncommitted \
+    --workdir "$NONBLOCK_REPO" --model missing-model --effort high 2>&1)"; unknown_model_code=$?
+assert_exit_nonzero "unsupported effort fails with the selected model's advertised values" \
+    "$unsupported_effort_code" "$unsupported_effort_out" \
+    "not advertised for model 'fake-default-model'"
+assert_exit_nonzero "unknown explicit model fails with the advertised model ids" \
+    "$unknown_model_code" "$unknown_model_out" \
+    "Model 'missing-model' is not advertised by model/list"
+if [[ "$(jq -r 'select(.method == "model/list") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "1" ]] \
+    && ! jq -e 'select(.method == "thread/start" or .method == "turn/start" or .method == "review/start")' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "capability failures stop before thread, turn, or review start" 0
+else
+    check "capability failures stop before thread, turn, or review start" 1 \
+        "rpc: $(tail -c 400 "$APP_SERVER_LOG")"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_INVALID_EFFORT_DIR" >/dev/null 2>&1
 
 # Native review can advertise a provisional turn id in turn/started while
 # review/start and turn/completed use the real id. Completing that review must
@@ -624,6 +698,61 @@ else
     check "tracked review records persistent App Server session" 1
 fi
 [[ -n "$FAKE_REVIEW_RUN_ID" ]] && "$SCRIPTS_DIR/codex-delete.sh" "$FAKE_REVIEW_RUN_ID" >/dev/null 2>&1
+
+: > "$APP_SERVER_LOG"
+review_ultra_out="$(PATH="$FAKE_CODEX_BIN:$PATH" FAKE_CODEX_PID_FILE="$FAKE_CODEX_PID_FILE" \
+    FAKE_APP_SERVER_SCENARIO=review FAKE_APP_SERVER_LOG="$APP_SERVER_LOG" \
+    "$SCRIPTS_DIR/codex-review-start.sh" --wait --uncommitted --effort ultra \
+    --workdir "$NONBLOCK_REPO" 2>&1)"; review_ultra_code=$?
+FAKE_ULTRA_REVIEW_RUN_ID=""
+if [[ "$review_ultra_code" -eq 0 ]]; then
+    FAKE_ULTRA_REVIEW_RUN_ID="$("$SCRIPTS_DIR/codex-review-list.sh" 2 | awk -F'\t' 'NR>1 && $2=="review" {print $1; exit}')"
+fi
+if [[ "$review_ultra_code" -eq 0 && -n "$FAKE_ULTRA_REVIEW_RUN_ID" ]] \
+    && [[ "$(jq -r '.effort // ""' "$CODEX_REVIEW_HOME/runs/$FAKE_ULTRA_REVIEW_RUN_ID/meta.json")" == "ultra" ]] \
+    && jq -e 'select(.method == "fake/appServerArgs") | .params.args | index("model_reasoning_effort=ultra") != null' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && jq -e 'select(.method == "thread/start") | .params.model == "fake-default-model"' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "tracked review accepts ultra and configures the host with it" 0
+else
+    check "tracked review accepts ultra and configures the host with it" 1 \
+        "exit=$review_ultra_code output: $(printf '%s' "$review_ultra_out" | head -c 200)"
+fi
+[[ -n "$FAKE_ULTRA_REVIEW_RUN_ID" ]] && "$SCRIPTS_DIR/codex-delete.sh" "$FAKE_ULTRA_REVIEW_RUN_ID" >/dev/null 2>&1
+
+: > "$APP_SERVER_LOG"
+exec_max_out="$(PATH="$FAKE_CODEX_BIN:$PATH" FAKE_CODEX_PID_FILE="$FAKE_CODEX_PID_FILE" \
+    FAKE_APP_SERVER_SCENARIO=complete FAKE_APP_SERVER_LOG="$APP_SERVER_LOG" \
+    "$SCRIPTS_DIR/codex-exec-start.sh" --wait --workdir "$NONBLOCK_REPO" \
+    --effort max "tracked max effort" 2>&1)"; exec_max_code=$?
+FAKE_MAX_EXEC_RUN_ID=""
+if [[ "$exec_max_code" -eq 0 ]]; then
+    FAKE_MAX_EXEC_RUN_ID="$("$SCRIPTS_DIR/codex-review-list.sh" 2 | awk -F'\t' 'NR>1 && $2=="exec" {print $1; exit}')"
+fi
+if [[ "$exec_max_code" -eq 0 && -n "$FAKE_MAX_EXEC_RUN_ID" ]] \
+    && [[ "$(jq -r '.effort // ""' "$CODEX_REVIEW_HOME/runs/$FAKE_MAX_EXEC_RUN_ID/meta.json")" == "max" ]] \
+    && jq -e 'select(.method == "turn/start") | .params.model == "fake-default-model" and .params.effort == "max"' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "tracked exec accepts and records advertised max effort" 0
+else
+    check "tracked exec accepts and records advertised max effort" 1 \
+        "exit=$exec_max_code output: $(printf '%s' "$exec_max_out" | head -c 200)"
+fi
+
+if [[ -n "$FAKE_MAX_EXEC_RUN_ID" ]]; then
+    : > "$APP_SERVER_LOG"
+    converse_ultra_out="$("$SCRIPTS_DIR/codex-review-converse.sh" "$FAKE_MAX_EXEC_RUN_ID" \
+        --effort ultra "continue at ultra" 2>&1)"; converse_ultra_code=$?
+    if [[ "$converse_ultra_code" -eq 0 ]] \
+        && [[ "$(jq -r '.effort // ""' "$CODEX_REVIEW_HOME/runs/$FAKE_MAX_EXEC_RUN_ID/meta.json")" == "ultra" ]] \
+        && jq -e 'select(.method == "turn/start") | .params.model == "fake-default-model" and .params.effort == "ultra"' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+        check "continuation wrapper accepts and records advertised ultra effort" 0
+    else
+        check "continuation wrapper accepts and records advertised ultra effort" 1 \
+            "exit=$converse_ultra_code output: $(printf '%s' "$converse_ultra_out" | head -c 200)"
+    fi
+    "$SCRIPTS_DIR/codex-delete.sh" "$FAKE_MAX_EXEC_RUN_ID" >/dev/null 2>&1
+else
+    check "continuation wrapper accepts and records advertised ultra effort" 1 "tracked exec setup failed"
+fi
 
 # Exercise the full tracked-review lifecycle with the native provisional id
 # mismatch. An idle completed review must continue with a new turn and delete
