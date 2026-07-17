@@ -179,6 +179,26 @@ function handle(message) {
       }
       return;
     case "model/list":
+      if (scenario === "thread-idle-with-other-active") {
+        send({
+          method: "turn/started",
+          params: {
+            threadId: THREAD_ID,
+            turn: { id: PROVISIONAL_REVIEW_TURN_ID, status: "inProgress", items: [], error: null },
+          },
+        });
+        send({
+          method: "turn/started",
+          params: {
+            threadId: OTHER_THREAD_ID,
+            turn: { id: OTHER_TURN_ID, status: "inProgress", items: [], error: null },
+          },
+        });
+        send({
+          method: "thread/status/changed",
+          params: { threadId: THREAD_ID, status: { type: "idle" } },
+        });
+      }
       send({ id: message.id, result: { data: MODELS, nextCursor: null } });
       return;
     case "account/logout":

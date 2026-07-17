@@ -551,6 +551,27 @@ else
 fi
 node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_REVIEW_MISMATCH_DIR" --force >/dev/null 2>&1
 
+# A native review can become idle without emitting turn/completed for its
+# provisional id. Idle status clears aliases only on that thread and retains
+# an independently active turn on another thread.
+MANAGED_THREAD_IDLE_DIR="$WORK/managed-thread-idle"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=thread-idle-with-other-active \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_THREAD_IDLE_DIR" --approval decline >/dev/null 2>&1
+managed_thread_idle_request="$(node "$SCRIPTS_DIR/codex-app-server.mjs" request \
+    --session-dir "$MANAGED_THREAD_IDLE_DIR" --method model/list 2>&1)"; thread_idle_request_code=$?
+managed_thread_idle_status="$(node "$SCRIPTS_DIR/codex-app-server.mjs" status \
+    --session-dir "$MANAGED_THREAD_IDLE_DIR" 2>&1)"; thread_idle_status_code=$?
+if [[ "$thread_idle_request_code" -eq 0 && "$thread_idle_status_code" -eq 0 ]] \
+    && printf '%s' "$managed_thread_idle_status" | jq -e \
+        '.activeTurns == [{"threadId":"00000000-0000-0000-0000-000000000004","turnId":"00000000-0000-0000-0000-000000000005","startedAt":.activeTurns[0].startedAt}]' >/dev/null 2>&1; then
+    check "idle thread clears provisional turn without touching other threads" 0
+else
+    check "idle thread clears provisional turn without touching other threads" 1 \
+        "request_exit=$thread_idle_request_code status_exit=$thread_idle_status_code status=$managed_thread_idle_status request=$managed_thread_idle_request"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_THREAD_IDLE_DIR" --force >/dev/null 2>&1
+
 # Steering and interruption enter through separate local clients, but the
 # host sends both RPCs over the connection that owns the active turn.
 MANAGED_STEER_DIR="$WORK/managed-steer"

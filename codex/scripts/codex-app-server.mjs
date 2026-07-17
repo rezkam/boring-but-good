@@ -1019,6 +1019,16 @@ async function runServe(options) {
   const clearedServerRequests = new Set();
   const activeTurns = new Map();
   const threads = new Set();
+  const clearActiveTurnsForThread = (threadId) => {
+    let changed = false;
+    for (const [activeTurnId, activeTurn] of activeTurns) {
+      if (activeTurn.threadId === threadId) {
+        activeTurns.delete(activeTurnId);
+        changed = true;
+      }
+    }
+    return changed;
+  };
   const refreshState = () => {
     state.threads = [...threads];
     state.activeTurns = [...activeTurns.values()];
@@ -1221,14 +1231,10 @@ async function runServe(options) {
       }
       if (notification.method === "turn/completed" && turnId) {
         changed = activeTurns.delete(turnId) || changed;
-        if (threadId) {
-          for (const [activeTurnId, activeTurn] of activeTurns) {
-            if (activeTurn.threadId === threadId) {
-              activeTurns.delete(activeTurnId);
-              changed = true;
-            }
-          }
-        }
+        if (threadId) changed = clearActiveTurnsForThread(threadId) || changed;
+      }
+      if (notification.method === "thread/status/changed" && notification.params?.status?.type === "idle" && threadId) {
+        changed = clearActiveTurnsForThread(threadId) || changed;
       }
       if (changed) refreshState();
     });
