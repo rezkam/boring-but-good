@@ -32,7 +32,7 @@ Calling `turn` again with a thread already loaded by the host sends `turn/start`
 
 Treat a `turn/started` notification as provisional until the matching start request identifies the accepted turn. App Server can report a different provisional id while entering native review mode. Reconcile active state by thread, retain independent turns on other threads, and clear every alias for that thread when it becomes idle or its accepted turn completes. Never steer, interrupt, or refuse shutdown because of a provisional id left after a terminal review.
 
-Discover reasoning effort capabilities from `model/list` on each App Server connection. Resolve the requested model, or the advertised default model, and validate an explicit effort against that model's `supportedReasoningEfforts`. Cache the normalized capability list for the connection. Do not maintain a global effort enum. If App Server rejects an effort it advertised, surface that failure without rewriting the capability data or weakening the test.
+Discover reasoning effort capabilities from the complete `model/list` catalog on each App Server connection. Send `includeHidden: true`, follow every `nextCursor`, reject repeated cursors, then cache the normalized full catalog for the connection. Resolve the requested model, or the advertised default model, and validate an explicit effort against that model's `supportedReasoningEfforts`. Do not maintain a global effort enum. Put a validated native review effort in `thread/start` as `config.model_reasoning_effort`, not in `review/start`. If App Server rejects an effort it advertised, surface that failure without rewriting the capability data or weakening the test.
 
 ## State and events
 
@@ -81,6 +81,8 @@ Unattended mode uses conservative defaults:
 - user input: return no answers
 - MCP elicitation: cancel
 - unimplemented dynamic tool: explicit failure
+
+Explicit `accept` grants exactly the permission subset in the request with turn scope. `accept-for-session` grants that exact subset with session scope. Do not broaden a requested permission profile.
 
 Surface pending requests as waiting state. Do not misclassify them as a stalled agent.
 

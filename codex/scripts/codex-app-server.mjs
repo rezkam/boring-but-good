@@ -19,6 +19,7 @@ const CLIENT_INFO = {
   version: "2.0.0",
 };
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
+const TURN_INTERRUPT_GRACE_MS = 5_000;
 const MAX_STDERR_TAIL = 4_000;
 const SESSION_SCAN_MS = 25;
 const SESSION_START_TIMEOUT_MS = 10_000;
@@ -249,9 +250,28 @@ class CodexAppServerClient {
   }
 
   getModelCapabilities() {
-    this.modelCapabilitiesPromise ??= this.request("model/list", {}, 60_000)
-      .then(normalizeModelCapabilities);
+    this.modelCapabilitiesPromise ??= this.fetchModelCapabilities();
     return this.modelCapabilitiesPromise;
+  }
+
+  async fetchModelCapabilities() {
+    const models = [];
+    const seenCursors = new Set();
+    let cursor;
+    while (true) {
+      const result = await this.request("model/list", {
+        includeHidden: true,
+        ...(cursor === undefined ? {} : { cursor }),
+      }, 60_000);
+      const page = normalizeModelCapabilitiesPage(result);
+      models.push(...page.models);
+      if (page.nextCursor === null) return models;
+      if (seenCursors.has(page.nextCursor)) {
+        fail(`model/list returned repeated cursor '${page.nextCursor}'`);
+      }
+      seenCursors.add(page.nextCursor);
+      cursor = page.nextCursor;
+    }
   }
 
   request(method, params = undefined, timeoutMs = 0) {
@@ -287,11 +307,13 @@ class CodexAppServerClient {
   }
 
   async close() {
-    if (!this.closed) {
-      this.closeWithError(new AppServerClosedError("codex app-server client is closed"));
-      this.child.kill("SIGTERM");
-    }
+    if (!this.closed) this.invalidate(new AppServerClosedError("codex app-server client is closed"));
     await this.eventWrite;
+  }
+
+  invalidate(error) {
+    this.closeWithError(error);
+    if (this.child.exitCode === null && this.child.signalCode === null) this.child.kill("SIGTERM");
   }
 
   recordEvent(event) {
@@ -389,7 +411,14 @@ class CodexAppServerClient {
       const decision = configured === "accept-for-session" ? "acceptForSession" : configured;
       return { decision: decision === "accept" || decision === "acceptForSession" ? decision : "decline" };
     }
-    if (method === "item/permissions/requestApproval") return { permissions: {}, scope: "turn" };
+    if (method === "item/permissions/requestApproval") {
+      const configured = this.options.approval ?? "decline";
+      const accepted = configured === "accept" || configured === "accept-for-session";
+      return {
+        permissions: accepted ? (message.params?.permissions ?? {}) : {},
+        scope: configured === "accept-for-session" ? "session" : "turn",
+      };
+    }
     if (method === "item/tool/requestUserInput") return { answers: {} };
     if (method === "mcpServer/elicitation/request") return { action: "cancel", content: null, _meta: null };
     if (method === "item/tool/call") {
@@ -411,24 +440,33 @@ class CodexAppServerClient {
   }
 }
 
-function normalizeModelCapabilities(result) {
+function normalizeModelCapabilitiesPage(result) {
   if (!Array.isArray(result?.data)) {
     fail("model/list returned no model data");
   }
-  return result.data.flatMap((model) => {
-    if (typeof model?.id !== "string" || model.id.length === 0) return [];
-    const supportedReasoningEfforts = Array.isArray(model.supportedReasoningEfforts)
-      ? [...new Set(model.supportedReasoningEfforts.flatMap((entry) =>
-          typeof entry?.reasoningEffort === "string" && entry.reasoningEffort.length > 0
-            ? [entry.reasoningEffort]
-            : []))]
-      : [];
-    return [{
+  if (result.nextCursor !== undefined && result.nextCursor !== null
+      && (typeof result.nextCursor !== "string" || result.nextCursor.length === 0)) {
+    fail("model/list returned invalid nextCursor");
+  }
+  const models = result.data.map((model, index) => {
+    if (typeof model?.id !== "string" || model.id.length === 0
+        || typeof model.isDefault !== "boolean"
+        || !Array.isArray(model.supportedReasoningEfforts)) {
+      fail(`model/list returned invalid model at index ${index}`);
+    }
+    const supportedReasoningEfforts = model.supportedReasoningEfforts.map((entry, effortIndex) => {
+      if (typeof entry?.reasoningEffort !== "string" || entry.reasoningEffort.length === 0) {
+        fail(`model/list returned invalid reasoning effort at model index ${index}, effort index ${effortIndex}`);
+      }
+      return entry.reasoningEffort;
+    });
+    return {
       id: model.id,
-      isDefault: model.isDefault === true,
-      supportedReasoningEfforts,
-    }];
+      isDefault: model.isDefault,
+      supportedReasoningEfforts: [...new Set(supportedReasoningEfforts)],
+    };
   });
+  return { models, nextCursor: result.nextCursor ?? null };
 }
 
 async function validateReasoningEffort(client, options) {
@@ -471,6 +509,7 @@ function buildThreadParams(options) {
     ...(options.model ? { model: options.model } : {}),
     ...(options.sandbox ? { sandbox: options.sandbox } : {}),
     ...(options.instructions ? { developerInstructions: options.instructions } : {}),
+    ...(options.effort ? { config: { model_reasoning_effort: options.effort } } : {}),
   };
 }
 
@@ -598,6 +637,9 @@ async function waitForTurn(client, options, turnId, threadId) {
   const openSideEffects = new Set();
   let completedTurn;
   let clientClosed;
+  let waitFinished = false;
+  let interruptGrace;
+  const timeoutError = new Error("codex app-server turn timed out after interrupt request. The turn was not replayed because it may have changed files or run commands.");
   const finish = new Promise((resolveFinish, rejectFinish) => {
     let removeNotifications = () => undefined;
     let removeClose = () => undefined;
@@ -635,28 +677,34 @@ async function waitForTurn(client, options, turnId, threadId) {
     }
   });
   let timedOut = false;
-  const timeout = setTimeout(async () => {
+  const timeout = setTimeout(() => {
     timedOut = true;
-    try {
-      await client.request("turn/interrupt", { threadId, turnId }, 10_000);
-    } catch {
-      // A dead connection is already surfaced through the close handler.
-    }
+    void client.request("turn/interrupt", { threadId, turnId }, 10_000).then(() => {
+      if (waitFinished) return;
+      interruptGrace = setTimeout(() => {
+        if (!waitFinished) client.invalidate(timeoutError);
+      }, TURN_INTERRUPT_GRACE_MS);
+    }).catch(() => {
+      if (!waitFinished) client.invalidate(timeoutError);
+    });
   }, timeoutMs);
   try {
     await finish;
   } catch (error) {
+    if (timedOut) throw timeoutError;
     const recoveredTexts = reviewTexts.length > 0 ? reviewTexts : assistantTexts;
     if (clientClosed && recoveredTexts.length > 0 && openSideEffects.size === 0) {
       return { status: "completed", text: recoveredTexts.join("\n\n"), recoveredAfterClose: true };
     }
     throw error;
   } finally {
+    waitFinished = true;
     clearTimeout(timeout);
+    clearTimeout(interruptGrace);
   }
   const text = reviewTexts.length > 0 ? reviewTexts.join("\n\n").trim() : terminalText(completedTurn, assistantTexts);
   if (timedOut) {
-    throw new Error("codex app-server turn timed out after interrupt request. The turn was not replayed because it may have changed files or run commands.");
+    throw timeoutError;
   }
   if (completedTurn?.status !== "completed") {
     const message = completedTurn?.error?.message ?? `turn finished with status ${completedTurn?.status ?? "unknown"}`;
@@ -691,7 +739,7 @@ async function runTurnOnClient(client, options, useLegacyControl = false) {
     await client.recordEvent({ method: "client/turnStarted", params: { threadId, turnId } });
     const result = await waitForTurn(client, options, turnId, threadId);
     await writeText(options.report, result.text ? `${result.text}\n` : "");
-    return { threadId, turnId, ...result };
+    return { threadId, turnId, model: options.model, effort: options.effort, ...result };
   } finally {
     options.onTurnFinished?.();
     await controlChannel?.close();
@@ -756,7 +804,7 @@ async function runReviewOnClient(client, options, useLegacyControl = false) {
     }
     const result = await waitForTurn(client, options, turnId, threadId);
     await writeText(options.report, result.text ? `${result.text}\n` : "");
-    return { threadId, turnId, ...result };
+    return { threadId, turnId, model: options.model, effort: options.effort, ...result };
   } finally {
     options.onTurnFinished?.();
     await controlChannel?.close();

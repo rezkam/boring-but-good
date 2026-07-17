@@ -241,13 +241,45 @@ check "event archive includes item and terminal notifications" $?
 app_server_out="$(fake_client complete turn --new --prompt "advertised max effort" --sandbox read-only \
     --effort max 2>&1)"; code=$?
 if [[ "$code" -eq 0 ]] \
-    && jq -e 'select(.method == "model/list")' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && jq -e 'select(.method == "model/list") | .params == {"includeHidden":true}' "$APP_SERVER_LOG" >/dev/null 2>&1 \
     && jq -e 'select(.method == "turn/start") | .params.effort == "max" and .params.model == "fake-default-model"' "$APP_SERVER_LOG" >/dev/null 2>&1; then
     check "app-server accepts max when the default model advertises it" 0
 else
     check "app-server accepts max when the default model advertises it" 1 \
         "exit=$code output: $(printf '%s' "$app_server_out" | head -c 200)"
 fi
+
+: > "$APP_SERVER_LOG"
+app_server_out="$(fake_client model-pagination turn --new --prompt "hidden model" --sandbox read-only \
+    --model fake-explicit-model --effort ultra 2>&1)"; code=$?
+if [[ "$code" -eq 0 ]] \
+    && [[ "$(jq -r 'select(.method == "model/list") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "2" ]] \
+    && jq -e 'select(.method == "model/list" and .params.cursor == "hidden-page-2") | .params.includeHidden == true' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && jq -e 'select(.method == "turn/start") | .params.model == "fake-explicit-model" and .params.effort == "ultra"' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "model discovery follows cursors to explicit hidden models" 0
+else
+    check "model discovery follows cursors to explicit hidden models" 1 \
+        "exit=$code output: $(printf '%s' "$app_server_out" | head -c 200) log: $(tail -c 400 "$APP_SERVER_LOG")"
+fi
+
+: > "$APP_SERVER_LOG"
+app_server_out="$(fake_client model-pagination-loop turn --new --prompt "cursor loop" --sandbox read-only \
+    --effort high 2>&1)"; code=$?
+if [[ "$code" -ne 0 ]] \
+    && printf '%s' "$app_server_out" | grep -qF "repeated cursor" \
+    && [[ "$(jq -r 'select(.method == "model/list") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "2" ]] \
+    && ! jq -e 'select(.method == "thread/start" or .method == "turn/start")' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "model discovery rejects repeated pagination cursors" 0
+else
+    check "model discovery rejects repeated pagination cursors" 1 \
+        "exit=$code output: $(printf '%s' "$app_server_out" | head -c 200)"
+fi
+
+: > "$APP_SERVER_LOG"
+app_server_out="$(fake_client model-malformed turn --new --prompt "malformed models" --sandbox read-only \
+    --effort high 2>&1)"; code=$?
+assert_exit_nonzero "model discovery rejects malformed response pagination" \
+    "$code" "$app_server_out" "invalid nextCursor"
 
 : > "$APP_SERVER_LOG"
 app_server_out="$(fake_client notification-race turn --new --prompt "race" --sandbox read-only 2>&1)"; code=$?
@@ -370,7 +402,20 @@ for approval_mode in accept accept-for-session; do
     fake_client approvals turn --new --prompt "approvals" --sandbox read-only --approval "$approval_mode" >/dev/null 2>&1; code=$?
     expected_decision="accept"
     [[ "$approval_mode" == "accept-for-session" ]] && expected_decision="acceptForSession"
-    if [[ "$code" -eq 0 ]] && jq -e --arg decision "$expected_decision" 'select(.id == 901 or .id == 902) | .result.decision == $decision' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    expected_scope="turn"
+    [[ "$approval_mode" == "accept-for-session" ]] && expected_scope="session"
+    if [[ "$code" -eq 0 ]] \
+        && jq -e --arg decision "$expected_decision" 'select(.id == 901 or .id == 902) | .result.decision == $decision' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+        && jq -e --arg scope "$expected_scope" '
+            select(.id == 903)
+            | .result.scope == $scope
+              and .result.permissions == {
+                "fileSystem": {
+                  "entries": [{"access":"write","path":{"type":"path","path":"/tmp/fake-app-server-output"}}],
+                  "globScanMaxDepth": 3
+                },
+                "network": {"enabled":true}
+              }' "$APP_SERVER_LOG" >/dev/null 2>&1; then
         check "approval mode $approval_mode maps to protocol decision" 0
     else
         check "approval mode $approval_mode maps to protocol decision" 1 "exit=$code"
@@ -383,6 +428,38 @@ if [[ "$code" -eq 0 ]] && printf '%s' "$app_server_out" | grep -qF "RECOVERED_AF
     check "client recovers a completed assistant item after transport close" 0
 else
     check "client recovers a completed assistant item after transport close" 1 "exit=$code output: $(printf '%s' "$app_server_out" | head -c 200)"
+fi
+
+MANAGED_TIMEOUT_DIR="$WORK/managed-timeout-no-completion"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=timeout-no-completion \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_TIMEOUT_DIR" \
+    --approval decline >/dev/null 2>&1
+timeout_started_at=$SECONDS
+managed_timeout_out="$(timeout 8 node "$SCRIPTS_DIR/codex-app-server.mjs" turn \
+    --session-dir "$MANAGED_TIMEOUT_DIR" --new --prompt "timeout without completion" \
+    --sandbox read-only --timeout 0.01 2>&1)"; managed_timeout_code=$?
+managed_timeout_elapsed=$((SECONDS - timeout_started_at))
+for _ in $(seq 1 100); do
+    [[ "$(jq -r '.status' "$MANAGED_TIMEOUT_DIR/state.json" 2>/dev/null)" == "closed" ]] && break
+    sleep 0.02
+done
+managed_timeout_status="$(jq -r '.status' "$MANAGED_TIMEOUT_DIR/state.json" 2>/dev/null)"
+if [[ "$managed_timeout_code" -ne 0 && "$managed_timeout_code" -ne 124 && "$managed_timeout_elapsed" -lt 8 ]] \
+    && printf '%s' "$managed_timeout_out" | grep -qF "was not replayed" \
+    && [[ "$managed_timeout_status" == "closed" ]] \
+    && [[ "$(jq -r 'select(.method == "turn/start") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "1" ]] \
+    && [[ "$(jq -r 'select(.method == "turn/interrupt") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "1" ]]; then
+    check "managed timeout invalidates host when interrupt has no completion" 0
+else
+    check "managed timeout invalidates host when interrupt has no completion" 1 \
+        "exit=$managed_timeout_code elapsed=$managed_timeout_elapsed status=$managed_timeout_status output: $(printf '%s' "$managed_timeout_out" | head -c 200)"
+fi
+if [[ "$managed_timeout_status" != "closed" ]]; then
+    timeout 2 node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown \
+        --session-dir "$MANAGED_TIMEOUT_DIR" --force >/dev/null 2>&1 || true
+    managed_timeout_host_pid="$(jq -r '.pid // empty' "$MANAGED_TIMEOUT_DIR/state.json" 2>/dev/null)"
+    [[ -n "$managed_timeout_host_pid" ]] && kill "$managed_timeout_host_pid" 2>/dev/null || true
 fi
 app_server_out="$(fake_client close-unresolved turn --new --prompt "close unsafe" --sandbox read-only 2>&1)"; code=$?
 if [[ "$code" -ne 0 ]] && ! printf '%s' "$app_server_out" | grep -q '"status":"completed"'; then
@@ -500,6 +577,29 @@ else
         "exit=$managed_explicit_model_code output: $(printf '%s' "$managed_explicit_model" | head -c 160)"
 fi
 node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_EFFORT_DIR" >/dev/null 2>&1
+
+# A managed review host can start without a process-wide effort override. The
+# validated review effort must be attached to its new thread, where native
+# review execution inherits it, and must not be invented on review/start.
+MANAGED_REVIEW_EFFORT_DIR="$WORK/managed-review-effort"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=review \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_REVIEW_EFFORT_DIR" \
+    --approval decline >/dev/null 2>&1
+managed_review_effort="$(node "$SCRIPTS_DIR/codex-app-server.mjs" review \
+    --session-dir "$MANAGED_REVIEW_EFFORT_DIR" --scope uncommitted \
+    --workdir "$NONBLOCK_REPO" --sandbox read-only --effort ultra 2>&1)"; managed_review_effort_code=$?
+if [[ "$managed_review_effort_code" -eq 0 ]] \
+    && printf '%s' "$managed_review_effort" | jq -e '.model == "fake-default-model" and .effort == "ultra"' >/dev/null 2>&1 \
+    && jq -e 'select(.method == "thread/start") | .params.config.model_reasoning_effort == "ultra"' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && jq -e 'select(.method == "review/start") | (.params | has("effort") | not)' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && ! jq -e 'select(.method == "fake/appServerArgs") | .params.args[] == "model_reasoning_effort=ultra"' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "managed native review applies effort through new thread config" 0
+else
+    check "managed native review applies effort through new thread config" 1 \
+        "exit=$managed_review_effort_code output: $(printf '%s' "$managed_review_effort" | head -c 200) log: $(tail -c 400 "$APP_SERVER_LOG")"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_REVIEW_EFFORT_DIR" >/dev/null 2>&1
 
 # Capability failures must be terminal before any operation starts. Use one
 # host to also prove failed validations share the same cached model list.

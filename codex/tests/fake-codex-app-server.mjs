@@ -14,6 +14,7 @@ const MODELS = [
     model: "fake-default-model",
     displayName: "Fake Default Model",
     description: "Default fake model with the complete advertised effort range.",
+    hidden: false,
     isDefault: true,
     defaultReasoningEffort: "medium",
     supportedReasoningEfforts: ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
@@ -24,12 +25,22 @@ const MODELS = [
     model: "fake-explicit-model",
     displayName: "Fake Explicit Model",
     description: "Non-default fake model with a smaller capability set.",
+    hidden: true,
     isDefault: false,
     defaultReasoningEffort: "high",
     supportedReasoningEfforts: ["high", "ultra"]
       .map((reasoningEffort) => ({ reasoningEffort, description: `Fake ${reasoningEffort} effort` })),
   },
 ];
+const REQUESTED_PERMISSIONS = {
+  fileSystem: {
+    entries: [
+      { access: "write", path: { type: "path", path: "/tmp/fake-app-server-output" } },
+    ],
+    globScanMaxDepth: 3,
+  },
+  network: { enabled: true },
+};
 const scenario = process.env.FAKE_APP_SERVER_SCENARIO ?? "complete";
 const logFile = process.env.FAKE_APP_SERVER_LOG;
 const pidFile = process.env.FAKE_CODEX_PID_FILE;
@@ -75,7 +86,19 @@ function closeAfter(messages) {
 function sendApprovalRequests() {
   send({ id: 901, method: "item/commandExecution/requestApproval", params: { threadId: THREAD_ID, turnId: TURN_ID, itemId: "command-1" } });
   send({ id: 902, method: "item/fileChange/requestApproval", params: { threadId: THREAD_ID, turnId: TURN_ID, itemId: "file-1" } });
-  send({ id: 903, method: "item/permissions/requestApproval", params: { threadId: THREAD_ID, turnId: TURN_ID, itemId: "permissions-1" } });
+  send({
+    id: 903,
+    method: "item/permissions/requestApproval",
+    params: {
+      cwd: "/tmp",
+      threadId: THREAD_ID,
+      turnId: TURN_ID,
+      itemId: "permissions-1",
+      permissions: REQUESTED_PERMISSIONS,
+      reason: "Fake permission request",
+      startedAtMs: Date.now(),
+    },
+  });
   send({ id: 904, method: "item/tool/requestUserInput", params: { threadId: THREAD_ID, turnId: TURN_ID, itemId: "input-1", questions: [] } });
   send({ id: 905, method: "mcpServer/elicitation/request", params: { threadId: THREAD_ID, turnId: TURN_ID, serverName: "fake", request: { mode: "form", message: "fake", requestedSchema: {} } } });
   send({ id: 906, method: "item/tool/call", params: { threadId: THREAD_ID, turnId: TURN_ID, itemId: "tool-1", tool: "fake", arguments: {} } });
@@ -101,6 +124,15 @@ function handle(message) {
     case "initialized":
       return;
     case "thread/start":
+      send({
+        id: message.id,
+        result: {
+          thread: { id: THREAD_ID },
+          model: message.params?.model ?? "fake-default-model",
+          reasoningEffort: message.params?.config?.model_reasoning_effort ?? null,
+        },
+      });
+      return;
     case "thread/resume":
       send({ id: message.id, result: { thread: { id: THREAD_ID } } });
       return;
@@ -113,7 +145,7 @@ function handle(message) {
         send(response);
       } else {
         send(response);
-        if (scenario === "complete" || scenario === "review-turn-id-mismatch") completed();
+        if (scenario === "complete" || scenario === "review-turn-id-mismatch" || scenario.startsWith("model-")) completed();
         if (scenario === "approvals") sendApprovalRequests();
         if (scenario === "auto-resolve") {
           send({ id: 904, method: "item/tool/requestUserInput", params: { threadId: THREAD_ID, turnId: TURN_ID, itemId: "input-1", questions: [], autoResolutionMs: 25 } });
@@ -198,6 +230,28 @@ function handle(message) {
           method: "thread/status/changed",
           params: { threadId: THREAD_ID, status: { type: "idle" } },
         });
+      }
+      if (scenario === "model-pagination") {
+        if (message.params?.includeHidden !== true) {
+          send({ id: message.id, error: { code: -32602, message: "model pagination requires includeHidden true" } });
+          return;
+        }
+        if (message.params?.cursor === undefined) {
+          send({ id: message.id, result: { data: [MODELS[0]], nextCursor: "hidden-page-2" } });
+        } else if (message.params.cursor === "hidden-page-2") {
+          send({ id: message.id, result: { data: [MODELS[1]], nextCursor: null } });
+        } else {
+          send({ id: message.id, error: { code: -32602, message: "unexpected model cursor" } });
+        }
+        return;
+      }
+      if (scenario === "model-pagination-loop") {
+        send({ id: message.id, result: { data: [MODELS[0]], nextCursor: "repeated-cursor" } });
+        return;
+      }
+      if (scenario === "model-malformed") {
+        send({ id: message.id, result: { data: MODELS, nextCursor: 42 } });
+        return;
       }
       send({ id: message.id, result: { data: MODELS, nextCursor: null } });
       return;

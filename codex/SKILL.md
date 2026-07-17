@@ -85,7 +85,7 @@ node scripts/codex-app-server.mjs respond \
 
 The response file must contain the exact result object required by the local version's generated schema. For command and file-change approvals, `--decision decline` is a convenient safe response.
 
-Use `--approval decline` for unattended work. It safely declines command and file-change approvals, returns empty user input, cancels MCP elicitation, and rejects unimplemented dynamic tools. Use `accept` or `accept-for-session` only for an isolated client and an explicit user decision.
+Use `--approval decline` for unattended work. It safely declines command and file-change approvals, grants no requested permissions for the turn, returns empty user input, cancels MCP elicitation, and rejects unimplemented dynamic tools. `accept` grants exactly the requested permission subset for the current turn. `accept-for-session` grants that same subset for the session. Use either accepting mode only for an isolated client and an explicit user decision.
 
 Never leave a server request unresolved without surfacing that the turn is waiting. `codex-status.sh` and `codex-exec-status.sh` report `pending_requests` and use the `waiting` verdict.
 
@@ -125,7 +125,7 @@ Do not modify the same working tree while an implementation turn is active.
 
 ## Reviews
 
-Use `review/start` through the managed host for uncommitted, base branch, commit, or custom targets. A review can receive a separate lens through developer instructions.
+Use `review/start` through the managed host for uncommitted, base branch, commit, or custom targets. A review can receive a separate lens through developer instructions. A validated review effort belongs in the new thread's `config.model_reasoning_effort`; do not add an unsupported effort field to `review/start`.
 
 Review findings are evidence, not facts. Verify each finding against code and tests. After code changes, prefer a new review thread because an old review thread retains its earlier diff context.
 
@@ -155,7 +155,7 @@ codex app-server generate-json-schema --out /tmp/codex-app-server-schema
 3. Treat `turn/start` as acceptance, not completion.
 4. Hold a session lease for every local command. Do not shut down with active leases.
 5. On transport close, reject all pending RPCs and local waiters with the same close error.
-6. Never replay an accepted turn after timeout or transport close. It may have run commands or changed files.
+6. Never replay an accepted turn after timeout or transport close. It may have run commands or changed files. After a timeout, interrupt once and wait only for a bounded terminal-notification grace period. Close the client and managed host if completion remains unknown.
 7. Resume a durable thread only from a new, empty session directory. Never reuse a stale inbox.
 8. Recover a completed assistant item after close only when no command, file change, MCP call, or dynamic tool remains unresolved.
 
