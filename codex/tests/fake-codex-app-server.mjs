@@ -5,6 +5,9 @@ import readline from "node:readline";
 
 const THREAD_ID = "00000000-0000-0000-0000-000000000001";
 const TURN_ID = "00000000-0000-0000-0000-000000000002";
+const PROVISIONAL_REVIEW_TURN_ID = "00000000-0000-0000-0000-000000000003";
+const OTHER_THREAD_ID = "00000000-0000-0000-0000-000000000004";
+const OTHER_TURN_ID = "00000000-0000-0000-0000-000000000005";
 const scenario = process.env.FAKE_APP_SERVER_SCENARIO ?? "complete";
 const logFile = process.env.FAKE_APP_SERVER_LOG;
 const pidFile = process.env.FAKE_CODEX_PID_FILE;
@@ -84,7 +87,7 @@ function handle(message) {
         send(response);
       } else {
         send(response);
-        if (scenario === "complete") completed();
+        if (scenario === "complete" || scenario === "review-turn-id-mismatch") completed();
         if (scenario === "approvals") sendApprovalRequests();
         if (scenario === "auto-resolve") {
           send({ id: 904, method: "item/tool/requestUserInput", params: { threadId: THREAD_ID, turnId: TURN_ID, itemId: "input-1", questions: [], autoResolutionMs: 25 } });
@@ -113,6 +116,24 @@ function handle(message) {
       return;
     }
     case "review/start":
+      if (scenario === "review-turn-id-mismatch" || scenario === "review-turn-id-mismatch-with-other") {
+        send({
+          method: "turn/started",
+          params: {
+            threadId: THREAD_ID,
+            turn: { id: PROVISIONAL_REVIEW_TURN_ID, status: "inProgress", items: [], error: null },
+          },
+        });
+      }
+      if (scenario === "review-turn-id-mismatch-with-other") {
+        send({
+          method: "turn/started",
+          params: {
+            threadId: OTHER_THREAD_ID,
+            turn: { id: OTHER_TURN_ID, status: "inProgress", items: [], error: null },
+          },
+        });
+      }
       send({ id: message.id, result: { turn: { id: TURN_ID, status: "inProgress", items: [], error: null }, reviewThreadId: THREAD_ID } });
       send({ method: "item/completed", params: { threadId: THREAD_ID, turnId: TURN_ID, completedAtMs: Date.now(), item: { type: "exitedReviewMode", id: "review-1", review: "NATIVE_REVIEW_OK" } } });
       send({ method: "turn/completed", params: { threadId: THREAD_ID, turn: { id: TURN_ID, status: "completed", items: [], error: null } } });

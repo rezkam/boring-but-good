@@ -455,6 +455,28 @@ else
     check "managed session shuts down cleanly after its leases finish" 1
 fi
 
+# Native review can advertise a provisional turn id in turn/started while
+# review/start and turn/completed use the real id. Completing that review must
+# clear only aliases on its thread, without disturbing another active thread.
+MANAGED_REVIEW_MISMATCH_DIR="$WORK/managed-review-mismatch"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=review-turn-id-mismatch-with-other \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_REVIEW_MISMATCH_DIR" --approval decline >/dev/null 2>&1
+managed_review_mismatch="$(node "$SCRIPTS_DIR/codex-app-server.mjs" review \
+    --session-dir "$MANAGED_REVIEW_MISMATCH_DIR" --scope uncommitted \
+    --workdir "$NONBLOCK_REPO" --sandbox read-only 2>&1)"; review_mismatch_code=$?
+managed_review_mismatch_status="$(node "$SCRIPTS_DIR/codex-app-server.mjs" status \
+    --session-dir "$MANAGED_REVIEW_MISMATCH_DIR" 2>&1)"; review_mismatch_status_code=$?
+if [[ "$review_mismatch_code" -eq 0 && "$review_mismatch_status_code" -eq 0 ]] \
+    && printf '%s' "$managed_review_mismatch_status" | jq -e \
+        '.activeTurns == [{"threadId":"00000000-0000-0000-0000-000000000004","turnId":"00000000-0000-0000-0000-000000000005","startedAt":.activeTurns[0].startedAt}]' >/dev/null 2>&1; then
+    check "completed review clears mismatched turn id without touching other threads" 0
+else
+    check "completed review clears mismatched turn id without touching other threads" 1 \
+        "review_exit=$review_mismatch_code status_exit=$review_mismatch_status_code status=$managed_review_mismatch_status"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_REVIEW_MISMATCH_DIR" --force >/dev/null 2>&1
+
 # Steering and interruption enter through separate local clients, but the
 # host sends both RPCs over the connection that owns the active turn.
 MANAGED_STEER_DIR="$WORK/managed-steer"
@@ -602,6 +624,52 @@ else
     check "tracked review records persistent App Server session" 1
 fi
 [[ -n "$FAKE_REVIEW_RUN_ID" ]] && "$SCRIPTS_DIR/codex-delete.sh" "$FAKE_REVIEW_RUN_ID" >/dev/null 2>&1
+
+# Exercise the full tracked-review lifecycle with the native provisional id
+# mismatch. An idle completed review must continue with a new turn and delete
+# cleanly instead of treating the stale provisional id as active.
+: > "$APP_SERVER_LOG"
+review_mismatch_wrapper_out="$(PATH="$FAKE_CODEX_BIN:$PATH" FAKE_CODEX_PID_FILE="$FAKE_CODEX_PID_FILE" \
+    FAKE_APP_SERVER_SCENARIO=review-turn-id-mismatch FAKE_APP_SERVER_LOG="$APP_SERVER_LOG" \
+    "$SCRIPTS_DIR/codex-review-start.sh" --wait --uncommitted \
+    --workdir "$NONBLOCK_REPO" 2>&1)"; review_mismatch_wrapper_code=$?
+FAKE_MISMATCH_REVIEW_RUN_ID="$("$SCRIPTS_DIR/codex-review-list.sh" 2 | awk -F'\t' 'NR>1 && $2=="review" {print $1; exit}')"
+FAKE_MISMATCH_REVIEW_DIR="$CODEX_REVIEW_HOME/runs/$FAKE_MISMATCH_REVIEW_RUN_ID"
+FAKE_MISMATCH_REVIEW_SESSION="$(jq -r '.session_dir // ""' "$FAKE_MISMATCH_REVIEW_DIR/meta.json" 2>/dev/null)"
+FAKE_MISMATCH_REVIEW_HOST_PID="$(jq -r '.pid // ""' "$FAKE_MISMATCH_REVIEW_DIR/meta.json" 2>/dev/null)"
+review_mismatch_host_status="$(node "$SCRIPTS_DIR/codex-app-server.mjs" status \
+    --session-dir "$FAKE_MISMATCH_REVIEW_SESSION" 2>&1)"; review_mismatch_host_status_code=$?
+if [[ "$review_mismatch_wrapper_code" -eq 0 && "$review_mismatch_host_status_code" -eq 0 ]] \
+    && printf '%s' "$review_mismatch_host_status" | jq -e '.activeTurns == []' >/dev/null 2>&1; then
+    check "completed tracked review has no active turn after mismatched start id" 0
+else
+    check "completed tracked review has no active turn after mismatched start id" 1 \
+        "review_exit=$review_mismatch_wrapper_code status=$review_mismatch_host_status output=$(printf '%s' "$review_mismatch_wrapper_out" | head -c 120)"
+fi
+
+: > "$APP_SERVER_LOG"
+review_mismatch_converse_out="$("$SCRIPTS_DIR/codex-review-converse.sh" \
+    "$FAKE_MISMATCH_REVIEW_RUN_ID" "continue after review" 2>&1)"; review_mismatch_converse_code=$?
+if [[ "$review_mismatch_converse_code" -eq 0 ]] \
+    && jq -e 'select(.method == "turn/start") | .params.input[0].text == "continue after review"' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && ! jq -e 'select(.method == "turn/steer")' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "converse starts a new turn after mismatched review completion" 0
+else
+    check "converse starts a new turn after mismatched review completion" 1 \
+        "exit=$review_mismatch_converse_code output=$(printf '%s' "$review_mismatch_converse_out" | head -c 160)"
+fi
+
+review_mismatch_delete_out="$("$SCRIPTS_DIR/codex-delete.sh" "$FAKE_MISMATCH_REVIEW_RUN_ID" 2>&1)"; review_mismatch_delete_code=$?
+if [[ "$review_mismatch_delete_code" -eq 0 && ! -d "$FAKE_MISMATCH_REVIEW_DIR" ]] \
+    && [[ -n "$FAKE_MISMATCH_REVIEW_HOST_PID" ]] \
+    && ! kill -0 "$FAKE_MISMATCH_REVIEW_HOST_PID" 2>/dev/null; then
+    check "delete shuts down idle host after mismatched review completion" 0
+else
+    check "delete shuts down idle host after mismatched review completion" 1 \
+        "exit=$review_mismatch_delete_code output=$(printf '%s' "$review_mismatch_delete_out" | head -c 160)"
+    [[ -n "$FAKE_MISMATCH_REVIEW_RUN_ID" ]] \
+        && "$SCRIPTS_DIR/codex-delete.sh" "$FAKE_MISMATCH_REVIEW_RUN_ID" --force >/dev/null 2>&1 || true
+fi
 
 nonblock_out="$(
     PATH="$FAKE_CODEX_BIN:$PATH" FAKE_CODEX_PID_FILE="$FAKE_CODEX_PID_FILE" FAKE_APP_SERVER_SCENARIO=hold timeout 10 bash -c '

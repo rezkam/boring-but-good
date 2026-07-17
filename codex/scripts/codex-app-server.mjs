@@ -1172,6 +1172,14 @@ async function runServe(options) {
       }
       if (notification.method === "turn/completed" && turnId) {
         changed = activeTurns.delete(turnId) || changed;
+        if (threadId) {
+          for (const [activeTurnId, activeTurn] of activeTurns) {
+            if (activeTurn.threadId === threadId) {
+              activeTurns.delete(activeTurnId);
+              changed = true;
+            }
+          }
+        }
       }
       if (changed) refreshState();
     });
