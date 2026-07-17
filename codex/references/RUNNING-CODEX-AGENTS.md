@@ -14,9 +14,9 @@ session/
 
 The directory is mode `0700`; files are mode `0600`. Prompts and server request payloads can be sensitive. Keep persistent sessions under `${XDG_STATE_HOME:-$HOME/.local/state}/boring-but-good/codex-app-server`, not in `/tmp` or a repository.
 
-The host generates a separate mode `0600` command key under the user state directory, outside the session tree and normal workspace-write roots. Clients HMAC-sign the canonical command body. The host requires a canonical UUID filename that matches the signed command id, consumes each id once, and constructs outbox paths only from the validated filename. The raw key never belongs in CLI arguments, state, events, logs, inbox files, or outbox files. Terminal shutdown and failed startup remove it.
+The host generates a separate mode `0600` command key under the user state directory, outside the session tree and normal workspace-write roots. Clients HMAC-sign the canonical command body, and the host HMAC-signs every success and error response. A client ignores unsigned or invalid outbox data without deleting it and waits for the valid host response. The host requires a canonical UUID filename that matches the signed command id, consumes each id once, and constructs outbox paths only from the validated filename. The raw key never belongs in CLI arguments, state, events, logs, inbox files, or outbox files. Terminal shutdown and failed startup remove it.
 
-Mode `0700` is not an authorization boundary against another same-UID process that can reach the directory, so authentication is required even with the safer default location. A `danger-full-access` turn can read same-user credentials and cannot be isolated by this filesystem design. Use a separate OS identity or container when the agent must not reach controller credentials.
+Mode `0700` is not an authorization boundary against another same-UID process that can reach the directory, so authentication is required even with the safer default location. For managed workspace-write, the host resolves symlinks and rejects a session directory or credential inside the workdir, canonical `/tmp`, or `$TMPDIR` before sending model, thread, turn, or review requests. A `danger-full-access` turn can read same-user credentials and cannot be isolated by this filesystem design. Use a separate OS identity or container when the agent must not reach controller credentials.
 
 Filesystem IPC does not replace the App Server protocol. It lets multiple local processes talk to the one host that owns App Server stdio. Only that host reads and writes JSON-RPC.
 
@@ -76,7 +76,7 @@ Interactive mode keeps reverse requests pending until `respond` supplies a resul
 
 For user-input requests with `autoResolutionMs`, state includes `autoResolveAt`. The host returns empty answers at that deadline unless a participant responds first.
 
-When App Server emits `serverRequest/resolved` before a local response, remove that request from pending state and do not send a late JSON-RPC response.
+Register each reverse request in pending state before awaiting event archival. When App Server emits `serverRequest/resolved` before a local response, remove that request from pending state and do not send a late JSON-RPC response, even when archival storage is delayed.
 
 Unattended mode uses conservative defaults:
 

@@ -14,6 +14,7 @@ import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
+import { validateManagedControllerPlacement } from "./app-server-placement.mjs";
 
 const CLIENT_INFO = {
   name: "boring-but-good-codex-skill",
@@ -133,13 +134,15 @@ async function readPrompt(options) {
 async function writeText(path, text) {
   if (!path) return;
   await mkdir(dirname(resolve(path)), { recursive: true });
-  await writeFile(path, text, "utf8");
+  await writeFile(path, text, { encoding: "utf8", mode: 0o600 });
+  await chmod(path, 0o600);
 }
 
 async function appendJson(path, value) {
   if (!path) return;
   await mkdir(dirname(resolve(path)), { recursive: true });
-  await appendFile(path, `${JSON.stringify(value)}\n`, "utf8");
+  await appendFile(path, `${JSON.stringify(value)}\n`, { encoding: "utf8", mode: 0o600 });
+  await chmod(path, 0o600);
 }
 
 async function writeJsonAtomic(path, value, mode = 0o600) {
@@ -230,23 +233,55 @@ function signSessionCommand(body, key) {
     .digest("hex");
 }
 
-function commandIsAuthenticated(command, key) {
-  if (command?.version !== COMMAND_VERSION || command?.auth?.algorithm !== "hmac-sha256") return false;
-  if (!COMMAND_MAC_PATTERN.test(command.auth.mac ?? "")) return false;
+function authenticatedMacMatches(body, auth, key) {
+  if (auth?.algorithm !== "hmac-sha256" || !COMMAND_MAC_PATTERN.test(auth.mac ?? "")) return false;
   let expected;
   try {
-    expected = signSessionCommand(sessionCommandBody(
+    expected = signSessionCommand(body, key);
+  } catch {
+    return false;
+  }
+  const actualBytes = Buffer.from(auth.mac, "hex");
+  const expectedBytes = Buffer.from(expected, "hex");
+  return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes);
+}
+
+function commandIsAuthenticated(command, key) {
+  if (command?.version !== COMMAND_VERSION) return false;
+  let body;
+  try {
+    body = sessionCommandBody(
       command.id,
       command.action,
       command.payload,
       command.submittedAt,
-    ), key);
+    );
   } catch {
     return false;
   }
-  const actualBytes = Buffer.from(command.auth.mac, "hex");
-  const expectedBytes = Buffer.from(expected, "hex");
-  return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes);
+  return authenticatedMacMatches(body, command.auth, key);
+}
+
+function sessionResponseBody(id, response) {
+  const hasResult = Object.prototype.hasOwnProperty.call(response, "result");
+  const hasError = Object.prototype.hasOwnProperty.call(response, "error");
+  if (hasResult === hasError) fail("session response must contain exactly one of result or error");
+  return JSON.parse(JSON.stringify({
+    version: COMMAND_VERSION,
+    id,
+    ...(hasResult ? { result: response.result ?? null } : { error: response.error }),
+  }));
+}
+
+function responseIsAuthenticated(response, id, key) {
+  if (response?.version !== COMMAND_VERSION || response?.id !== id) return false;
+  let body;
+  try {
+    body = sessionResponseBody(id, response);
+  } catch {
+    return false;
+  }
+  return authenticatedMacMatches(body, response.auth, key);
 }
 
 function delay(milliseconds) {
@@ -472,13 +507,23 @@ class CodexAppServerClient {
 
   async handleServerRequest(message) {
     try {
-      await this.recordEvent({
-        method: "client/serverRequest",
-        params: { requestId: String(message.id), method: message.method, params: message.params ?? {} },
-      });
-      const result = this.options.serverRequestHandler
-        ? await this.options.serverRequestHandler(message, this)
-        : this.defaultServerRequestResponse(message);
+      const resultPromise = Promise.resolve(
+        this.options.serverRequestHandler
+          ? this.options.serverRequestHandler(message, this)
+          : this.defaultServerRequestResponse(message),
+      );
+      resultPromise.catch(() => undefined);
+      try {
+        await this.recordEvent({
+          method: "client/serverRequest",
+          params: { requestId: String(message.id), method: message.method, params: message.params ?? {} },
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        this.invalidate(new AppServerClosedError(`failed to archive app-server reverse request: ${detail}`));
+        return;
+      }
+      const result = await resultPromise;
       if (result === SERVER_REQUEST_CLEARED) {
         await this.recordEvent({
           method: "client/serverRequestCleared",
@@ -807,6 +852,12 @@ async function waitForTurn(client, options, turnId, threadId) {
 
 async function runTurnOnClient(client, options, useLegacyControl = false) {
   if (options.new && options.thread) fail("turn accepts either --new or --thread ID, not both");
+  await validateManagedControllerPlacement({
+    sandbox: options.sandbox,
+    workdir: options.workdir,
+    sessionDir: options.managedSessionPath,
+    credentialPath: options.managedCredentialPath,
+  });
   const prompt = await readPrompt(options);
   await validateReasoningEffort(client, options);
   let controlChannel;
@@ -877,6 +928,12 @@ async function runReviewOnClient(client, options, useLegacyControl = false) {
   else options.instructions = reviewInstructions;
   options.new = true;
   options.sandbox ??= "read-only";
+  await validateManagedControllerPlacement({
+    sandbox: options.sandbox,
+    workdir: options.workdir,
+    sessionDir: options.managedSessionPath,
+    credentialPath: options.managedCredentialPath,
+  });
   await validateReasoningEffort(client, options);
   let controlChannel;
   try {
@@ -1003,11 +1060,13 @@ async function sendSessionCommand(options, action, payload = {}, timeoutMs = 60_
   while (Date.now() < deadline) {
     try {
       const response = JSON.parse(await readFile(responsePath, "utf8"));
-      await unlink(responsePath).catch(() => undefined);
-      if (response.error) throw new Error(response.error.message ?? String(response.error));
-      return response.result;
+      if (responseIsAuthenticated(response, id, key)) {
+        await unlink(responsePath).catch(() => undefined);
+        if (response.error) throw new Error(response.error.message ?? String(response.error));
+        return response.result;
+      }
     } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
+      if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
     }
     const current = await readFile(`${path}/state.json`, "utf8")
       .then(JSON.parse)
@@ -1183,7 +1242,6 @@ async function runServe(options) {
   await persistState();
 
   const pendingServerRequests = new Map();
-  const clearedServerRequests = new Set();
   const activeTurns = new Map();
   const threads = new Set();
   const clearActiveTurnsForThread = (threadId) => {
@@ -1234,9 +1292,6 @@ async function runServe(options) {
         entry.timer.unref?.();
       }
       pendingServerRequests.set(requestId, entry);
-      if (clearedServerRequests.delete(requestId)) {
-        resolveRequest(SERVER_REQUEST_CLEARED);
-      }
       refreshState();
     }).finally(() => {
       const entry = pendingServerRequests.get(requestId);
@@ -1268,6 +1323,8 @@ async function runServe(options) {
         const commandOptions = {
           ...payload.options,
           command: command.action,
+          managedSessionPath: path,
+          managedCredentialPath: credential.credentialPath,
           loadedThreads: threads,
           onTurnStarted(active) {
             activeId = active.turnId;
@@ -1347,7 +1404,13 @@ async function runServe(options) {
   const tasks = new Set();
   const consumedCommandIds = new Set();
   const activeCommandIds = new Set();
-  const writeCommandResponse = (id, value) => writeJsonAtomic(join(path, "outbox", `${id}.json`), value);
+  const writeCommandResponse = (id, value) => {
+    const body = sessionResponseBody(id, value);
+    return writeJsonAtomic(join(path, "outbox", `${id}.json`), {
+      ...body,
+      auth: { algorithm: "hmac-sha256", mac: signSessionCommand(body, credential.key) },
+    });
+  };
   const scanCommands = async () => {
     const inboxPath = join(path, "inbox");
     const names = await readdir(inboxPath).catch((error) => error?.code === "ENOENT" ? [] : Promise.reject(error));
@@ -1441,11 +1504,6 @@ async function runServe(options) {
         if (pending) {
           pending.resolve(SERVER_REQUEST_CLEARED);
           changed = true;
-        } else {
-          const requestId = String(notification.params.requestId);
-          clearedServerRequests.add(requestId);
-          const cleanup = setTimeout(() => clearedServerRequests.delete(requestId), 1_000);
-          cleanup.unref?.();
         }
       }
       if (threadId && !threads.has(threadId)) {

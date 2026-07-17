@@ -82,6 +82,10 @@ assert_exit_nonzero() {
     fi
 }
 
+mode_bits() {
+    stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
+}
+
 make_fixture_repo() {
     mkdir -p "$FIXTURE_REPO"
     git -C "$FIXTURE_REPO" init -q
@@ -237,6 +241,43 @@ check "new turn writes final report" $?
 jq -e 'select(.method == "item/completed")' "$APP_SERVER_EVENTS" >/dev/null 2>&1 \
     && jq -e 'select(.method == "turn/completed")' "$APP_SERVER_EVENTS" >/dev/null 2>&1
 check "event archive includes item and terminal notifications" $?
+
+: > "$APP_SERVER_LOG"
+isolated_workspace_out="$(fake_client complete turn --new --prompt "isolated workspace" \
+    --workdir "$NONBLOCK_REPO" --sandbox workspace-write 2>&1)"; isolated_workspace_code=$?
+if [[ "$isolated_workspace_code" -eq 0 ]] \
+    && printf '%s' "$isolated_workspace_out" | grep -qF "APP_SERVER_FAKE_OK" \
+    && jq -e 'select(.method == "turn/start") | .params.sandboxPolicy.type == "workspaceWrite"' \
+        "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "direct isolated workspace-write remains available without managed controller validation" 0
+else
+    check "direct isolated workspace-write remains available without managed controller validation" 1 \
+        "exit=$isolated_workspace_code output=$(printf '%s' "$isolated_workspace_out" | head -c 180)"
+fi
+
+DIRECT_MODE_DIR="$WORK/direct-sensitive-modes"
+(
+    umask 022
+    mkdir -p "$DIRECT_MODE_DIR"
+    : > "$DIRECT_MODE_DIR/events.jsonl"
+    : > "$DIRECT_MODE_DIR/report.md"
+    : > "$DIRECT_MODE_DIR/thread.id"
+    chmod 644 "$DIRECT_MODE_DIR/events.jsonl" "$DIRECT_MODE_DIR/report.md" "$DIRECT_MODE_DIR/thread.id"
+    fake_client complete turn --new --prompt "mode check" --sandbox read-only \
+        --events "$DIRECT_MODE_DIR/events.jsonl" \
+        --report "$DIRECT_MODE_DIR/report.md" \
+        --thread-out "$DIRECT_MODE_DIR/thread.id" >/dev/null 2>&1
+)
+direct_modes_ok="true"
+for sensitive_file in "$DIRECT_MODE_DIR/events.jsonl" "$DIRECT_MODE_DIR/report.md" "$DIRECT_MODE_DIR/thread.id"; do
+    [[ "$(mode_bits "$sensitive_file")" == "600" ]] || direct_modes_ok="false"
+done
+if [[ "$direct_modes_ok" == "true" ]]; then
+    check "direct App Server artifacts are private under a permissive umask" 0
+else
+    check "direct App Server artifacts are private under a permissive umask" 1 \
+        "events=$(mode_bits "$DIRECT_MODE_DIR/events.jsonl") report=$(mode_bits "$DIRECT_MODE_DIR/report.md") thread=$(mode_bits "$DIRECT_MODE_DIR/thread.id")"
+fi
 
 : > "$APP_SERVER_LOG"
 app_server_out="$(fake_client complete turn --new --prompt "advertised max effort" --sandbox read-only \
@@ -539,6 +580,122 @@ else
     check "managed session shuts down cleanly after its leases finish" 1
 fi
 
+# Managed workspace-write must keep its controller and HMAC credential out of
+# every effective writable root. The fake session root is under /tmp, and the
+# second session is also nested directly inside the requested workdir. Both
+# must fail before any durable thread or turn/review RPC is accepted.
+UNSAFE_TMP_SESSION="$WORK/unsafe-workspace-session"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=complete \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$UNSAFE_TMP_SESSION" \
+    --approval decline >/dev/null 2>&1
+: > "$APP_SERVER_LOG"
+unsafe_turn_out="$(node "$SCRIPTS_DIR/codex-app-server.mjs" turn \
+    --session-dir "$UNSAFE_TMP_SESSION" --new --prompt "unsafe placement" \
+    --workdir "$NONBLOCK_REPO" --sandbox workspace-write 2>&1)"; unsafe_turn_code=$?
+if [[ "$unsafe_turn_code" -ne 0 ]] \
+    && printf '%s' "$unsafe_turn_out" | grep -qF "managed workspace-write" \
+    && ! jq -e 'select(.method == "thread/start" or .method == "turn/start")' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "managed workspace-write rejects a controller under canonical /tmp before thread RPCs" 0
+else
+    check "managed workspace-write rejects a controller under canonical /tmp before thread RPCs" 1 \
+        "exit=$unsafe_turn_code output=$(printf '%s' "$unsafe_turn_out" | head -c 180) rpc=$(tail -c 300 "$APP_SERVER_LOG")"
+fi
+: > "$APP_SERVER_LOG"
+danger_turn_out="$(node "$SCRIPTS_DIR/codex-app-server.mjs" turn \
+    --session-dir "$UNSAFE_TMP_SESSION" --new --prompt "explicit danger placement" \
+    --workdir "$NONBLOCK_REPO" --sandbox danger-full-access 2>&1)"; danger_turn_code=$?
+if [[ "$danger_turn_code" -eq 0 ]] \
+    && jq -e 'select(.method == "turn/start") | .params.sandboxPolicy.type == "dangerFullAccess"' \
+        "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "managed danger-full-access permits an explicitly selected controller placement" 0
+else
+    check "managed danger-full-access permits an explicitly selected controller placement" 1 \
+        "exit=$danger_turn_code output=$(printf '%s' "$danger_turn_out" | head -c 180)"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$UNSAFE_TMP_SESSION" >/dev/null 2>&1 || true
+
+UNSAFE_WORKDIR_SESSION="$NONBLOCK_REPO/unsafe-review-session"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=review \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$UNSAFE_WORKDIR_SESSION" \
+    --approval decline >/dev/null 2>&1
+: > "$APP_SERVER_LOG"
+unsafe_review_out="$(node "$SCRIPTS_DIR/codex-app-server.mjs" review \
+    --session-dir "$UNSAFE_WORKDIR_SESSION" --scope uncommitted \
+    --workdir "$NONBLOCK_REPO" --sandbox workspace-write 2>&1)"; unsafe_review_code=$?
+if [[ "$unsafe_review_code" -ne 0 ]] \
+    && printf '%s' "$unsafe_review_out" | grep -qF "managed workspace-write" \
+    && ! jq -e 'select(.method == "thread/start" or .method == "review/start")' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "managed native workspace-write review rejects a controller inside its workdir before review RPCs" 0
+else
+    check "managed native workspace-write review rejects a controller inside its workdir before review RPCs" 1 \
+        "exit=$unsafe_review_code output=$(printf '%s' "$unsafe_review_out" | head -c 180) rpc=$(tail -c 300 "$APP_SERVER_LOG")"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$UNSAFE_WORKDIR_SESSION" >/dev/null 2>&1 || true
+
+safe_placement_out="$(node --input-type=module -e '
+    import { pathToFileURL } from "node:url";
+    const module = await import(pathToFileURL(process.argv[1]));
+    await module.validateManagedControllerPlacement({
+      sandbox: "workspace-write",
+      workdir: process.argv[2],
+      sessionDir: "/usr/bin",
+      credentialPath: "/etc/hosts",
+      tmpdir: "/tmp",
+    });
+    process.stdout.write("SAFE_PLACEMENT_OK");
+  ' "$SCRIPTS_DIR/app-server-placement.mjs" "$NONBLOCK_REPO" 2>&1)"; safe_placement_code=$?
+if [[ "$safe_placement_code" -eq 0 && "$safe_placement_out" == "SAFE_PLACEMENT_OK" ]]; then
+    check "managed workspace-write placement validator accepts controller paths outside writable roots" 0
+else
+    check "managed workspace-write placement validator accepts controller paths outside writable roots" 1 \
+        "exit=$safe_placement_code output=$(printf '%s' "$safe_placement_out" | head -c 180)"
+fi
+
+unsafe_session_out="$(node --input-type=module -e '
+    import { pathToFileURL } from "node:url";
+    const module = await import(pathToFileURL(process.argv[1]));
+    await module.validateManagedControllerPlacement({
+      sandbox: "workspace-write",
+      workdir: "/usr/share",
+      sessionDir: process.argv[2],
+      credentialPath: "/etc/hosts",
+      tmpdir: "/tmp",
+    });
+  ' "$SCRIPTS_DIR/app-server-placement.mjs" "$NONBLOCK_REPO" 2>&1)"; unsafe_session_code=$?
+CANONICAL_TMP="$(cd /tmp && pwd -P)"
+if [[ "$unsafe_session_code" -ne 0 ]] \
+    && printf '%s' "$unsafe_session_out" | grep -qF "managed workspace-write" \
+    && printf '%s' "$unsafe_session_out" | grep -qF "$CANONICAL_TMP"; then
+    check "managed workspace-write placement rejects an unsafe canonical session with a safe credential" 0
+else
+    check "managed workspace-write placement rejects an unsafe canonical session with a safe credential" 1 \
+        "exit=$unsafe_session_code canonical_tmp=$CANONICAL_TMP output=$(printf '%s' "$unsafe_session_out" | head -c 180)"
+fi
+
+PLACEMENT_KEY="$NONBLOCK_REPO/controller.key"
+printf 'key\n' > "$PLACEMENT_KEY"
+unsafe_key_out="$(node --input-type=module -e '
+    import { pathToFileURL } from "node:url";
+    const module = await import(pathToFileURL(process.argv[1]));
+    await module.validateManagedControllerPlacement({
+      sandbox: "workspace-write",
+      workdir: process.argv[2],
+      sessionDir: "/usr/bin",
+      credentialPath: process.argv[3],
+      tmpdir: "/tmp",
+    });
+  ' "$SCRIPTS_DIR/app-server-placement.mjs" "$NONBLOCK_REPO" "$PLACEMENT_KEY" 2>&1)"; unsafe_key_code=$?
+if [[ "$unsafe_key_code" -ne 0 ]] \
+    && printf '%s' "$unsafe_key_out" | grep -qF "managed workspace-write" \
+    && printf '%s' "$unsafe_key_out" | grep -qF "controller.key"; then
+    check "managed workspace-write placement rejects a credential inside its workdir" 0
+else
+    check "managed workspace-write placement rejects a credential inside its workdir" 1 \
+        "exit=$unsafe_key_code output=$(printf '%s' "$unsafe_key_out" | head -c 180)"
+fi
+
 # A generic request holds a host lease after its command file is accepted.
 # Non-force shutdown must not close the shared transport until that lease is
 # released, even when there is no active turn or reverse request.
@@ -595,6 +752,53 @@ else
         "credential=${AUTH_CREDENTIAL_FILE:-missing}"
 fi
 
+# A writable outbox is untrusted. Stop the host, let a legitimate client
+# submit one signed request, then plant an unsigned success before the host
+# can answer. The client must ignore it without replaying the command and
+# accept only the later authenticated host response.
+MANAGED_FORGED_OUTBOX_DIR="$WORK/managed-forged-outbox"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=delayed-request \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_FORGED_OUTBOX_DIR" \
+    --approval decline >/dev/null 2>&1
+FORGED_OUTBOX_HOST_PID="$(jq -r '.pid' "$MANAGED_FORGED_OUTBOX_DIR/state.json")"
+kill -STOP "$FORGED_OUTBOX_HOST_PID"
+node "$SCRIPTS_DIR/codex-app-server.mjs" request --session-dir "$MANAGED_FORGED_OUTBOX_DIR" \
+    --method account/logout --no-params >"$WORK/forged-outbox-client.json" 2>&1 &
+FORGED_OUTBOX_CLIENT_PID=$!
+FORGED_OUTBOX_NAME=""
+for _ in $(seq 1 100); do
+    FORGED_OUTBOX_NAME="$(find "$MANAGED_FORGED_OUTBOX_DIR/inbox" -maxdepth 1 -type f -name '*.json' -exec basename {} \; | head -n 1)"
+    [[ -n "$FORGED_OUTBOX_NAME" ]] && break
+    sleep 0.02
+done
+kill -STOP "$FORGED_OUTBOX_CLIENT_PID"
+FORGED_OUTBOX_ID="${FORGED_OUTBOX_NAME%.json}"
+jq -n --arg id "$FORGED_OUTBOX_ID" '{id:$id,result:{forged:true}}' > "$WORK/forged-outbox.tmp"
+mv "$WORK/forged-outbox.tmp" "$MANAGED_FORGED_OUTBOX_DIR/outbox/$FORGED_OUTBOX_NAME"
+kill -CONT "$FORGED_OUTBOX_CLIENT_PID"
+sleep 0.1
+if [[ -f "$MANAGED_FORGED_OUTBOX_DIR/outbox/$FORGED_OUTBOX_NAME" ]]; then
+    forged_outbox_retained="true"
+else
+    forged_outbox_retained="false"
+fi
+kill -CONT "$FORGED_OUTBOX_HOST_PID"
+if wait "$FORGED_OUTBOX_CLIENT_PID"; then forged_outbox_code=0; else forged_outbox_code=$?; fi
+for _ in $(seq 1 100); do
+    [[ "$(jq -r 'select(.method == "account/logout") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "1" ]] && break
+    sleep 0.02
+done
+forged_outbox_calls="$(jq -r 'select(.method == "account/logout") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')"
+if [[ "$forged_outbox_code" -eq 0 && "$forged_outbox_calls" == "1" && "$forged_outbox_retained" == "true" ]] \
+    && jq -e '. == {}' "$WORK/forged-outbox-client.json" >/dev/null 2>&1; then
+    check "managed client ignores forged outbox success and accepts one authenticated host response" 0
+else
+    check "managed client ignores forged outbox success and accepts one authenticated host response" 1 \
+        "exit=$forged_outbox_code calls=$forged_outbox_calls retained=$forged_outbox_retained output=$(head -c 180 "$WORK/forged-outbox-client.json")"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_FORGED_OUTBOX_DIR" --force >/dev/null 2>&1 || true
+
 ATOMIC_TEMP_NAME="44444444-4444-4444-8444-444444444444.json.12345.55555555-5555-4555-8555-555555555555.tmp"
 printf 'atomic writer temporary bytes\n' > "$MANAGED_AUTH_DIR/inbox/$ATOMIC_TEMP_NAME"
 node "$SCRIPTS_DIR/codex-app-server.mjs" request --session-dir "$MANAGED_AUTH_DIR" \
@@ -614,7 +818,9 @@ mv "$WORK/unsigned-command.tmp" "$MANAGED_AUTH_DIR/inbox/$UNSIGNED_ID.json"
 for _ in $(seq 1 100); do [[ -f "$MANAGED_AUTH_DIR/outbox/$UNSIGNED_ID.json" ]] && break; sleep 0.02; done
 unsigned_response="$(jq -r '.error.message // empty' "$MANAGED_AUTH_DIR/outbox/$UNSIGNED_ID.json" 2>/dev/null)"
 if [[ "$(jq -r 'select(.method == "account/logout") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "0" ]] \
-    && printf '%s' "$unsigned_response" | grep -qiF "authentication"; then
+    && printf '%s' "$unsigned_response" | grep -qiF "authentication" \
+    && jq -e '.auth.algorithm == "hmac-sha256" and (.auth.mac | length == 64)' \
+        "$MANAGED_AUTH_DIR/outbox/$UNSIGNED_ID.json" >/dev/null 2>&1; then
     check "managed host rejects unsigned generic commands" 0
 else
     check "managed host rejects unsigned generic commands" 1 "response=$unsigned_response log=$(tail -c 200 "$APP_SERVER_LOG")"
@@ -628,7 +834,9 @@ mv "$WORK/forged-command.tmp" "$MANAGED_AUTH_DIR/inbox/$FORGED_ID.json"
 for _ in $(seq 1 100); do [[ -f "$MANAGED_AUTH_DIR/outbox/$FORGED_ID.json" ]] && break; sleep 0.02; done
 forged_response="$(jq -r '.error.message // empty' "$MANAGED_AUTH_DIR/outbox/$FORGED_ID.json" 2>/dev/null)"
 if [[ "$(jq -r 'select(.method == "account/logout") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "0" ]] \
-    && printf '%s' "$forged_response" | grep -qiF "authentication"; then
+    && printf '%s' "$forged_response" | grep -qiF "authentication" \
+    && jq -e '.auth.algorithm == "hmac-sha256" and (.auth.mac | length == 64)' \
+        "$MANAGED_AUTH_DIR/outbox/$FORGED_ID.json" >/dev/null 2>&1; then
     check "managed host rejects forged command signatures" 0
 else
     check "managed host rejects forged command signatures" 1 "response=$forged_response log=$(tail -c 200 "$APP_SERVER_LOG")"
@@ -656,7 +864,9 @@ for _ in $(seq 1 100); do
 done
 if [[ ! -e "$WORK/escaped-auth-command.json" ]] \
     && [[ "$(jq -r 'select(.method == "account/logout") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "0" ]] \
-    && [[ -f "$MANAGED_AUTH_DIR/outbox/$TRAVERSAL_FILE_ID.json" ]]; then
+    && [[ -f "$MANAGED_AUTH_DIR/outbox/$TRAVERSAL_FILE_ID.json" ]] \
+    && jq -e '.auth.algorithm == "hmac-sha256" and (.auth.mac | length == 64)' \
+        "$MANAGED_AUTH_DIR/outbox/$TRAVERSAL_FILE_ID.json" >/dev/null 2>&1; then
     check "managed host validates command ids before constructing outbox paths" 0
 else
     check "managed host validates command ids before constructing outbox paths" 1 \
@@ -698,7 +908,9 @@ for _ in $(seq 1 100); do [[ -f "$MANAGED_REPLAY_DIR/outbox/$REPLAY_NAME" ]] && 
 replay_response="$(jq -r '.error.message // empty' "$MANAGED_REPLAY_DIR/outbox/$REPLAY_NAME" 2>/dev/null)"
 if [[ "$replay_first_code" -eq 0 && "$replay_has_mac" == "true" ]] \
     && [[ "$(jq -r 'select(.method == "account/logout") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "1" ]] \
-    && printf '%s' "$replay_response" | grep -qiF "replay"; then
+    && printf '%s' "$replay_response" | grep -qiF "replay" \
+    && jq -e '.auth.algorithm == "hmac-sha256" and (.auth.mac | length == 64)' \
+        "$MANAGED_REPLAY_DIR/outbox/$REPLAY_NAME" >/dev/null 2>&1; then
     check "managed host rejects replay without executing the RPC twice" 0
 else
     check "managed host rejects replay without executing the RPC twice" 1 \
@@ -975,6 +1187,35 @@ else
 fi
 node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_APPROVAL_DIR" >/dev/null 2>&1
 
+# The reverse-request broker registers before event archival. If that archive
+# then fails, the connection must become terminal so the registered request is
+# rejected and removed instead of leaving a ready host permanently waiting.
+MANAGED_ARCHIVE_FAILURE_DIR="$WORK/managed-archive-failure"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=approvals \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_ARCHIVE_FAILURE_DIR" --approval interactive >/dev/null 2>&1
+rm -f "$MANAGED_ARCHIVE_FAILURE_DIR/events.jsonl"
+mkdir "$MANAGED_ARCHIVE_FAILURE_DIR/events.jsonl"
+archive_failure_out="$(timeout 8 node "$SCRIPTS_DIR/codex-app-server.mjs" turn \
+    --session-dir "$MANAGED_ARCHIVE_FAILURE_DIR" --new --prompt "archive failure" \
+    --sandbox read-only 2>&1)"; archive_failure_code=$?
+for _ in $(seq 1 100); do
+    [[ "$(jq -r '.status // empty' "$MANAGED_ARCHIVE_FAILURE_DIR/state.json" 2>/dev/null)" == "closed" ]] && break
+    sleep 0.02
+done
+archive_failure_status="$(jq -c '{status,pendingRequests,error}' "$MANAGED_ARCHIVE_FAILURE_DIR/state.json" 2>/dev/null)"
+if [[ "$archive_failure_code" -ne 0 && "$archive_failure_code" -ne 124 ]] \
+    && printf '%s' "$archive_failure_status" | jq -e '.status == "closed" and .pendingRequests == []' >/dev/null 2>&1 \
+    && ! jq -e 'select((.id >= 901 and .id <= 906) and has("method") == false and has("result"))' \
+        "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "reverse-request archival failure closes the host and rejects registered waiters" 0
+else
+    check "reverse-request archival failure closes the host and rejects registered waiters" 1 \
+        "exit=$archive_failure_code status=$(printf '%s' "$archive_failure_status" | head -c 220) output=$(printf '%s' "$archive_failure_out" | head -c 160)"
+fi
+timeout 8 node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown \
+    --session-dir "$MANAGED_ARCHIVE_FAILURE_DIR" --force >/dev/null 2>&1 || true
+
 MANAGED_AUTO_DIR="$WORK/managed-auto-resolution"
 : > "$APP_SERVER_LOG"
 PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=auto-resolve \
@@ -1005,6 +1246,42 @@ else
     check "managed session removes server-cleared requests without a late response" 1 "exit=$cleared_code status=$cleared_status"
 fi
 node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_CLEARED_DIR" >/dev/null 2>&1
+
+# Delay archival for longer than the old one-second cleared-id cache. The
+# broker must still learn about the reverse request before the matching
+# request-cleared notification can arrive, and it must never send a response.
+MANAGED_DELAYED_CLEAR_DIR="$WORK/managed-delayed-cleared-request"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=request-cleared \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_DELAYED_CLEAR_DIR" --approval interactive >/dev/null 2>&1
+rm -f "$MANAGED_DELAYED_CLEAR_DIR/events.jsonl"
+mkfifo "$MANAGED_DELAYED_CLEAR_DIR/events.jsonl"
+chmod 600 "$MANAGED_DELAYED_CLEAR_DIR/events.jsonl"
+timeout 10 node "$SCRIPTS_DIR/codex-app-server.mjs" turn --session-dir "$MANAGED_DELAYED_CLEAR_DIR" \
+    --new --prompt "delayed cleared" --sandbox read-only >"$WORK/managed-delayed-cleared-turn.json" 2>&1 &
+MANAGED_DELAYED_CLEAR_TURN_PID=$!
+sleep 1.3
+timeout 10 bash -c 'while cat "$1"; do :; done' _ "$MANAGED_DELAYED_CLEAR_DIR/events.jsonl" \
+    >"$WORK/managed-delayed-cleared-events.jsonl" &
+MANAGED_DELAYED_CLEAR_DRAIN_PID=$!
+if wait "$MANAGED_DELAYED_CLEAR_TURN_PID"; then delayed_clear_code=0; else delayed_clear_code=$?; fi
+for _ in $(seq 1 100); do
+    jq -e '.pendingRequests == []' "$MANAGED_DELAYED_CLEAR_DIR/state.json" >/dev/null 2>&1 && break
+    sleep 0.02
+done
+delayed_clear_status="$(node "$SCRIPTS_DIR/codex-app-server.mjs" status --session-dir "$MANAGED_DELAYED_CLEAR_DIR" 2>&1)"
+if [[ "$delayed_clear_code" -eq 0 ]] \
+    && grep -qF "REQUEST_CLEARED" "$WORK/managed-delayed-cleared-turn.json" \
+    && printf '%s' "$delayed_clear_status" | jq -e '.pendingRequests == []' >/dev/null 2>&1 \
+    && ! jq -e 'select(.id == 904 and has("method") == false)' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "reverse requests are registered before delayed archival and cleared without a late response" 0
+else
+    check "reverse requests are registered before delayed archival and cleared without a late response" 1 \
+        "exit=$delayed_clear_code status=$(printf '%s' "$delayed_clear_status" | head -c 180)"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_DELAYED_CLEAR_DIR" --force >/dev/null 2>&1 || true
+kill "$MANAGED_DELAYED_CLEAR_DRAIN_PID" 2>/dev/null || true
+wait "$MANAGED_DELAYED_CLEAR_DRAIN_PID" 2>/dev/null || true
 
 MANAGED_CLOSE_DIR="$WORK/managed-close"
 : > "$APP_SERVER_LOG"
@@ -1070,7 +1347,7 @@ fi
 exec_max_out="$(PATH="$FAKE_CODEX_BIN:$PATH" FAKE_CODEX_PID_FILE="$FAKE_CODEX_PID_FILE" \
     FAKE_APP_SERVER_SCENARIO=complete FAKE_APP_SERVER_LOG="$APP_SERVER_LOG" \
     "$SCRIPTS_DIR/codex-exec-start.sh" --wait --workdir "$NONBLOCK_REPO" \
-    --effort max "tracked max effort" 2>&1)"; exec_max_code=$?
+    --sandbox read-only --effort max "tracked max effort" 2>&1)"; exec_max_code=$?
 FAKE_MAX_EXEC_RUN_ID=""
 if [[ "$exec_max_code" -eq 0 ]]; then
     FAKE_MAX_EXEC_RUN_ID="$("$SCRIPTS_DIR/codex-review-list.sh" 2 | awk -F'\t' 'NR>1 && $2=="exec" {print $1; exit}')"
@@ -1100,6 +1377,38 @@ if [[ -n "$FAKE_MAX_EXEC_RUN_ID" ]]; then
 else
     check "continuation wrapper accepts and records advertised ultra effort" 1 "tracked exec setup failed"
 fi
+
+TRACKED_MODE_OUT="$(
+    umask 022
+    PATH="$FAKE_CODEX_BIN:$PATH" FAKE_CODEX_PID_FILE="$FAKE_CODEX_PID_FILE" \
+        FAKE_APP_SERVER_SCENARIO=complete FAKE_APP_SERVER_LOG="$APP_SERVER_LOG" \
+        "$SCRIPTS_DIR/codex-exec-start.sh" --workdir "$NONBLOCK_REPO" \
+        --sandbox read-only "tracked private modes" 2>&1
+)"
+TRACKED_MODE_CODE=$?
+TRACKED_MODE_RUN_ID="$(printf '%s' "$TRACKED_MODE_OUT" | awk '/^run_id:/ {print $2; exit}')"
+TRACKED_MODE_RUN_DIR="$CODEX_REVIEW_HOME/runs/$TRACKED_MODE_RUN_ID"
+for _ in $(seq 1 100); do
+    [[ "$(jq -r '.status // empty' "$TRACKED_MODE_RUN_DIR/meta.json" 2>/dev/null)" == "completed" ]] && break
+    sleep 0.02
+done
+tracked_modes_ok="true"
+while IFS= read -r tracked_dir; do
+    tracked_mode="$(mode_bits "$tracked_dir")"
+    [[ ! -e "$tracked_dir" || "$tracked_mode" == "700" ]] || tracked_modes_ok="false"
+done < <(find "$TRACKED_MODE_RUN_DIR" -type d 2>/dev/null)
+while IFS= read -r tracked_file; do
+    tracked_mode="$(mode_bits "$tracked_file")"
+    [[ ! -e "$tracked_file" || "$tracked_mode" == "600" ]] || tracked_modes_ok="false"
+done < <(find "$TRACKED_MODE_RUN_DIR" -type f 2>/dev/null)
+if [[ "$TRACKED_MODE_CODE" -eq 0 && -n "$TRACKED_MODE_RUN_ID" && "$tracked_modes_ok" == "true" ]]; then
+    check "tracked run files and directories are private under a permissive umask" 0
+else
+    check "tracked run files and directories are private under a permissive umask" 1 \
+        "exit=$TRACKED_MODE_CODE run=$TRACKED_MODE_RUN_ID modes=$(find "$TRACKED_MODE_RUN_DIR" -printf '%m %p ' 2>/dev/null | head -c 220)"
+fi
+[[ -n "$TRACKED_MODE_RUN_ID" ]] \
+    && "$SCRIPTS_DIR/codex-delete.sh" "$TRACKED_MODE_RUN_ID" --force >/dev/null 2>&1 || true
 
 # Exercise the full tracked-review lifecycle with the native provisional id
 # mismatch. An idle completed review must continue with a new turn and delete
@@ -1149,7 +1458,7 @@ fi
 
 nonblock_out="$(
     PATH="$FAKE_CODEX_BIN:$PATH" FAKE_CODEX_PID_FILE="$FAKE_CODEX_PID_FILE" FAKE_APP_SERVER_SCENARIO=hold timeout 10 bash -c '
-        out="$("$1/codex-exec-start.sh" --workdir "$2" "fake slow worker")"
+        out="$("$1/codex-exec-start.sh" --workdir "$2" --sandbox read-only "fake slow worker")"
         printf "%s\n" "$out"
     ' _ "$SCRIPTS_DIR" "$NONBLOCK_REPO" 2>&1
 )"
@@ -1185,7 +1494,7 @@ fi
 orphan_out="$(
     PATH="$FAKE_CODEX_BIN:$PATH" FAKE_CODEX_PID_FILE="$FAKE_CODEX_PID_FILE" \
         FAKE_APP_SERVER_SCENARIO=delayed-complete timeout 10 \
-        "$SCRIPTS_DIR/codex-exec-start.sh" --workdir "$NONBLOCK_REPO" \
+        "$SCRIPTS_DIR/codex-exec-start.sh" --workdir "$NONBLOCK_REPO" --sandbox read-only \
         "finish after the tracked waiter exits" 2>&1
 )"; orphan_start_code=$?
 ORPHAN_RUN_ID="$(printf '%s' "$orphan_out" | awk '/^run_id:/ {print $2; exit}')"
@@ -1775,10 +2084,48 @@ fi
 
 command -v codex >/dev/null || { echo "codex CLI not found; cannot run live tests." >&2; exit 1; }
 
+LIVE_STATE_PARENT="${XDG_STATE_HOME:-$HOME/.local/state}/boring-but-good"
+LIVE_STATE_ROOT=""
+# shellcheck disable=SC2329  # Invoked by the EXIT trap.
+cleanup_live_state() {
+    if [[ "$KEEP" != "true" && -n "${LIVE_STATE_ROOT:-}" ]]; then
+        rm -rf "$LIVE_STATE_ROOT"
+    fi
+}
+trap cleanup_live_state EXIT
+mkdir -p "$LIVE_STATE_PARENT"
+LIVE_STATE_ROOT="$(mktemp -d "$LIVE_STATE_PARENT/codex-skill-tests.XXXXXX")"
+chmod 700 "$LIVE_STATE_ROOT"
+export CODEX_REVIEW_HOME="$LIVE_STATE_ROOT/review"
+export CODEX_APP_SERVER_AUTH_ROOT="$LIVE_STATE_ROOT/app-server-auth"
+mkdir -p "$CODEX_REVIEW_HOME" "$CODEX_APP_SERVER_AUTH_ROOT"
+chmod 700 "$CODEX_REVIEW_HOME" "$CODEX_APP_SERVER_AUTH_ROOT"
+
+make_fixture_repo
+live_roots_out="$(node --input-type=module -e '
+    import { pathToFileURL } from "node:url";
+    const module = await import(pathToFileURL(process.argv[1]));
+    await module.validateManagedControllerPlacement({
+      sandbox: "workspace-write",
+      workdir: process.argv[2],
+      sessionDir: process.argv[3],
+      credentialPath: process.argv[4],
+    });
+    process.stdout.write("LIVE_ROOTS_OK");
+  ' "$SCRIPTS_DIR/app-server-placement.mjs" "$FIXTURE_REPO" \
+    "$CODEX_REVIEW_HOME" "$CODEX_APP_SERVER_AUTH_ROOT" 2>&1)"; live_roots_code=$?
+if [[ "$live_roots_code" -eq 0 && "$live_roots_out" == "LIVE_ROOTS_OK" ]]; then
+    check "live tracked-run and authentication roots are outside every workspace-write root" 0
+else
+    check "live tracked-run and authentication roots are outside every workspace-write root" 1 \
+        "exit=$live_roots_code output=$(printf '%s' "$live_roots_out" | head -c 200)"
+    printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+    exit 1
+fi
+
 # ---------------------------------------------------------------------------
 note "LIVE: native App Server review lifecycle (preset + config)"
 # ---------------------------------------------------------------------------
-make_fixture_repo
 
 out="$("$SCRIPTS_DIR/codex-review-start.sh" --wait --uncommitted \
     --workdir "$FIXTURE_REPO" --preset adversarial \

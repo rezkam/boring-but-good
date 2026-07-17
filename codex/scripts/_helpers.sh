@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 REVIEW_HOME="${CODEX_REVIEW_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/codex-review}"
 REVIEW_RUNS_DIR="$REVIEW_HOME/runs"

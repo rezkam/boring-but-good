@@ -160,11 +160,11 @@ codex app-server generate-json-schema --out /tmp/codex-app-server-schema
 6. Never replay an accepted turn after timeout or transport close. It may have run commands or changed files. After a timeout, interrupt once and wait only for a bounded terminal-notification grace period. Close the client and managed host if completion remains unknown.
 7. Resume a durable thread only from a new, empty session directory. Never reuse a stale inbox.
 8. Recover a completed assistant item after close only when no command, file change, MCP call, or dynamic tool remains unresolved.
-9. Authenticate every filesystem IPC command. The host key belongs in the user state directory, outside the session tree and normal workspace-write roots. Never copy it into arguments, state, events, logs, or command payloads.
+9. Authenticate every filesystem IPC command and response. The host key belongs in the user state directory, outside the session tree and normal workspace-write roots. Never copy it into arguments, state, events, logs, or command payloads. Ignore unsigned or invalid outbox data without deleting it, then wait for the authenticated host response.
 
 Use `read-only` for discussion and review. Use `workspace-write` for scoped implementation. `danger-full-access` requires an explicit user decision and an isolated worktree.
 
-Directory mode `0700` alone is not an authorization boundary against a workspace-write process running as the same user. Managed commands use a per-session HMAC credential and reject forged or replayed command ids. `danger-full-access` can read same-user state, including command credentials, so filesystem authentication cannot isolate a danger-full-access agent from its controller. Use an OS-level identity or container boundary when that isolation is required.
+Directory mode `0700` alone is not an authorization boundary against a workspace-write process running as the same user. Before any model, thread, turn, or review request, managed workspace-write validates the real session and credential paths against the workdir, canonical `/tmp`, and `$TMPDIR`, then rejects placement inside any effective writable root. Managed commands and responses use a per-session HMAC credential, and the host rejects forged or replayed command ids. `danger-full-access` can read same-user state, including command credentials, so filesystem authentication cannot isolate a danger-full-access agent from its controller. Use an OS-level identity or container boundary when that isolation is required.
 
 ## Compatibility
 
@@ -179,6 +179,6 @@ tests/run-tests.sh --offline
 tests/run-tests.sh
 ```
 
-The offline fake server covers handshake ordering, persistent connection reuse, loaded-thread continuation, notification races, ordered events, native reviews, multi-process steering and interruption, interactive reverse requests, safe automatic request responses, atomic lease-aware shutdown, authenticated and replay-resistant filesystem IPC, generic requests, orphaned waiter reconciliation, timeout without replay, transport close, and tracked wrapper lifecycle. The live suite exercises the installed App Server.
+The offline fake server covers handshake ordering, persistent connection reuse, loaded-thread continuation, notification races, delayed reverse-request archival, ordered events, native reviews, multi-process steering and interruption, interactive reverse requests, safe automatic request responses, atomic lease-aware shutdown, authenticated command and response IPC, replay resistance, managed workspace-write placement, private artifact modes, generic requests, orphaned waiter reconciliation, timeout without replay, transport close, and tracked wrapper lifecycle. The live suite exercises the installed App Server.
 
 Official reference: [Codex App Server](https://learn.chatgpt.com/docs/app-server).
