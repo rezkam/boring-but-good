@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -74,6 +74,9 @@ test('public CLI probes a real GIF and creates a review contact sheet', { timeou
     assert.match(report.review.metadata, /login_process-review\.json$/);
     assert.equal(existsSync(report.review.contact_sheet), true);
     assert.equal(existsSync(report.review.metadata), true);
+    assert.equal(statSync(outputDir).mode & 0o777, 0o700);
+    assert.equal(statSync(report.review.contact_sheet).mode & 0o777, 0o600);
+    assert.equal(statSync(report.review.metadata).mode & 0o777, 0o600);
 
     const metadata = JSON.parse(readFileSync(report.review.metadata, 'utf-8'));
     assert.deepEqual(metadata, report);

@@ -10,15 +10,17 @@
 
 import { spawnSync } from 'node:child_process';
 import {
+  chmodSync,
+  closeSync,
   existsSync,
   mkdirSync,
   realpathSync,
   statSync,
-  writeFileSync,
 } from 'node:fs';
 import { basename, dirname, extname, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hasFlag, optionValue, requiredOptionValue } from './browser-control.mjs';
+import { openPrivateFile, writePrivateJson } from './cdp-common.mjs';
 import { parseBoundedNumber } from './gif-recorder.mjs';
 
 export const DEFAULT_REVIEW_FPS = 2;
@@ -116,7 +118,9 @@ export function reviewGif(input, {
   const stem = safeStem(input);
   const contactSheet = join(outputDir, `${stem}-contact-sheet.png`);
   const metadata = join(outputDir, `${stem}-review.json`);
-  mkdirSync(outputDir, { recursive: true });
+  mkdirSync(outputDir, { recursive: true, mode: 0o700 });
+  chmodSync(outputDir, 0o700);
+  closeSync(openPrivateFile(contactSheet, 'w'));
 
   run('ffmpeg', [
     '-v', 'error',
@@ -126,6 +130,7 @@ export function reviewGif(input, {
     '-y',
     contactSheet,
   ]);
+  chmodSync(contactSheet, 0o600);
 
   const report = {
     input,
@@ -142,7 +147,7 @@ export function reviewGif(input, {
       metadata,
     },
   };
-  writeFileSync(metadata, `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
+  writePrivateJson(metadata, report);
   return report;
 }
 

@@ -79,6 +79,7 @@ test('GIF recording contract keeps multi-step playback clear and identifiable', 
     assert.match(documentation, /meaningful|action-specific/i);
     assert.match(documentation, /browser-tools review-gif/);
     assert.match(documentation, /contact sheet/i);
+    assert.match(documentation, /owner-only/i);
   }
 
   assert.match(skill, /multi-step browser interactions/i);

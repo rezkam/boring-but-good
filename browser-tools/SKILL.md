@@ -86,7 +86,7 @@ After recording, probe the GIF and create a contact sheet so the sequence can be
 browser-tools review-gif "$PWD/login_process.gif"
 ```
 
-Read the generated contact-sheet PNG and confirm that it shows the initial state, the important action states, and the final state. If the first or final state is unclear, repeat the recording with longer `--pre-roll-ms` or `--post-roll-ms`. The review command also writes JSON metadata with frame count, duration, frame rate, dimensions, and sampling details under the GIF's `.gif-review/` directory.
+Read the generated contact-sheet PNG and confirm that it shows the initial state, the important action states, and the final state. If the first or final state is unclear, repeat the recording with longer `--pre-roll-ms` or `--post-roll-ms`. The review command also writes JSON metadata with frame count, duration, frame rate, dimensions, and sampling details under the GIF's `.gif-review/` directory. The review directory is owner-only `0700`, and the contact sheet and metadata are owner-only `0600`.
 
 The default recording safety limit is 120 seconds. Use `browser-tools record-gif status --port <reported port> --json` to inspect a recorder that may still be running.
 

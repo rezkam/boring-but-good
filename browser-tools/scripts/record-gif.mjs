@@ -30,12 +30,11 @@ import {
   GIF_STOP_TIMEOUT_MS,
   assertFfmpegAvailable,
   assertGifRecordingOwner,
-  claimGifRecording,
+  claimAndPrepareGifOutput,
   gifRecordingLogFile,
   gifRecordingReport,
   normalizeGifOutputPath,
   parseBoundedNumber,
-  prepareGifOutput,
   readGifRecordingState,
   removeGifRecordingState,
   requestGifRecordingStop,
@@ -90,8 +89,7 @@ async function startRecording(args) {
   const overwrite = hasFlag(args, '--overwrite');
   const options = startOptions(args);
   assertFfmpegAvailable();
-  prepareGifOutput(output, { overwrite });
-  claimGifRecording(port);
+  claimAndPrepareGifOutput(port, output, { overwrite });
 
   const logFile = gifRecordingLogFile(port);
   let logFd = null;

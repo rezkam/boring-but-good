@@ -41,6 +41,7 @@ export const CDP_RESOURCE_PRESETS = {
 export const BLOCKED_CDP_METHODS = new Set([
   'Browser.close',
   'Browser.crash',
+  'Page.close',
   'Page.crash',
   'Target.attachToBrowserTarget',
   'Target.closeTarget',
@@ -204,7 +205,7 @@ export function redactBodyText(text, mimeType = '', { includeSensitive = false }
     try {
       return JSON.stringify(redactSensitive(JSON.parse(value)));
     } catch {
-      // Keep non-JSON text below.
+      return '<redacted: malformed JSON>';
     }
   }
   const looksFormEncoded = normalizedMime.includes('application/x-www-form-urlencoded')

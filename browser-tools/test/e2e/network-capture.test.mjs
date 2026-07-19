@@ -116,13 +116,15 @@ test('public CLI performs owner-protected CDP calls and blocks lifecycle bypasse
     assert.equal(wrongOwner.code, 1);
     assert.match(wrongOwner.stderr, /owner-token-mismatch/);
 
-    const blocked = await runBrowserTools(
-      ['cdp', 'call', 'Browser.close', '--params', '{}', '--port', String(browserPort)],
-      env,
-      { allowFailure: true },
-    );
-    assert.equal(blocked.code, 1);
-    assert.match(blocked.stderr, /blocked.*managed-browser lifecycle safety/i);
+    for (const method of ['Browser.close', 'Page.close']) {
+      const blocked = await runBrowserTools(
+        ['cdp', 'call', method, '--params', '{}', '--port', String(browserPort)],
+        env,
+        { allowFailure: true },
+      );
+      assert.equal(blocked.code, 1);
+      assert.match(blocked.stderr, /blocked.*managed-browser lifecycle safety/i);
+    }
 
     const status = await runBrowserTools(['status', '--port', String(browserPort), '--json'], env);
     assert.equal(JSON.parse(status.stdout).running, true);
