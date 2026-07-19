@@ -2,4 +2,4 @@
 "@rezkam/browser-tools": minor
 ---
 
-Capture owner-protected filtered HAR and raw CDP events from active-tab interactions, extract private chronological network recipes for agent analysis, and send guarded direct CDP calls.
+Capture owner-protected filtered HAR and raw CDP events from active-tab interactions, extract private chronological network recipes for agent analysis, and send guarded direct CDP calls. Preserve exact debugging evidence by default with optional redaction.

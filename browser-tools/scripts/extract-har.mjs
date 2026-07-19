@@ -13,12 +13,14 @@ import { basename, dirname, extname, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hasFlag, optionValue, requiredOptionValue } from './browser-control.mjs';
 import {
+  isSensitiveName,
   matchesPatterns,
   matchesStatus,
   normalizeResourceTypes,
   optionValues,
   parseStatusSelectors,
   privateOutputPath,
+  redactBodyText,
   redactSensitive,
   resourceTypesForPreset,
   writePrivateJson,
@@ -42,7 +44,7 @@ Options:
   --exclude-status <code|range>
   --mime-type <glob>
   --exclude-mime-type <glob>
-  --include-sensitive              Preserve sensitive values if present in the HAR
+  --redact                         Redact sensitive-looking values from the recipe
   --overwrite                      Replace an existing recipe
   --json                           Print extraction metadata as JSON
 
@@ -79,7 +81,7 @@ function parseOptions(args) {
     excludedStatuses: parseStatusSelectors(optionValues(args, '--exclude-status')),
     mimeTypes: optionValues(args, '--mime-type'),
     excludedMimeTypes: optionValues(args, '--exclude-mime-type'),
-    includeSensitive: hasFlag(args, '--include-sensitive'),
+    redact: hasFlag(args, '--redact'),
   };
 }
 
@@ -100,13 +102,14 @@ function headerObject(headers = []) {
   return Object.fromEntries(headers.map((header) => [String(header.name).toLowerCase(), String(header.value)]));
 }
 
-function bodyRecipe(value, mimeType = '', encoding = null) {
+function bodyRecipe(value, mimeType = '', encoding = null, { redact = false } = {}) {
   if (value === undefined) return null;
-  const result = { mime_type: mimeType || 'application/octet-stream', text: value };
+  const text = redact && !encoding ? redactBodyText(value, mimeType) : value;
+  const result = { mime_type: mimeType || 'application/octet-stream', text };
   if (encoding) result.encoding = encoding;
   if (!encoding && (String(mimeType).toLowerCase().includes('json') || /^[\s]*[\[{]/.test(String(value)))) {
     try {
-      result.json = JSON.parse(value);
+      result.json = JSON.parse(text);
     } catch {
       // Keep malformed or truncated JSON as text only.
     }
@@ -126,8 +129,16 @@ export function extractHarRecipe(har, sourceHar, options) {
       method: entry.request.method,
       url: entry.request.url,
       headers: headerObject(entry.request.headers),
-      query: entry.request.queryString || [],
-      body: bodyRecipe(entry.request.postData?.text, entry.request.postData?.mimeType),
+      query: (entry.request.queryString || []).map((parameter) => ({
+        ...parameter,
+        value: options.redact && isSensitiveName(parameter.name) ? '<redacted>' : parameter.value,
+      })),
+      body: bodyRecipe(
+        entry.request.postData?.text,
+        entry.request.postData?.mimeType,
+        null,
+        { redact: options.redact },
+      ),
       response: {
         status: entry.response.status,
         status_text: entry.response.statusText,
@@ -137,6 +148,7 @@ export function extractHarRecipe(har, sourceHar, options) {
           entry.response.content?.text,
           entry.response.content?.mimeType,
           entry.response.content?.encoding || null,
+          { redact: options.redact },
         ),
       },
       timing: {
@@ -171,7 +183,7 @@ export function extractHarRecipe(har, sourceHar, options) {
       'Validate dynamic tokens, cookies, ordering dependencies, and side effects before writing or running a replay script.',
     ],
   };
-  return options.includeSensitive ? recipe : redactSensitive(recipe);
+  return options.redact ? redactSensitive(recipe) : recipe;
 }
 
 export async function main(args = process.argv.slice(2)) {

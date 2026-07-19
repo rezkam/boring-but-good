@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -107,11 +107,15 @@ test('GIF output preparation creates parents and preserves existing files by def
     const output = join(directory, 'nested', 'checkout_process.gif');
     prepareGifOutput(output);
     assert.equal(existsSync(join(directory, 'nested')), true);
+    assert.equal(existsSync(output), true);
+    assert.equal(statSync(output).mode & 0o777, 0o600);
 
     writeFileSync(output, 'existing GIF');
+    chmodSync(output, 0o644);
     assert.throws(() => prepareGifOutput(output), /already exists.*--overwrite/);
     assert.equal(readFileSync(output, 'utf-8'), 'existing GIF');
     assert.doesNotThrow(() => prepareGifOutput(output, { overwrite: true }));
+    assert.equal(statSync(output).mode & 0o777, 0o600);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

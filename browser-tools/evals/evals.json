@@ -87,13 +87,13 @@
     {
       "id": 8,
       "prompt": "Open our checkout page in the managed browser, capture only XHR and Fetch calls under /api while I complete a checkout, and produce something another agent can inspect before writing a replay script.",
-      "expected_output": "Records an owner-protected filtered HAR around the interaction, then extracts a private redacted chronological network recipe without executing requests.",
+      "expected_output": "Records an owner-protected filtered raw HAR around the interaction, then extracts a private chronological network recipe without executing requests.",
       "files": [],
       "expectations": [
         "The answer starts browser-tools record-har before the interaction and stops it afterward using the reported port and owner token environment.",
         "The HAR command uses an interaction-specific filename and filters to XHR and Fetch plus the requested /api URL pattern.",
         "The answer runs browser-tools extract-har after capture to create an agent-readable chronological recipe.",
-        "The answer explains that secrets are redacted by default and --include-sensitive is an explicit private opt-in.",
+        "The answer explains that raw debugging values are preserved by default, files use owner-only mode 0600 without encryption, and --redact is available when exact secrets are not needed.",
         "The answer does not execute or replay captured checkout requests and warns that a future script needs side-effect and dynamic-auth review."
       ]
     }

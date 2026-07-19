@@ -62,6 +62,7 @@ _Avoid_: port, profile name, managed token
 - **Visual Recording** uses **Browser Control** ownership and active-tab selection, and keeps its own bounded recording lifecycle.
 - A **Visual Review Artifact** is generated after **Visual Recording** and does not reconnect to the browser.
 - A **Network Capture**, **Raw CDP Capture**, and **CDP Call** all require **Browser Control** ownership before connecting to the active tab.
+- A **Network Capture**, **Network Recipe**, **Raw CDP Capture**, and **CDP Call** preserve exact debugging evidence by default. Redaction is an explicit output option, not the default.
 - A **Network Recipe** is derived from a **Network Capture** and never executes requests.
 - A **Generic Extractor** uses the **Extractor Module** for repeated lifecycle behavior.
 - Specialist skills, such as finance, should call Browser Tools instead of adding domain helpers here.

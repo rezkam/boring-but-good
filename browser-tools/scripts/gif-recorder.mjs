@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  closeSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -20,6 +21,7 @@ import {
   ownerTokenHash,
   sleep,
 } from './browser-control.mjs';
+import { openPrivateFile } from './cdp-common.mjs';
 
 export const DEFAULT_GIF_FPS = 10;
 export const DEFAULT_GIF_COLORS = 128;
@@ -248,6 +250,7 @@ export function createFfmpegGifEncoder({
         const termination = result.signal ? `signal ${result.signal}` : `exit status ${result.code}`;
         throw new Error(`ffmpeg failed to encode GIF (${termination})${stderr.trim() ? `: ${stderr.trim()}` : ''}`);
       }
+      chmodSync(output, 0o600);
     },
   };
 }
@@ -430,4 +433,5 @@ export function prepareGifOutput(output, { overwrite = false } = {}) {
   if (existsSync(output) && !overwrite) {
     throw new Error(`GIF output already exists: ${output}. Choose another meaningful name or pass --overwrite`);
   }
+  closeSync(openPrivateFile(output, 'w'));
 }

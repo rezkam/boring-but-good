@@ -117,7 +117,7 @@ browser-tools extract-har "$PWD/checkout_api_network.har" \
 
 The extracted recipe removes page noise and preserves chronological request structure, bodies, response samples, and timing so an agent can write a separate fetch, curl, or browser-backed script. It does not execute requests. Never execute or replay captured write requests without reviewing authentication, dynamic values, ordering dependencies, and side effects first.
 
-Captures are private files with mode `0600`. Authorization, cookies, API keys, passwords, tokens, and secret-looking JSON fields are redacted by default. Use `--include-sensitive` only when exact private evidence is required. Never commit or share a sensitive capture.
+Captures preserve raw request and response evidence by default because exact headers, cookies, tokens, and bodies are often required for debugging. Add `--redact` when exact sensitive values are not needed. Capture files use owner-only mode `0600`, but they are not encrypted. Never commit or share a raw sensitive capture.
 
 ### Record raw protocol events
 
@@ -136,7 +136,7 @@ browser-tools record-cdp start \
 browser-tools record-cdp stop --port <reported port>
 ```
 
-Use repeated `--domain`, `--event`, and `--exclude-event` options for precise control. For domains without `Domain.enable`, use `--skip-enable <domain>` and an owner-approved `--setup` CDP command. Raw event payloads use the same redaction default as HAR.
+Use repeated `--domain`, `--event`, and `--exclude-event` options for precise control. For domains without `Domain.enable`, use `--skip-enable <domain>` and an owner-approved `--setup` CDP command. Raw event payloads are unredacted by default. Add `--redact` when exact protocol values are not needed.
 
 ### Send direct CDP calls
 
@@ -146,7 +146,7 @@ browser-tools cdp call Runtime.evaluate \
   --port <reported port>
 ```
 
-Prefer `--params-file` when parameters contain sensitive values, because command arguments can be visible in process listings. Direct results are redacted unless `--include-sensitive` is explicit. Known methods that bypass managed-browser lifecycle safety, including `Browser.close`, are blocked.
+Prefer `--params-file` when parameters contain sensitive values, because command arguments can be visible in process listings. Direct results are raw by default. Add `--redact` to filter sensitive-looking fields. Known methods that bypass managed-browser lifecycle safety, including `Browser.close`, are blocked.
 
 Capture is tied to the active tab selected at `start`. If an interaction moves to a new tab, stop the current capture and start a meaningfully named capture for the new tab.
 
@@ -166,7 +166,7 @@ Capture is tied to the active tab selected at `start`. If an interaction moves t
 - Each start owns the browser with an owner token. Export the printed token as `BROWSER_TOOLS_OWNER_TOKEN` for follow-up commands. Avoid passing user-supplied tokens with `--owner-token` because command-line arguments can be visible to other local users through process listings.
 - Open new browser tabs in the background with `browser.newPage({ background: true })` so automation does not steal OS focus from the user. Do not call `page.bringToFront()` unless the user explicitly asks to see or interact with that tab.
 - For multi-step visual recordings, always capture extra frames before and after actions, always use an action-specific GIF filename, then inspect the `review-gif` contact sheet for initial, action, and final states.
-- Network and CDP capture must use the managed browser's owner token. Keep redaction enabled unless the user explicitly needs exact sensitive evidence.
+- Network and CDP capture must use the managed browser's owner token. Preserve raw evidence by default for debugging, and add `--redact` when exact sensitive values are not needed.
 - Send useful result data to stdout. Treat stderr as progress and diagnostics.
 
 ## Local config and directories

@@ -90,7 +90,7 @@ test('GIF recording contract keeps multi-step playback clear and identifiable', 
   assert.match(recorder, /DEFAULT_GIF_POST_ROLL_MS = [1-9]/);
 });
 
-test('network capture contract documents owner protection, filtering, redaction, and replay safety', () => {
+test('network capture contract documents owner protection, raw debugging, optional redaction, and replay safety', () => {
   const skill = readRelative('SKILL.md');
   const browserControl = readRelative('references/browser-control.md');
 
@@ -102,7 +102,9 @@ test('network capture contract documents owner protection, filtering, redaction,
     assert.match(documentation, /BROWSER_TOOLS_OWNER_TOKEN/);
     assert.match(documentation, /--resource-type/);
     assert.match(documentation, /--event/);
-    assert.match(documentation, /--include-sensitive/);
+    assert.match(documentation, /--redact/);
+    assert.match(documentation, /raw|unredacted/i);
+    assert.match(documentation, /not encrypted/i);
     assert.match(documentation, /never.*(?:execute|replay)|does not execute/i);
   }
 });
