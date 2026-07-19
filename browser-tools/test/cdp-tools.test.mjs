@@ -200,6 +200,10 @@ test('URL, status, and sensitive-data helpers preserve structure while filtering
     '{"action":"checkout","refreshToken":"<redacted>"}',
   );
   assert.equal(
+    redactBodyText('{"action":"checkout","access_token":"truncated-secret"', 'application/json'),
+    '<redacted: malformed JSON>',
+  );
+  assert.equal(
     redactUrl('https://example.test/callback?code=public&access_token=secret'),
     'https://example.test/callback?code=public&access_token=%3Credacted%3E',
   );
@@ -325,5 +329,6 @@ test('private output open fixes permissions when overwriting an existing file', 
 test('direct CDP method validation blocks managed lifecycle bypasses', () => {
   assert.equal(validateCdpMethod('Runtime.evaluate'), 'Runtime.evaluate');
   assert.throws(() => validateCdpMethod('Browser.close'), /blocked.*lifecycle safety/);
+  assert.throws(() => validateCdpMethod('Page.close'), /blocked.*lifecycle safety/);
   assert.throws(() => validateCdpMethod('not-a-method'), /Expected Domain\.method/);
 });

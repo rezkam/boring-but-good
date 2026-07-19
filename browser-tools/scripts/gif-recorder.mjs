@@ -435,3 +435,17 @@ export function prepareGifOutput(output, { overwrite = false } = {}) {
   }
   closeSync(openPrivateFile(output, 'w'));
 }
+
+export function claimAndPrepareGifOutput(port, output, options = {}, {
+  claim = claimGifRecording,
+  prepare = prepareGifOutput,
+  release = removeGifRecordingState,
+} = {}) {
+  claim(port);
+  try {
+    prepare(output, options);
+  } catch (error) {
+    release(port);
+    throw error;
+  }
+}

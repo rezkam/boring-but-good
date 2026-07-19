@@ -17,7 +17,7 @@ An owner-protected GIF capture of one active browser tab, with pre-action and po
 _Avoid_: video capture, anonymous recording
 
 **Visual Review Artifact**:
-A sampled contact-sheet PNG plus machine-readable GIF metadata used to verify that a **Visual Recording** clearly shows its initial, action, and final states.
+An owner-only sampled contact-sheet PNG plus machine-readable GIF metadata used to verify that a **Visual Recording** clearly shows its initial, action, and final states.
 _Avoid_: screenshot dump, video thumbnail
 
 **Network Capture**:

@@ -7,6 +7,7 @@ import {
   DEFAULT_GIF_POST_ROLL_MS,
   DEFAULT_GIF_PRE_ROLL_MS,
   assertGifRecordingOwner,
+  claimAndPrepareGifOutput,
   normalizeGifOutputPath,
   parseBoundedNumber,
   prepareGifOutput,
@@ -119,4 +120,36 @@ test('GIF output preparation creates parents and preserves existing files by def
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('GIF recorder claims ownership before creating or truncating output', () => {
+  const calls = [];
+  claimAndPrepareGifOutput(9222, '/captures/login_process.gif', { overwrite: true }, {
+    claim: () => calls.push('claim'),
+    prepare: () => calls.push('prepare'),
+    release: () => calls.push('release'),
+  });
+  assert.deepEqual(calls, ['claim', 'prepare']);
+
+  const failedCalls = [];
+  assert.throws(() => claimAndPrepareGifOutput(9222, '/captures/login_process.gif', {}, {
+    claim: () => failedCalls.push('claim'),
+    prepare: () => {
+      failedCalls.push('prepare');
+      throw new Error('output exists');
+    },
+    release: () => failedCalls.push('release'),
+  }), /output exists/);
+  assert.deepEqual(failedCalls, ['claim', 'prepare', 'release']);
+
+  const rejectedCalls = [];
+  assert.throws(() => claimAndPrepareGifOutput(9222, '/captures/login_process.gif', {}, {
+    claim: () => {
+      rejectedCalls.push('claim');
+      throw new Error('recording already active');
+    },
+    prepare: () => rejectedCalls.push('prepare'),
+    release: () => rejectedCalls.push('release'),
+  }), /recording already active/);
+  assert.deepEqual(rejectedCalls, ['claim']);
 });

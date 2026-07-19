@@ -227,6 +227,8 @@ Default outputs are derived from the meaningful GIF name:
 ./.gif-review/login_process-review.json
 ```
 
+The review directory uses owner-only mode `0700`. The contact sheet and JSON metadata use owner-only mode `0600`, matching the source recording's privacy boundary.
+
 Read the contact sheet image and verify all three parts of the visual story:
 
 1. Initial state before the first action
@@ -369,7 +371,7 @@ browser-tools cdp call Runtime.evaluate \
   --port <reported port>
 ```
 
-Use `--params-file <path>` rather than inline JSON when parameters may be sensitive. Results preserve raw protocol values by default. Add `--redact` when exact sensitive values are not needed. Known lifecycle-bypass methods that close or crash Chrome, dispose contexts, detach targets, attach directly to the browser target, or tunnel nested protocol messages are blocked so Browser Tools managed state remains authoritative.
+Use `--params-file <path>` rather than inline JSON when parameters may be sensitive. Results preserve raw protocol values by default. Add `--redact` when exact sensitive values are not needed. Known lifecycle-bypass methods that close or crash the active page or Chrome, dispose contexts, detach targets, attach directly to the browser target, or tunnel nested protocol messages are blocked so Browser Tools managed state remains authoritative.
 
 Direct CDP calls can mutate the sandboxed page or profile. Inspect the protocol method before calling it. The owner token authorizes the operation but is never sent as a protocol parameter or printed in output.
 
