@@ -4,7 +4,7 @@
  *
  * Usage:
  *   scripts/cdp.mjs call Runtime.evaluate --params '{"expression":"document.title"}'
- *   scripts/cdp.mjs call Network.getCookies --params-file ./params.json --include-sensitive
+ *   scripts/cdp.mjs call Network.getCookies --params-file ./params.json --redact
  */
 
 import { readFileSync, realpathSync } from 'node:fs';
@@ -31,7 +31,7 @@ function usage() {
 Options:
   --params <json>          CDP parameters as a JSON object
   --params-file <path>     Read parameters from a file instead of process arguments
-  --include-sensitive      Keep sensitive-looking values in the result
+  --redact                 Redact sensitive-looking values from the result
   --port <n>               Managed browser port (default: 9222)
   --owner-token <token>    Prefer ${OWNER_TOKEN_ENV} instead
 
@@ -56,8 +56,8 @@ function parseParams(args) {
   return params;
 }
 
-export function sanitizeCdpCallResult(method, result, { includeSensitive = false } = {}) {
-  if (includeSensitive) return result;
+export function sanitizeCdpCallResult(method, result, { redact = false } = {}) {
+  if (!redact) return result;
   const output = redactSensitive(result);
   if ((method === 'Network.getResponseBody' || method === 'Fetch.getResponseBody') && output.body && !output.base64Encoded) {
     output.body = redactBodyText(output.body, '');
@@ -78,7 +78,7 @@ async function callMethod(args) {
   }
   const params = parseParams(rest);
   const result = await withPageCdpSession(port, ownerToken, ({ session }) => session.send(method, params));
-  const output = sanitizeCdpCallResult(method, result, { includeSensitive: hasFlag(rest, '--include-sensitive') });
+  const output = sanitizeCdpCallResult(method, result, { redact: hasFlag(rest, '--redact') });
   console.log(JSON.stringify(output, null, 2));
 }
 

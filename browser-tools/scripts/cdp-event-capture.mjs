@@ -65,7 +65,7 @@ export function parseCdpEventCaptureOptions(args) {
     postWaitMs: parsePositiveIntegerOption(args, '--post-wait-ms', DEFAULT_CDP_POST_WAIT_MS),
     maxDurationSeconds: parsePositiveIntegerOption(args, '--max-duration', DEFAULT_CDP_MAX_DURATION_SECONDS),
     maxEvents: parsePositiveIntegerOption(args, '--max-events', DEFAULT_CDP_MAX_EVENTS),
-    includeSensitive: hasFlag(args, '--include-sensitive'),
+    redact: hasFlag(args, '--redact'),
   };
 }
 
@@ -74,8 +74,8 @@ function headerValue(headers, wanted) {
   return match ? String(match[1]) : '';
 }
 
-export function sanitizeCdpEvent(method, params, { includeSensitive = false } = {}) {
-  if (includeSensitive) return params;
+export function sanitizeCdpEvent(method, params, { redact = false } = {}) {
+  if (!redact) return params;
   const sanitized = redactSensitive(params);
   if (method === 'Network.requestWillBeSent') {
     if (sanitized.request?.postData !== undefined) {
@@ -103,6 +103,7 @@ export async function runCdpEventCapture({
   let eventCount = 0;
   const startedMonotonic = performance.now();
   const onAnyEvent = (method, params) => {
+    if (eventCount >= options.maxEvents) return;
     if (typeof method !== 'string') return;
     if (!matchesPatterns(method, options.eventPatterns, options.excludedEventPatterns)) return;
     writeEvent({

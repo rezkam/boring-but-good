@@ -19,7 +19,7 @@ import {
   parsePort,
   requiredOptionValue,
 } from './browser-control.mjs';
-import { privateOutputPath, withPageCdpSession } from './cdp-common.mjs';
+import { openPrivateFile, privateOutputPath, withPageCdpSession } from './cdp-common.mjs';
 import {
   CDP_CAPTURE_STOP_TIMEOUT_MS,
   assertCdpRecordingOwner,
@@ -61,7 +61,7 @@ Lifecycle:
   --post-wait-ms <n>                Capture after stop request (default: 500)
   --max-duration <seconds>          Safety limit (default: 300)
   --max-events <n>                  Event safety limit (default: 100000)
-  --include-sensitive               Keep auth, cookies, bodies, and frame payloads
+  --redact                          Redact auth, cookies, bodies, and frame payloads
   --overwrite                       Replace existing output
   --port <n>                        Managed browser port (default: 9222)
   --owner-token <token>             Prefer ${OWNER_TOKEN_ENV} instead
@@ -193,7 +193,7 @@ async function runWorker(args) {
 
   let outputFd = null;
   try {
-    outputFd = openSync(output, 'w', 0o600);
+    outputFd = openPrivateFile(output, 'w');
     const result = await withPageCdpSession(port, ownerToken, async ({ session }) => runCdpEventCapture({
       session,
       options,

@@ -9,7 +9,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -228,6 +228,7 @@ test('public CLI records a complete real-browser interaction as an inspectable G
     recorderStarted = false;
 
     const gif = readFileSync(output);
+    assert.equal(statSync(output).mode & 0o777, 0o600);
     assert.equal(gif.subarray(0, 6).toString('ascii'), 'GIF89a');
     assert.ok(gif.length > 1000, `expected a non-trivial GIF, got ${gif.length} bytes`);
 

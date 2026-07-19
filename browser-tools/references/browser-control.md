@@ -303,10 +303,10 @@ Content and lifecycle controls:
 - `--idle-ms`, default 500 ms quiet period on stop
 - `--drain-timeout-ms`, default 5000 ms maximum drain wait
 - `--max-duration`, default 300 seconds
-- `--include-sensitive`, explicit opt-in to exact private values
+- `--redact`, explicit filtering of sensitive-looking values
 - `--overwrite`, explicit replacement of an existing output
 
-HAR captures use file mode `0600`. By default Browser Tools redacts authorization, proxy authorization, cookies, set-cookie, API keys, passwords, session values, CSRF values, and token or secret-looking JSON fields. It preserves body structure when JSON or form data can be parsed. Binary response bodies use HAR base64 encoding. The Browser Tools owner token is only used to authorize the CDP connection and is never written into the capture.
+HAR captures preserve raw debugging evidence by default, including authorization, cookies, API keys, tokens, and request or response bodies. Add `--redact` to filter sensitive-looking headers, query parameters, cookies, JSON fields, and form fields while preserving structure. Binary response bodies use HAR base64 encoding. Outputs use owner-only file mode `0600`, but are not encrypted. The Browser Tools owner token is only used to authorize the CDP connection and is never written into the capture.
 
 HAR represents HTTP request and response exchanges. Use raw CDP capture for WebSocket frames, protocol events outside Network, or details that HAR cannot represent.
 
@@ -323,7 +323,7 @@ browser-tools extract-har "$PWD/checkout_api_network.har" \
 
 The recipe preserves request order, resource type, method, URL, query parameters, headers, request body, response status, response body sample, timing, and failures. Its default `api` preset removes documents, scripts, images, fonts, and other page noise. It accepts the same resource, URL, method, status, and MIME filters as HAR capture.
 
-`extract-har` does not execute or replay requests. Treat the recipe as evidence for authoring a separate script. Before executing any resulting script, identify dynamic values, authentication dependencies, anti-CSRF data, write side effects, retry behavior, and ordering constraints. Recipe files are private `0600` outputs and are redacted again by default, even if the source HAR contains sensitive data.
+`extract-har` does not execute or replay requests. Treat the recipe as evidence for authoring a separate script. Before executing any resulting script, identify dynamic values, authentication dependencies, anti-CSRF data, write side effects, retry behavior, and ordering constraints. Recipe files preserve source HAR values by default and use owner-only mode `0600`. Add `--redact` when exact sensitive values are not needed.
 
 ### Record raw CDP events
 
@@ -357,7 +357,7 @@ browser-tools record-cdp start \
   --port <reported port>
 ```
 
-Setup methods use the same lifecycle safety block as direct CDP calls. Other controls are `--post-wait-ms` (default 500), `--max-duration` (default 300 seconds), `--max-events` (default 100000), `--include-sensitive`, and `--overwrite`. JSONL output is private and redacted by default, including request bodies and WebSocket payload data.
+Setup methods use the same lifecycle safety block as direct CDP calls. Other controls are `--post-wait-ms` (default 500), `--max-duration` (default 300 seconds), `--max-events` (default 100000), `--redact`, and `--overwrite`. JSONL output preserves raw event payloads by default and uses owner-only mode `0600`. The event limit is a hard output bound, including during bursts and the post-wait period.
 
 ### Send direct CDP calls
 
@@ -369,7 +369,7 @@ browser-tools cdp call Runtime.evaluate \
   --port <reported port>
 ```
 
-Use `--params-file <path>` rather than inline JSON when parameters may be sensitive. Results are JSON and use the same default redaction. Add `--include-sensitive` only when exact values are required. Known lifecycle-bypass methods that close or crash Chrome, dispose contexts, detach targets, attach directly to the browser target, or tunnel nested protocol messages are blocked so Browser Tools managed state remains authoritative.
+Use `--params-file <path>` rather than inline JSON when parameters may be sensitive. Results preserve raw protocol values by default. Add `--redact` when exact sensitive values are not needed. Known lifecycle-bypass methods that close or crash Chrome, dispose contexts, detach targets, attach directly to the browser target, or tunnel nested protocol messages are blocked so Browser Tools managed state remains authoritative.
 
 Direct CDP calls can mutate the sandboxed page or profile. Inspect the protocol method before calling it. The owner token authorizes the operation but is never sent as a protocol parameter or printed in output.
 

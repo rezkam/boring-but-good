@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, writeFileSync, chmodSync, renameSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
 import { basename, dirname, extname, parse, resolve } from 'node:path';
 import { activePage, connectBrowser } from './browser-control.mjs';
 
@@ -164,6 +172,10 @@ export function redactSensitive(value, { includeSensitive = false, parentKey = '
       result[key] = '<redacted>';
       continue;
     }
+    if (key === 'value' && isSensitiveName(value.name)) {
+      result[key] = '<redacted>';
+      continue;
+    }
     if (key === 'value' && /cookies?|associatedcookies/i.test(parentKey)) {
       result[key] = '<redacted>';
       continue;
@@ -195,14 +207,31 @@ export function redactBodyText(text, mimeType = '', { includeSensitive = false }
       // Keep non-JSON text below.
     }
   }
-  if (normalizedMime.includes('application/x-www-form-urlencoded')) {
+  const looksFormEncoded = normalizedMime.includes('application/x-www-form-urlencoded')
+    || value.split('&').every((part) => /^[^=&\s]+=[^&]*$/.test(part));
+  if (looksFormEncoded) {
     const params = new URLSearchParams(value);
+    let changed = false;
     for (const key of [...params.keys()]) {
-      if (isSensitiveName(key)) params.set(key, '<redacted>');
+      if (isSensitiveName(key)) {
+        params.set(key, '<redacted>');
+        changed = true;
+      }
     }
-    return params.toString();
+    return changed ? params.toString() : value;
   }
   return value;
+}
+
+export function openPrivateFile(file, flags) {
+  const fd = openSync(file, flags, 0o600);
+  try {
+    chmodSync(file, 0o600);
+    return fd;
+  } catch (error) {
+    closeSync(fd);
+    throw new Error(`Could not make capture output private: ${file}: ${error.message}`);
+  }
 }
 
 export function privateOutputPath(value, extension, { overwrite = false, cwd = process.cwd() } = {}) {

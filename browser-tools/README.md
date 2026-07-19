@@ -76,7 +76,7 @@ import { connectBrowser, activePage, withBrowser } from '@rezkam/browser-tools';
 - `review-gif` probes frame count, duration, frame rate, and dimensions, then creates a sampled contact sheet and JSON report under the GIF's `.gif-review/` directory.
 - `record-har` captures owner-protected filtered active-tab HTTP traffic as private HAR 1.2. `extract-har` derives a compact chronological recipe without executing requests.
 - `record-cdp` writes selected raw protocol events as private JSONL. `cdp call` sends one owner-protected active-tab method while blocking known managed-lifecycle bypasses.
-- HAR, recipes, raw CDP events, and direct results redact secrets by default. Exact sensitive values require explicit `--include-sensitive`.
+- HAR, recipes, raw CDP events, and direct results preserve exact debugging evidence by default. Add `--redact` to filter sensitive-looking values. Capture files are owner-only `0600`, not encrypted.
 - Config, cache, and artifact directories default to `~/.agents/browser-tools/config.json`, `~/.cache/pi-browser-tools`, and `/tmp`, overridable via `BROWSER_TOOLS_CONFIG_DIR`, `BROWSER_TOOLS_CACHE_DIR`, `BROWSER_TOOLS_ARTIFACT_DIR`, `BROWSER_TOOLS_CHROME_SOURCE_DIR`, and `BROWSER_TOOLS_CHROME_BIN`.
 - Requires macOS Chrome and Node.js 20+. GIF recording and review require ffmpeg and ffprobe.
 
@@ -90,7 +90,7 @@ npm run test:e2e     # Real headless Chrome and ffmpeg GIF interaction test
 npm run validate     # Both suites
 ```
 
-The E2E tests use real Chrome, ffmpeg, and ffprobe against local isolated fixtures. GIF tests validate recording and contact-sheet review. Network tests validate filtered HAR capture, non-executable recipe extraction, raw wildcard CDP events, direct CDP calls, owner-token refusal, private file modes, redaction, and lifecycle-method blocking. They do not use a live account or external server.
+The E2E tests use real Chrome, ffmpeg, and ffprobe against local isolated fixtures. GIF tests validate recording, private output, and contact-sheet review. Network tests validate raw filtered HAR capture, optional recipe redaction, raw wildcard CDP events, direct CDP calls, owner-token refusal, private file modes, hard event limits, and lifecycle-method blocking. They do not use a live account or external server.
 
 ## License
 

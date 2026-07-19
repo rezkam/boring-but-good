@@ -33,11 +33,11 @@ function headerValue(headers, wanted) {
   return match ? String(match[1]) : '';
 }
 
-function queryString(url, includeSensitive) {
+function queryString(url, redact) {
   try {
     return [...new URL(url).searchParams.entries()].map(([name, value]) => ({
       name,
-      value: !includeSensitive && isSensitiveName(name)
+      value: redact && isSensitiveName(name)
         ? '<redacted>'
         : value,
     }));
@@ -62,12 +62,12 @@ function mergedHeaders(primary = {}, extra = null) {
   return { ...primary, ...(extra?.headers || {}) };
 }
 
-function requestCookies(extraInfo, includeSensitive) {
+function requestCookies(extraInfo, redact) {
   return (extraInfo?.associatedCookies || [])
     .filter((associated) => !(associated.blockedReasons || []).length)
     .map(({ cookie }) => ({
       name: cookie.name,
-      value: includeSensitive ? cookie.value : '<redacted>',
+      value: redact ? '<redacted>' : cookie.value,
       path: cookie.path || '/',
       domain: cookie.domain || '',
       expires: Number(cookie.expires) > 0 ? new Date(cookie.expires * 1000).toISOString() : undefined,
@@ -155,7 +155,7 @@ export function parseHarCaptureOptions(args) {
     maxDurationSeconds: parsePositiveIntegerOption(args, '--max-duration', DEFAULT_HAR_MAX_DURATION_SECONDS),
     idleMs: parsePositiveIntegerOption(args, '--idle-ms', DEFAULT_HAR_IDLE_MS),
     drainTimeoutMs: parsePositiveIntegerOption(args, '--drain-timeout-ms', DEFAULT_HAR_DRAIN_TIMEOUT_MS),
-    includeSensitive: hasFlag(args, '--include-sensitive'),
+    redact: hasFlag(args, '--redact'),
   };
 }
 
@@ -317,7 +317,8 @@ export class HarCollector {
   }
 
   toHarEntry(entry) {
-    const includeSensitive = this.options.includeSensitive;
+    const redact = this.options.redact;
+    const includeSensitive = !redact;
     const captureHeaders = this.options.capture.includes('headers');
     const rawRequestHeaders = mergedHeaders(entry.request.headers, entry.requestExtraInfo);
     const rawResponseHeaders = mergedHeaders(entry.response?.headers, entry.responseExtraInfo);
@@ -348,8 +349,8 @@ export class HarCollector {
       url: redactUrl(entry.request.url, { includeSensitive }),
       httpVersion: harHttpVersion(entry.response?.protocol),
       headers: requestHeaders,
-      queryString: queryString(entry.request.url, includeSensitive),
-      cookies: requestCookies(entry.requestExtraInfo, includeSensitive),
+      queryString: queryString(entry.request.url, redact),
+      cookies: requestCookies(entry.requestExtraInfo, redact),
       headersSize: -1,
       bodySize: entry.request.postData ? Buffer.byteLength(entry.request.postData) : 0,
     };
@@ -394,7 +395,7 @@ export class HarCollector {
       _initiator: entry.initiator,
       ...(entry.failed ? { _failure: entry.failed } : {}),
       ...(entry.responseBodyError ? { _responseBodyError: entry.responseBodyError } : {}),
-      ...(!includeSensitive ? { _redacted: true } : {}),
+      ...(redact ? { _redacted: true } : {}),
     };
   }
 
@@ -413,7 +414,7 @@ export class HarCollector {
           id: this.pageId,
           title: this.pageTitle,
           pageTimings: {},
-          _url: redactUrl(this.pageUrl, { includeSensitive: this.options.includeSensitive }),
+          _url: redactUrl(this.pageUrl, { includeSensitive: !this.options.redact }),
         }],
         entries,
         _capture: {
@@ -429,7 +430,7 @@ export class HarCollector {
             maxSize: this.options.maxSize,
           },
           components: this.options.capture,
-          includeSensitive: this.options.includeSensitive,
+          redacted: this.options.redact,
         },
       },
     };

@@ -7,7 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -93,20 +93,20 @@ test('public CLI performs owner-protected CDP calls and blocks lifecycle bypasse
       }),
       '--port', String(browserPort),
     ], env);
-    const redacted = JSON.parse(evaluated.stdout);
-    assert.equal(redacted.result.value.title, 'New Tab');
-    assert.equal(redacted.result.value.access_token, '<redacted>');
+    const raw = JSON.parse(evaluated.stdout);
+    assert.equal(raw.result.value.title, 'New Tab');
+    assert.equal(raw.result.value.access_token, 'call-secret');
 
-    const sensitive = await runBrowserTools([
+    const redacted = await runBrowserTools([
       'cdp', 'call', 'Runtime.evaluate',
       '--params', JSON.stringify({
         expression: '({ access_token: "call-secret" })',
         returnByValue: true,
       }),
-      '--include-sensitive',
+      '--redact',
       '--port', String(browserPort),
     ], env);
-    assert.equal(JSON.parse(sensitive.stdout).result.value.access_token, 'call-secret');
+    assert.equal(JSON.parse(redacted.stdout).result.value.access_token, '<redacted>');
 
     const wrongOwner = await runBrowserTools(
       ['cdp', 'call', 'Runtime.evaluate', '--params', '{"expression":"1"}', '--port', String(browserPort)],
@@ -134,7 +134,7 @@ test('public CLI performs owner-protected CDP calls and blocks lifecycle bypasse
   }
 });
 
-test('public CLI records selected raw CDP events as private redacted JSONL', { timeout: 90000 }, async () => {
+test('public CLI records selected CDP events as private explicitly redacted JSONL', { timeout: 90000 }, async () => {
   const workspace = mkdtempSync(join(tmpdir(), 'browser-tools-cdp-e2e-'));
   const output = join(workspace, 'checkout_network_events.jsonl');
   const ownerToken = randomUUID();
@@ -163,6 +163,8 @@ test('public CLI records selected raw CDP events as private redacted JSONL', { t
     serverOpen = true;
     browserPort = await startBrowser(env);
     await runBrowserTools(['nav', `http://127.0.0.1:${pagePort}/`, '--port', String(browserPort)], env);
+    writeFileSync(output, 'old world-readable capture');
+    chmodSync(output, 0o644);
 
     const captureStart = await runBrowserTools([
       'record-cdp', 'start',
@@ -170,6 +172,8 @@ test('public CLI records selected raw CDP events as private redacted JSONL', { t
       '--domain', 'Network',
       '--event', 'Network.*',
       '--exclude-event', 'Network.dataReceived',
+      '--redact',
+      '--overwrite',
       '--post-wait-ms', '300',
       '--port', String(browserPort),
     ], env);
@@ -231,7 +235,7 @@ test('public CLI records selected raw CDP events as private redacted JSONL', { t
   }
 });
 
-test('public CLI captures filtered API traffic as a private redacted HAR', { timeout: 90000 }, async () => {
+test('public CLI captures raw API traffic by default and optionally redacts extracted recipes', { timeout: 90000 }, async () => {
   const workspace = mkdtempSync(join(tmpdir(), 'browser-tools-har-e2e-'));
   const output = join(workspace, 'checkout_api_network.har');
   const ownerToken = randomUUID();
@@ -290,7 +294,7 @@ test('public CLI captures filtered API traffic as a private redacted HAR', { tim
         const image = new Image();
         image.src = '/asset.png';
         document.body.append(image);
-        await fetch('/api/profile?user=7', { headers: { Authorization: 'Bearer site-secret' } });
+        await fetch('/api/profile?user=7&access_token=query-secret', { headers: { Authorization: 'Bearer site-secret' } });
         await new Promise((resolve, reject) => {
           const xhr = new XMLHttpRequest();
           xhr.open('POST', '/api/update');
@@ -318,8 +322,9 @@ test('public CLI captures filtered API traffic as a private redacted HAR', { tim
 
     assert.equal(statSync(output).mode & 0o777, 0o600);
     const harText = readFileSync(output, 'utf-8');
-    for (const secret of [ownerToken, 'site-secret', 'response-secret', 'request-secret', 'server-secret', 'refresh-secret']) {
-      assert.equal(harText.includes(secret), false, `HAR should not contain secret value: ${secret}`);
+    assert.equal(harText.includes(ownerToken), false, 'HAR must never contain the Browser Tools owner token');
+    for (const secret of ['site-secret', 'response-secret', 'request-secret', 'server-secret', 'refresh-secret', 'query-secret']) {
+      assert.equal(harText.includes(secret), true, `raw HAR should contain debugging evidence: ${secret}`);
     }
     const har = JSON.parse(harText);
     assert.equal(har.log.version, '1.2');
@@ -332,23 +337,24 @@ test('public CLI captures filtered API traffic as a private redacted HAR', { tim
     assert.ok(profile);
     assert.equal(profile.request.method, 'GET');
     assert.equal(profile.response.status, 200);
-    assert.equal(profile.request.headers.find((header) => header.name.toLowerCase() === 'authorization')?.value, '<redacted>');
-    assert.equal(profile.response.headers.find((header) => header.name.toLowerCase() === 'x-api-key')?.value, '<redacted>');
+    assert.equal(profile.request.headers.find((header) => header.name.toLowerCase() === 'authorization')?.value, 'Bearer site-secret');
+    assert.equal(profile.response.headers.find((header) => header.name.toLowerCase() === 'x-api-key')?.value, 'response-secret');
+    assert.equal(profile.request.queryString.find((parameter) => parameter.name === 'access_token')?.value, 'query-secret');
     assert.deepEqual(JSON.parse(profile.response.content.text), {
       id: 7,
       displayName: 'Ada',
-      access_token: '<redacted>',
+      access_token: 'server-secret',
     });
 
     const update = har.log.entries.find((entry) => entry.request.url.endsWith('/api/update'));
     assert.ok(update);
     assert.equal(update.request.method, 'POST');
     assert.equal(update.response.status, 201);
-    assert.deepEqual(JSON.parse(update.request.postData.text), { name: 'Ada', password: '<redacted>' });
+    assert.deepEqual(JSON.parse(update.request.postData.text), { name: 'Ada', password: 'request-secret' });
     assert.deepEqual(JSON.parse(update.response.content.text), {
       ok: true,
-      received: { name: 'Ada', password: '<redacted>' },
-      refreshToken: '<redacted>',
+      received: { name: 'Ada', password: 'request-secret' },
+      refreshToken: 'refresh-secret',
     });
 
     const recipeOutput = join(workspace, 'checkout_api_recipe.json');
@@ -365,8 +371,9 @@ test('public CLI captures filtered API traffic as a private redacted HAR', { tim
     assert.equal(statSync(recipeOutput).mode & 0o777, 0o600);
 
     const recipeText = readFileSync(recipeOutput, 'utf-8');
-    for (const secret of [ownerToken, 'site-secret', 'response-secret', 'request-secret', 'server-secret', 'refresh-secret']) {
-      assert.equal(recipeText.includes(secret), false, `recipe should not contain secret value: ${secret}`);
+    assert.equal(recipeText.includes(ownerToken), false, 'recipe must never contain the Browser Tools owner token');
+    for (const secret of ['site-secret', 'response-secret', 'request-secret', 'server-secret', 'refresh-secret', 'query-secret']) {
+      assert.equal(recipeText.includes(secret), true, `raw recipe should contain debugging evidence: ${secret}`);
     }
     const recipe = JSON.parse(recipeText);
     assert.equal(recipe.kind, 'browser-tools-network-recipe');
@@ -374,14 +381,38 @@ test('public CLI captures filtered API traffic as a private redacted HAR', { tim
     assert.equal(recipe.requests.length, 2);
     assert.deepEqual(recipe.requests.map((request) => request.sequence), [1, 2]);
     assert.deepEqual(new Set(recipe.requests.map((request) => request.resource_type)), new Set(['Fetch', 'XHR']));
-    assert.equal(recipe.requests[0].headers.authorization, '<redacted>');
-    assert.deepEqual(recipe.requests[0].query, [{ name: 'user', value: '7' }]);
-    assert.deepEqual(recipe.requests[1].body.json, { name: 'Ada', password: '<redacted>' });
+    assert.equal(recipe.requests[0].headers.authorization, 'Bearer site-secret');
+    assert.deepEqual(recipe.requests[0].query, [
+      { name: 'user', value: '7' },
+      { name: 'access_token', value: 'query-secret' },
+    ]);
+    assert.deepEqual(recipe.requests[1].body.json, { name: 'Ada', password: 'request-secret' });
     assert.deepEqual(recipe.requests[1].response.body.json, {
       ok: true,
-      received: { name: 'Ada', password: '<redacted>' },
-      refreshToken: '<redacted>',
+      received: { name: 'Ada', password: 'request-secret' },
+      refreshToken: 'refresh-secret',
     });
+
+    const redactedRecipeOutput = join(workspace, 'checkout_api_redacted_recipe.json');
+    await runBrowserTools([
+      'extract-har', output,
+      '--output', redactedRecipeOutput,
+      '--preset', 'api',
+      '--url-pattern', '**/api/**',
+      '--redact',
+    ], env);
+    assert.equal(statSync(redactedRecipeOutput).mode & 0o777, 0o600);
+    const redactedRecipeText = readFileSync(redactedRecipeOutput, 'utf-8');
+    for (const secret of ['site-secret', 'response-secret', 'request-secret', 'server-secret', 'refresh-secret', 'query-secret']) {
+      assert.equal(redactedRecipeText.includes(secret), false, `redacted recipe should not contain secret value: ${secret}`);
+    }
+    const redactedRecipe = JSON.parse(redactedRecipeText);
+    assert.equal(redactedRecipe.requests[0].headers.authorization, '<redacted>');
+    assert.equal(
+      redactedRecipe.requests[0].query.find((parameter) => parameter.name === 'access_token')?.value,
+      '<redacted>',
+    );
+    assert.deepEqual(redactedRecipe.requests[1].body.json, { name: 'Ada', password: '<redacted>' });
   } finally {
     if (recording && browserPort !== null) {
       await runBrowserTools(['record-har', 'stop', '--port', String(browserPort)], env, { allowFailure: true }).catch(() => {});

@@ -72,7 +72,7 @@ Content and lifecycle:
   --idle-ms <n>                   Required quiet period on stop (default: 500)
   --drain-timeout-ms <n>          Maximum in-flight drain wait (default: 5000)
   --max-duration <seconds>        Safety limit (default: 300)
-  --include-sensitive             Keep auth, cookies, and secret-looking body fields
+  --redact                       Redact auth, cookies, and secret-looking body fields
   --overwrite                     Replace existing output
   --port <n>                      Managed browser port (default: 9222)
   --owner-token <token>           Prefer ${OWNER_TOKEN_ENV} instead
