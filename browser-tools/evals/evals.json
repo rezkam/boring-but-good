@@ -70,6 +70,32 @@
         "The answer routes finance-specific quote or market data workflows to the finance skill.",
         "The answer explains that the finance skill should call Browser Tools managed Chrome if browser access is needed."
       ]
+    },
+    {
+      "id": 7,
+      "prompt": "Record the multi-step login flow in the current managed browser so I can visually inspect it later.",
+      "expected_output": "Records the active tab through the public record-gif CLI, captures frames before and after browser actions, saves an action-specific GIF filename, and reviews sampled frames as a contact sheet.",
+      "files": [],
+      "expectations": [
+        "The answer starts with browser-tools record-gif start before the first login action and stops with browser-tools record-gif stop after the final action.",
+        "The answer passes an explicit meaningful output filename such as login_process.gif rather than a generic recording.gif name.",
+        "The answer explains that start captures pre-action frames and stop captures post-action frames for smooth playback.",
+        "The answer passes the reported managed browser port and uses the owner token from the environment.",
+        "After recording, the answer runs browser-tools review-gif and inspects the contact sheet for initial, action, and final states."
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "Open our checkout page in the managed browser, capture only XHR and Fetch calls under /api while I complete a checkout, and produce something another agent can inspect before writing a replay script.",
+      "expected_output": "Records an owner-protected filtered HAR around the interaction, then extracts a private redacted chronological network recipe without executing requests.",
+      "files": [],
+      "expectations": [
+        "The answer starts browser-tools record-har before the interaction and stops it afterward using the reported port and owner token environment.",
+        "The HAR command uses an interaction-specific filename and filters to XHR and Fetch plus the requested /api URL pattern.",
+        "The answer runs browser-tools extract-har after capture to create an agent-readable chronological recipe.",
+        "The answer explains that secrets are redacted by default and --include-sensitive is an explicit private opt-in.",
+        "The answer does not execute or replay captured checkout requests and warns that a future script needs side-effect and dynamic-auth review."
+      ]
     }
   ]
 }

@@ -12,6 +12,30 @@ _Avoid_: flat tool list
 The core capability set for launching, stopping, navigating, evaluating, screenshotting, and selecting inside the sandboxed browser.
 _Avoid_: base thing, main capabilities
 
+**Visual Recording**:
+An owner-protected GIF capture of one active browser tab, with pre-action and post-action frames around a multi-step interaction so a user can inspect the flow later.
+_Avoid_: video capture, anonymous recording
+
+**Visual Review Artifact**:
+A sampled contact-sheet PNG plus machine-readable GIF metadata used to verify that a **Visual Recording** clearly shows its initial, action, and final states.
+_Avoid_: screenshot dump, video thumbnail
+
+**Network Capture**:
+An owner-protected HAR 1.2 recording of selected active-tab HTTP traffic, including bounded request and response evidence needed to understand a browser interaction.
+_Avoid_: packet dump, replay script
+
+**Network Recipe**:
+A compact chronological extraction from a **Network Capture** that an agent can inspect before authoring a separate replay script.
+_Avoid_: executable replay, generated API client
+
+**Raw CDP Capture**:
+A private JSONL stream of selected Chrome DevTools Protocol events for cases where HAR cannot represent the needed protocol detail.
+_Avoid_: HAR, browser log
+
+**CDP Call**:
+A single owner-protected protocol method sent to the active managed tab, with known lifecycle-bypass methods blocked.
+_Avoid_: unmanaged DevTools connection, browser shutdown
+
 **Generic Extractor**:
 A task-neutral helper script that uses **Browser Control** to extract current-page links or article text.
 _Avoid_: domain scraper, finance tool
@@ -35,6 +59,10 @@ _Avoid_: port, profile name, managed token
 ## Relationships
 
 - The **Skill Interface** presents **Browser Control** first.
+- **Visual Recording** uses **Browser Control** ownership and active-tab selection, and keeps its own bounded recording lifecycle.
+- A **Visual Review Artifact** is generated after **Visual Recording** and does not reconnect to the browser.
+- A **Network Capture**, **Raw CDP Capture**, and **CDP Call** all require **Browser Control** ownership before connecting to the active tab.
+- A **Network Recipe** is derived from a **Network Capture** and never executes requests.
 - A **Generic Extractor** uses the **Extractor Module** for repeated lifecycle behavior.
 - Specialist skills, such as finance, should call Browser Tools instead of adding domain helpers here.
 - The **Extractor Module** uses **Browser Control** rather than owning browser lifecycle safety.
