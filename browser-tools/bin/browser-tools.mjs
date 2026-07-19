@@ -13,6 +13,12 @@
  *   browser-tools nav <url> [--new] [--port <n>]
  *   browser-tools eval '<javascript>' [--port <n>]
  *   browser-tools screenshot [--full] [--port <n>]
+ *   browser-tools record-gif start|status|stop [options]
+ *   browser-tools review-gif <meaningful.gif> [options]
+ *   browser-tools record-har start|status|stop [options]
+ *   browser-tools extract-har <capture.har> [options]
+ *   browser-tools record-cdp start|status|stop [options]
+ *   browser-tools cdp call <Domain.method> [options]
  *   browser-tools pick "<instruction>" [--port <n>]
  *   browser-tools scrape-page [--port <n>]
  *   browser-tools extract-article [--chars <n>] [--port <n>]
@@ -33,6 +39,12 @@ const COMMANDS = {
   nav: 'nav.mjs',
   eval: 'eval.mjs',
   screenshot: 'screenshot.mjs',
+  'record-gif': 'record-gif.mjs',
+  'review-gif': 'review-gif.mjs',
+  'record-har': 'record-har.mjs',
+  'extract-har': 'extract-har.mjs',
+  'record-cdp': 'record-cdp.mjs',
+  cdp: 'cdp.mjs',
   pick: 'pick.mjs',
   'scrape-page': 'scrape-page.mjs',
   'extract-article': 'extract-article.mjs',

@@ -13,6 +13,12 @@ const PUBLIC_BROWSER_CONTROL_SCRIPTS = [
   'scripts/nav.mjs',
   'scripts/eval.mjs',
   'scripts/screenshot.mjs',
+  'scripts/record-gif.mjs',
+  'scripts/review-gif.mjs',
+  'scripts/record-har.mjs',
+  'scripts/extract-har.mjs',
+  'scripts/record-cdp.mjs',
+  'scripts/cdp.mjs',
   'scripts/pick.mjs',
 ];
 const GENERIC_EXTRACTOR_SCRIPTS = [
@@ -60,6 +66,45 @@ test('SKILL.md and browser-control.md document every public browser-tools CLI su
 
   assert.match(skill, /Extract article-like visible links/);
   assert.match(browserControl, /Extract article-like visible links/);
+});
+
+test('GIF recording contract keeps multi-step playback clear and identifiable', () => {
+  const skill = readRelative('SKILL.md');
+  const browserControl = readRelative('references/browser-control.md');
+
+  for (const documentation of [skill, browserControl]) {
+    assert.match(documentation, /browser-tools record-gif start --output .*login_process\.gif/);
+    assert.match(documentation, /pre-action/i);
+    assert.match(documentation, /post-action/i);
+    assert.match(documentation, /meaningful|action-specific/i);
+    assert.match(documentation, /browser-tools review-gif/);
+    assert.match(documentation, /contact sheet/i);
+  }
+
+  assert.match(skill, /multi-step browser interactions/i);
+  assert.match(skill, /Always capture extra frames before and after/i);
+  assert.match(skill, /Always name the GIF meaningfully/i);
+
+  const recorder = readRelative('scripts/gif-recorder.mjs');
+  assert.match(recorder, /DEFAULT_GIF_PRE_ROLL_MS = [1-9]/);
+  assert.match(recorder, /DEFAULT_GIF_POST_ROLL_MS = [1-9]/);
+});
+
+test('network capture contract documents owner protection, filtering, redaction, and replay safety', () => {
+  const skill = readRelative('SKILL.md');
+  const browserControl = readRelative('references/browser-control.md');
+
+  for (const documentation of [skill, browserControl]) {
+    assert.match(documentation, /browser-tools record-har start/);
+    assert.match(documentation, /browser-tools extract-har/);
+    assert.match(documentation, /browser-tools record-cdp start/);
+    assert.match(documentation, /browser-tools cdp call/);
+    assert.match(documentation, /BROWSER_TOOLS_OWNER_TOKEN/);
+    assert.match(documentation, /--resource-type/);
+    assert.match(documentation, /--event/);
+    assert.match(documentation, /--include-sensitive/);
+    assert.match(documentation, /never.*(?:execute|replay)|does not execute/i);
+  }
 });
 
 test('SKILL.md documents the npm package setup required to install the browser-tools CLI', () => {

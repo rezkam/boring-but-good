@@ -32,8 +32,59 @@ test('unknown command exits 1 with an actionable error', () => {
 
 test('every dispatch table command names an existing usage line', () => {
   const result = run(['--help']);
-  for (const name of ['start', 'status', 'stop', 'nav', 'eval', 'screenshot', 'pick', 'scrape-page', 'extract-article', 'config']) {
+  for (const name of ['start', 'status', 'stop', 'nav', 'eval', 'screenshot', 'record-gif', 'review-gif', 'record-har', 'extract-har', 'record-cdp', 'cdp', 'pick', 'scrape-page', 'extract-article', 'config']) {
     assert.match(result.stderr, new RegExp(`^  ${name}$`, 'm'), `--help should list "${name}"`);
+  }
+});
+
+test('network capture commands expose actionable no-argument usage', () => {
+  for (const [command, pattern] of [
+    ['record-har', /Usage: browser-tools record-har/],
+    ['extract-har', /Usage: browser-tools extract-har/],
+    ['record-cdp', /Usage: browser-tools record-cdp/],
+    ['cdp', /Usage: browser-tools cdp call/],
+  ]) {
+    const result = run([command]);
+    assert.equal(result.status, 1, `${command} should reject missing arguments`);
+    assert.match(result.stderr, pattern);
+  }
+});
+
+test('HAR and CDP status commands do not require a running browser', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'bin-network-status-test-'));
+  try {
+    for (const [command, kind] of [['record-har', 'har'], ['record-cdp', 'cdp']]) {
+      const result = run([command, 'status', '--port', '9222', '--json'], { BROWSER_TOOLS_CACHE_DIR: tmp });
+      assert.equal(result.status, 0);
+      assert.deepEqual(JSON.parse(result.stdout), { recording: false, kind, port: 9222 });
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('review-gif without a GIF path prints usage and exits non-zero', () => {
+  const result = run(['review-gif']);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Usage: browser-tools review-gif <meaningful\.gif>/);
+});
+
+test('record-gif start rejects a generic output name through the public CLI', () => {
+  const result = run(['record-gif', 'start', '--output', 'recording.gif'], {
+    BROWSER_TOOLS_OWNER_TOKEN: 'gif-name-validation-test',
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /too generic.*login_process\.gif/);
+});
+
+test('record-gif status dispatches without requiring a running browser', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'bin-gif-status-test-'));
+  try {
+    const result = run(['record-gif', 'status', '--port', '9222', '--json'], { BROWSER_TOOLS_CACHE_DIR: tmp });
+    assert.equal(result.status, 0);
+    assert.deepEqual(JSON.parse(result.stdout), { recording: false, port: 9222 });
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
   }
 });
 
