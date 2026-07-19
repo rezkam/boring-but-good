@@ -4,7 +4,7 @@ Use Browser Control when the task is about controlling the sandboxed Chrome itse
 
 ## Commands
 
-Requires the `@rezkam/browser-tools` npm package (`npm install -g @rezkam/browser-tools`, or run each command via `npx @rezkam/browser-tools <subcommand>`). Every subcommand dispatches to the matching script under `scripts/` unchanged.
+Requires the `@rezkam/browser-tools` npm package (`npm install -g @rezkam/browser-tools`, or run each command via `npx @rezkam/browser-tools <subcommand>`). Every subcommand dispatches to the matching script under `scripts/` unchanged. GIF recording and review also require ffmpeg and its ffprobe tool (`brew install ffmpeg`).
 
 | Command | Purpose | Example |
 | --- | --- | --- |
@@ -15,6 +15,12 @@ Requires the `@rezkam/browser-tools` npm package (`npm install -g @rezkam/browse
 | `browser-tools nav` | Navigate current tab or open a new tab | `browser-tools nav https://example.com --new` |
 | `browser-tools eval` | Run JavaScript in the active tab | `browser-tools eval 'document.title'` |
 | `browser-tools screenshot` | Capture visible or full-page screenshot | `browser-tools screenshot --full` |
+| `browser-tools record-gif` | Start, inspect, or stop active-tab GIF recording | `browser-tools record-gif start --output ./login_process.gif` |
+| `browser-tools review-gif` | Probe a GIF and render a sampled contact sheet | `browser-tools review-gif ./login_process.gif` |
+| `browser-tools record-har` | Record filtered active-tab HTTP traffic as HAR 1.2 | `browser-tools record-har start --output ./checkout_api_network.har --preset api` |
+| `browser-tools extract-har` | Extract chronological agent-readable network recipe | `browser-tools extract-har ./checkout_api_network.har` |
+| `browser-tools record-cdp` | Record selected raw active-tab CDP events as JSONL | `browser-tools record-cdp start --output ./checkout_network_events.jsonl --domain Network` |
+| `browser-tools cdp` | Send one owner-protected active-tab CDP method | `browser-tools cdp call Runtime.evaluate --params '{"expression":"document.title"}'` |
 | `browser-tools pick` | Select DOM elements interactively | `browser-tools pick "Click the price"` |
 | `browser-tools scrape-page` | Extract article-like visible links from the current page | `browser-tools scrape-page` |
 | `browser-tools extract-article` | Extract article body text from the current page | `browser-tools extract-article --chars 6000` |
@@ -88,7 +94,7 @@ Ownership rules:
 
 - Starting without an explicit `--port` never reuses another listening browser. It auto-allocates the next free port and creates a new owned sandbox.
 - Starting with an explicit `--port` reuses only when that browser is Browser Tools managed and the owner token matches.
-- Browser Control and generic extractors refuse to connect when the owner token is missing or wrong.
+- Browser Control, GIF recorders, and generic extractors refuse to connect when the owner token is missing or wrong.
 - `browser-tools stop` refuses to stop a live browser when the owner token is missing or wrong.
 - Per-port lock directories under the configured cache directory serialize concurrent starts so two agents do not claim the same port at the same time.
 
@@ -178,6 +184,197 @@ browser-tools eval 'document.querySelectorAll("a").length' --port <reported port
 browser-tools screenshot --full --port <reported port>
 ```
 
+### Record a multi-step interaction as GIF
+
+Use a GIF when the user needs visual inspection or playback of a multi-step browser flow. The recorder captures the active tab selected when recording starts.
+
+```bash
+browser-tools record-gif start --output "$PWD/login_process.gif" --port <reported port>
+# Perform navigation, clicks, typing, or other browser actions.
+browser-tools record-gif status --port <reported port> --json
+browser-tools record-gif stop --port <reported port>
+```
+
+`start` does not return until it has captured the default 1000 ms pre-action period. Begin actions only after it returns. `stop` captures another 1000 ms post-action period before it writes the final path to stdout. These extra frames keep the first and final states readable and make playback smooth. Both periods stay enabled; optional `--pre-roll-ms` and `--post-roll-ms` values can adjust them from 100 to 10000 ms.
+
+Always pass `--output` with a meaningful, action-specific `.gif` filename, such as `login_process.gif`, `checkout_validation.gif`, or `settings_theme_change.gif`. Generic names such as `recording.gif`, `capture.gif`, and `output.gif` are rejected. Relative paths resolve from the command's working directory. Existing files are preserved unless `--overwrite` is set.
+
+Useful recording options:
+
+- `--fps <1-30>`, default 10
+- `--colors <2-256>`, default 128
+- `--scale <0.1-2>`, default 1
+- `--max-duration <1-3600>`, default 120 seconds
+- `--pre-roll-ms <100-10000>`, default 1000
+- `--post-roll-ms <100-10000>`, default 1000
+
+Stop recording before stopping Chrome. Recording runs in a detached owner-token-protected worker and is bounded by `--max-duration`, so an abandoned command does not record forever. `status` reports whether that worker is starting, recording, in post-action capture, completed, or failed. A recording stays tied to its original tab. If an interaction opens and moves to another tab, stop the current GIF and start another recording with a name that describes the new tab's flow.
+
+### Review recorded GIF frames
+
+After every multi-step visual recording, probe the media and build a contact sheet:
+
+```bash
+browser-tools review-gif ./login_process.gif
+```
+
+The command uses ffprobe to read the frame count, duration, frame rate, and dimensions. It then uses ffmpeg to sample frames across the GIF and tile them into a PNG. Defaults are 2 sampled frames per second, 480-pixel frame width, and a 4 by 4 sheet. For GIFs that would exceed the sheet's 16 cells, it lowers the sampling rate so the contact sheet still represents the full duration.
+
+Default outputs are derived from the meaningful GIF name:
+
+```text
+./.gif-review/login_process-contact-sheet.png
+./.gif-review/login_process-review.json
+```
+
+Read the contact sheet image and verify all three parts of the visual story:
+
+1. Initial state before the first action
+2. Important intermediate action states
+3. Final state after the last action
+
+If the beginning or ending is not readable, record again with longer `--pre-roll-ms` or `--post-roll-ms`. If an important intermediate action is missing, increase review `--fps`, increase `--columns` or `--rows`, or record the interaction at a higher `record-gif --fps` value.
+
+Useful review options:
+
+- `--out-dir <path>`
+- `--fps <0.1-30>`, maximum sampling rate, default 2
+- `--width <64-1920>`, default 480
+- `--columns <1-10>`, default 4
+- `--rows <1-10>`, default 4
+- `--json`, prints the same report stored in the review JSON
+
+For direct debugging, these commands show the underlying short-GIF process:
+
+```bash
+mkdir -p .gif-review
+ffprobe -v error -count_frames \
+  -show_entries stream=nb_read_frames,duration,r_frame_rate \
+  -of default=nw=1 login_process.gif
+ffmpeg -v error -i login_process.gif \
+  -vf "fps=2,scale=480:-1,tile=4x4" \
+  -frames:v 1 .gif-review/login_process-contact-sheet.png
+ls -lh .gif-review/login_process-contact-sheet.png
+```
+
+Prefer `browser-tools review-gif` for normal use because it validates inputs, chooses a sampling rate that fits the sheet, uses meaningful output names, and writes machine-readable metadata.
+
+### Record filtered HTTP traffic as HAR
+
+Use HAR capture to observe the network behavior caused by a browser interaction:
+
+```bash
+browser-tools record-har start \
+  --output "$PWD/checkout_api_network.har" \
+  --preset api \
+  --url-pattern '**/api/**' \
+  --method GET,POST \
+  --port <reported port>
+
+# Perform the interaction in the managed browser.
+
+browser-tools record-har status --port <reported port> --json
+browser-tools record-har stop --port <reported port>
+```
+
+`start` attaches a new owner-validated CDP session to the active tab and enables the Network domain before returning. `stop` waits for selected in-flight requests to finish and for a quiet period before writing standard HAR 1.2. Stop capture before stopping Chrome.
+
+Resource presets:
+
+- `api`: XHR, Fetch, Preflight, EventSource, WebSocket
+- `page`: Document, Script, Stylesheet, XHR, Fetch
+- `all`: every supported Network resource type
+
+Supported `--resource-type` values match CDP: `Document`, `Stylesheet`, `Image`, `Media`, `Font`, `Script`, `TextTrack`, `XHR`, `Fetch`, `Prefetch`, `EventSource`, `WebSocket`, `Manifest`, `SignedExchange`, `Ping`, `CSPViolationReport`, `Preflight`, `FedCM`, and `Other`. Values are case-insensitive. Explicit resource types without `--preset` narrow capture to only those types. With a preset, explicit types extend it.
+
+Filters can be repeated or comma-separated:
+
+- `--resource-type` and `--exclude-resource-type`
+- `--url-pattern` and `--exclude-url-pattern`, using `*` and `?` globs
+- `--method` and `--exclude-method`
+- `--status` and `--exclude-status`, with values such as `200-299` or `404`
+- `--mime-type` and `--exclude-mime-type`, using globs
+- `--min-size` and `--max-size`, using encoded response bytes
+
+Content and lifecycle controls:
+
+- `--capture headers,bodies,timing`, all enabled by default
+- `--max-body-bytes`, default 1 MiB per request or response body
+- `--idle-ms`, default 500 ms quiet period on stop
+- `--drain-timeout-ms`, default 5000 ms maximum drain wait
+- `--max-duration`, default 300 seconds
+- `--include-sensitive`, explicit opt-in to exact private values
+- `--overwrite`, explicit replacement of an existing output
+
+HAR captures use file mode `0600`. By default Browser Tools redacts authorization, proxy authorization, cookies, set-cookie, API keys, passwords, session values, CSRF values, and token or secret-looking JSON fields. It preserves body structure when JSON or form data can be parsed. Binary response bodies use HAR base64 encoding. The Browser Tools owner token is only used to authorize the CDP connection and is never written into the capture.
+
+HAR represents HTTP request and response exchanges. Use raw CDP capture for WebSocket frames, protocol events outside Network, or details that HAR cannot represent.
+
+### Extract a network recipe
+
+Convert a HAR into a compact chronological file that another agent can inspect:
+
+```bash
+browser-tools extract-har "$PWD/checkout_api_network.har" \
+  --output "$PWD/checkout_api_recipe.json" \
+  --preset api \
+  --url-pattern '**/api/**'
+```
+
+The recipe preserves request order, resource type, method, URL, query parameters, headers, request body, response status, response body sample, timing, and failures. Its default `api` preset removes documents, scripts, images, fonts, and other page noise. It accepts the same resource, URL, method, status, and MIME filters as HAR capture.
+
+`extract-har` does not execute or replay requests. Treat the recipe as evidence for authoring a separate script. Before executing any resulting script, identify dynamic values, authentication dependencies, anti-CSRF data, write side effects, retry behavior, and ordering constraints. Recipe files are private `0600` outputs and are redacted again by default, even if the source HAR contains sensitive data.
+
+### Record raw CDP events
+
+Use raw JSONL when an agent needs protocol details that HAR omits:
+
+```bash
+browser-tools record-cdp start \
+  --output "$PWD/checkout_network_events.jsonl" \
+  --domain Network \
+  --event 'Network.*' \
+  --exclude-event Network.dataReceived \
+  --port <reported port>
+
+# Perform the interaction.
+
+browser-tools record-cdp status --port <reported port> --json
+browser-tools record-cdp stop --port <reported port>
+```
+
+Each line contains `timestamp`, `elapsed_ms`, `method`, and `params`. Use repeated `--domain` to enable domains, repeated `--event` to include exact names or wildcards, and repeated `--exclude-event` to remove noisy events. If no selection is given, the recorder enables Network and captures `Network.*`.
+
+Most event domains use `Domain.enable`. For a domain with another activation mechanism, use `--skip-enable <domain>` and one or more session setup calls:
+
+```bash
+browser-tools record-cdp start \
+  --output "$PWD/target_lifecycle_events.jsonl" \
+  --domain Target \
+  --skip-enable Target \
+  --setup '{"method":"Target.setDiscoverTargets","params":{"discover":true}}' \
+  --event 'Target.*' \
+  --port <reported port>
+```
+
+Setup methods use the same lifecycle safety block as direct CDP calls. Other controls are `--post-wait-ms` (default 500), `--max-duration` (default 300 seconds), `--max-events` (default 100000), `--include-sensitive`, and `--overwrite`. JSONL output is private and redacted by default, including request bodies and WebSocket payload data.
+
+### Send direct CDP calls
+
+Send a single method through an owner-validated session attached to the active tab:
+
+```bash
+browser-tools cdp call Runtime.evaluate \
+  --params '{"expression":"document.title","returnByValue":true}' \
+  --port <reported port>
+```
+
+Use `--params-file <path>` rather than inline JSON when parameters may be sensitive. Results are JSON and use the same default redaction. Add `--include-sensitive` only when exact values are required. Known lifecycle-bypass methods that close or crash Chrome, dispose contexts, detach targets, attach directly to the browser target, or tunnel nested protocol messages are blocked so Browser Tools managed state remains authoritative.
+
+Direct CDP calls can mutate the sandboxed page or profile. Inspect the protocol method before calling it. The owner token authorizes the operation but is never sent as a protocol parameter or printed in output.
+
+HAR and raw CDP recorders stay tied to the active tab selected at `start`. If the interaction changes to another tab or popup, stop and start a new meaningfully named capture for that target.
+
 ### Pick DOM elements
 
 ```bash
@@ -194,5 +391,13 @@ In the browser:
 ## Implementation notes
 
 `scripts/browser-control.mjs` owns port parsing, owner-token validation, per-port start locks, Chrome paths, private profile registry discovery, Profile Sync, launch and stop behavior, CDP connection, active page lookup, dedicated page lookup, safe disconnect, and artifact path creation.
+
+`scripts/record-gif.mjs` owns the recording CLI lifecycle. `scripts/gif-recorder.mjs` owns detached recording state, owner verification, required pre-action and post-action capture, and periodic Puppeteer page capture. It sends each real page frame to ffmpeg as it is captured instead of accumulating frames in Node memory until stop. Periodic capture is required because Chrome emits native screencast frames only when the page paints, which cannot guarantee static pre-action and post-action frames.
+
+`scripts/review-gif.mjs` owns post-recording media probing, bounded frame sampling, contact-sheet generation, and review metadata. It does not connect to Chrome and does not need an owner token.
+
+`scripts/record-har.mjs`, `scripts/har-capture.mjs`, and `scripts/cdp-recording-state.mjs` own filtered HAR lifecycle, Network event projection, private state, body bounds, request draining, and HAR output. `scripts/extract-har.mjs` owns non-executable chronological recipe extraction.
+
+`scripts/record-cdp.mjs` and `scripts/cdp-event-capture.mjs` own raw event selection and private JSONL output. `scripts/cdp.mjs` owns direct calls. `scripts/cdp-common.mjs` owns shared resource vocabulary, glob and status matching, redaction, meaningful private output paths, lifecycle-method blocking, and owner-validated active-tab sessions.
 
 Generic extractors should use `scripts/resource-helper.mjs` for shared lifecycle. Domain-specific workflows should live in specialist skills and call Browser Tools as a dependency.
