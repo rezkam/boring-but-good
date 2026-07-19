@@ -19,7 +19,7 @@ import {
   sanitizeCdpEvent,
 } from '../scripts/cdp-event-capture.mjs';
 import { sanitizeCdpCallResult } from '../scripts/cdp.mjs';
-import { extractHarRecipe } from '../scripts/extract-har.mjs';
+import { extractHarRecipe, parseHarRecipeOptions } from '../scripts/extract-har.mjs';
 import { HarCollector, parseHarCaptureOptions } from '../scripts/har-capture.mjs';
 
 test('HAR filters let explicit resource types narrow capture without a preset', () => {
@@ -36,12 +36,20 @@ test('HAR filters let explicit resource types narrow capture without a preset', 
     '--status', '200-299,304',
     '--mime-type', 'application/json*',
   ]);
-  assert.deepEqual(apiPlusDocument.resourceTypes, ['XHR', 'Fetch', 'Preflight', 'EventSource', 'WebSocket', 'Document']);
+  assert.deepEqual(apiPlusDocument.resourceTypes, ['XHR', 'Fetch', 'Preflight', 'EventSource', 'Document']);
   assert.deepEqual(apiPlusDocument.excludedResourceTypes, ['Preflight']);
   assert.deepEqual(apiPlusDocument.urlPatterns, ['**/api/**', '**/graphql']);
   assert.deepEqual(apiPlusDocument.methods, ['GET', 'POST']);
   assert.deepEqual(apiPlusDocument.statuses, [{ start: 200, end: 299 }, { start: 304, end: 304 }]);
   assert.deepEqual(apiPlusDocument.mimeTypes, ['application/json*']);
+
+  const commaPattern = '**/search?q=one,two';
+  assert.deepEqual(parseHarCaptureOptions(['--url-pattern', commaPattern]).urlPatterns, [commaPattern]);
+  assert.deepEqual(parseHarRecipeOptions(['--url-pattern', commaPattern]).urlPatterns, [commaPattern]);
+  assert.throws(
+    () => parseHarCaptureOptions(['--resource-type', 'WebSocket']),
+    /Unsupported HAR resource type: WebSocket/,
+  );
 
   assert.throws(
     () => parseHarCaptureOptions(['--min-size', '100', '--max-size', '99']),
@@ -180,6 +188,103 @@ test('HAR collector applies response status, MIME, and size filters before outpu
   assert.equal(excluded.build().log.entries.length, 0);
 });
 
+test('HAR redaction filters URL headers and initiator metadata', async () => {
+  const options = parseHarCaptureOptions(['--resource-type', 'Fetch', '--redact']);
+  const collector = new HarCollector(options);
+  collector.requestWillBeSent({
+    requestId: 'redacted-request',
+    type: 'Fetch',
+    timestamp: 1,
+    wallTime: 1,
+    initiator: {
+      type: 'script',
+      url: 'https://example.test/callback?access_token=initiator-secret',
+      stack: {
+        callFrames: [{
+          functionName: 'load',
+          scriptId: '1',
+          url: 'https://example.test/app.js?session=stack-secret',
+          lineNumber: 1,
+          columnNumber: 1,
+        }],
+      },
+    },
+    request: {
+      method: 'GET',
+      url: 'https://example.test/api/data',
+      headers: { Referer: 'https://example.test/page?access_token=referer-secret' },
+    },
+  });
+  collector.responseReceived({
+    requestId: 'redacted-request',
+    type: 'Fetch',
+    timestamp: 1.1,
+    response: {
+      status: 302,
+      statusText: 'Found',
+      mimeType: 'application/json',
+      headers: { Location: '/next?session=location-secret' },
+    },
+  });
+  await collector.loadingFinished(
+    { requestId: 'redacted-request', timestamp: 1.2, encodedDataLength: 2 },
+    { send: async () => ({ body: '{}', base64Encoded: false }) },
+  );
+
+  const entry = collector.build().log.entries[0];
+  assert.equal(
+    entry.request.headers.find((header) => header.name.toLowerCase() === 'referer').value,
+    'https://example.test/page?access_token=%3Credacted%3E',
+  );
+  assert.equal(
+    entry.response.headers.find((header) => header.name.toLowerCase() === 'location').value,
+    '/next?session=%3Credacted%3E',
+  );
+  assert.equal(entry._initiator.url, 'https://example.test/callback?access_token=%3Credacted%3E');
+  assert.equal(
+    entry._initiator.stack.callFrames[0].url,
+    'https://example.test/app.js?session=%3Credacted%3E',
+  );
+});
+
+test('HAR capture omits cookies when headers are excluded', async () => {
+  const options = parseHarCaptureOptions([
+    '--resource-type', 'Fetch',
+    '--capture', 'bodies,timing',
+  ]);
+  const collector = new HarCollector(options);
+  collector.requestWillBeSent({
+    requestId: 'cookied-request',
+    type: 'Fetch',
+    timestamp: 1,
+    wallTime: 1,
+    initiator: { type: 'script' },
+    request: { method: 'GET', url: 'https://example.test/api/data', headers: {} },
+  });
+  collector.requestWillBeSentExtraInfo({
+    requestId: 'cookied-request',
+    associatedCookies: [{
+      blockedReasons: [],
+      cookie: { name: 'session', value: 'cookie-secret', path: '/', domain: 'example.test' },
+    }],
+    headers: { Cookie: 'session=cookie-secret' },
+  });
+  collector.responseReceived({
+    requestId: 'cookied-request',
+    type: 'Fetch',
+    timestamp: 1.1,
+    response: { status: 200, statusText: 'OK', mimeType: 'application/json', headers: {} },
+  });
+  await collector.loadingFinished(
+    { requestId: 'cookied-request', timestamp: 1.2, encodedDataLength: 2 },
+    { send: async () => ({ body: '{}', base64Encoded: false }) },
+  );
+
+  const request = collector.build().log.entries[0].request;
+  assert.deepEqual(request.headers, []);
+  assert.deepEqual(request.cookies, []);
+});
+
 test('URL, status, and sensitive-data helpers preserve structure while filtering secrets', () => {
   assert.equal(matchesPatterns('https://example.test/api/users', ['**/api/**'], []), true);
   assert.equal(matchesPatterns('https://example.test/api/users', [], ['**/api/**']), false);
@@ -206,6 +311,10 @@ test('URL, status, and sensitive-data helpers preserve structure while filtering
   assert.equal(
     redactUrl('https://example.test/callback?code=public&access_token=secret'),
     'https://example.test/callback?code=public&access_token=%3Credacted%3E',
+  );
+  assert.equal(
+    redactUrl('/next?code=public&session=secret#complete'),
+    '/next?code=public&session=%3Credacted%3E#complete',
   );
 });
 
@@ -235,11 +344,19 @@ test('raw CDP capture supports wildcard events, skipped enables, and setup calls
 test('explicit raw CDP event redaction handles headers, request JSON, cookies, and WebSocket frames', () => {
   const request = sanitizeCdpEvent('Network.requestWillBeSent', {
     request: {
-      headers: { Authorization: 'Bearer secret', 'Content-Type': 'application/json' },
+      headers: {
+        Authorization: 'Bearer secret',
+        'Content-Type': 'application/json',
+        Referer: 'https://example.test/page?access_token=referer-secret',
+      },
       postData: '{"name":"Ada","password":"secret"}',
     },
   }, { redact: true });
   assert.equal(request.request.headers.Authorization, '<redacted>');
+  assert.equal(
+    request.request.headers.Referer,
+    'https://example.test/page?access_token=%3Credacted%3E',
+  );
   assert.deepEqual(JSON.parse(request.request.postData), { name: 'Ada', password: '<redacted>' });
 
   const cookies = sanitizeCdpEvent('Network.requestWillBeSentExtraInfo', {

@@ -113,7 +113,7 @@ browser-tools extract-har "$PWD/checkout_api_network.har" \
   --output "$PWD/checkout_api_recipe.json"
 ```
 
-`record-har` writes standard HAR 1.2 and can filter resource types, URL globs, methods, statuses, MIME types, and encoded sizes. Presets are `api`, `page`, and `all`. Explicit `--resource-type` values without a preset narrow capture to only those types.
+`record-har` writes standard HAR 1.2 and can filter resource types, URL globs, methods, statuses, MIME types, and encoded sizes. Presets are `api`, `page`, and `all`. Explicit `--resource-type` values without a preset narrow capture to only those types. URL pattern flags preserve commas and must be repeated for multiple patterns. Use raw CDP capture instead of HAR for WebSocket handshakes and frames.
 
 The extracted recipe removes page noise and preserves chronological request structure, bodies, response samples, and timing so an agent can write a separate fetch, curl, or browser-backed script. It does not execute requests. Never execute or replay captured write requests without reviewing authentication, dynamic values, ordering dependencies, and side effects first.
 

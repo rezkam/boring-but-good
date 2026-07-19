@@ -283,13 +283,13 @@ browser-tools record-har stop --port <reported port>
 
 Resource presets:
 
-- `api`: XHR, Fetch, Preflight, EventSource, WebSocket
+- `api`: XHR, Fetch, Preflight, EventSource
 - `page`: Document, Script, Stylesheet, XHR, Fetch
 - `all`: every supported Network resource type
 
-Supported `--resource-type` values match CDP: `Document`, `Stylesheet`, `Image`, `Media`, `Font`, `Script`, `TextTrack`, `XHR`, `Fetch`, `Prefetch`, `EventSource`, `WebSocket`, `Manifest`, `SignedExchange`, `Ping`, `CSPViolationReport`, `Preflight`, `FedCM`, and `Other`. Values are case-insensitive. Explicit resource types without `--preset` narrow capture to only those types. With a preset, explicit types extend it.
+Supported `--resource-type` values are `Document`, `Stylesheet`, `Image`, `Media`, `Font`, `Script`, `TextTrack`, `XHR`, `Fetch`, `Prefetch`, `EventSource`, `Manifest`, `SignedExchange`, `Ping`, `CSPViolationReport`, `Preflight`, `FedCM`, and `Other`. Values are case-insensitive. Explicit resource types without `--preset` narrow capture to only those types. With a preset, explicit types extend it. WebSocket traffic requires raw CDP capture because it uses dedicated WebSocket protocol events rather than the HTTP loading events projected into HAR.
 
-Filters can be repeated or comma-separated:
+List-valued filters can be repeated or comma-separated. URL pattern flags must be repeated for multiple patterns, and each pattern is preserved verbatim so commas can match URL text:
 
 - `--resource-type` and `--exclude-resource-type`
 - `--url-pattern` and `--exclude-url-pattern`, using `*` and `?` globs
@@ -300,7 +300,7 @@ Filters can be repeated or comma-separated:
 
 Content and lifecycle controls:
 
-- `--capture headers,bodies,timing`, all enabled by default
+- `--capture headers,bodies,timing`, all enabled by default; omitting `headers` also omits parsed request cookies
 - `--max-body-bytes`, default 1 MiB per request or response body
 - `--idle-ms`, default 500 ms quiet period on stop
 - `--drain-timeout-ms`, default 5000 ms maximum drain wait
@@ -308,9 +308,9 @@ Content and lifecycle controls:
 - `--redact`, explicit filtering of sensitive-looking values
 - `--overwrite`, explicit replacement of an existing output
 
-HAR captures preserve raw debugging evidence by default, including authorization, cookies, API keys, tokens, and request or response bodies. Add `--redact` to filter sensitive-looking headers, query parameters, cookies, JSON fields, and form fields while preserving structure. Binary response bodies use HAR base64 encoding. Outputs use owner-only file mode `0600`, but are not encrypted. The Browser Tools owner token is only used to authorize the CDP connection and is never written into the capture.
+HAR captures preserve raw debugging evidence by default, including authorization, cookies, API keys, tokens, and request or response bodies. Add `--redact` to filter sensitive-looking headers, query parameters, cookies, JSON fields, form fields, URL-valued headers, and initiator URLs while preserving structure. Binary response bodies use HAR base64 encoding. Outputs use owner-only file mode `0600`, but are not encrypted. The Browser Tools owner token is only used to authorize the CDP connection and is never written into the capture.
 
-HAR represents HTTP request and response exchanges. Use raw CDP capture for WebSocket frames, protocol events outside Network, or details that HAR cannot represent.
+HAR represents HTTP request and response exchanges. Use raw CDP capture for WebSocket handshakes and frames, protocol events outside Network, or details that HAR cannot represent.
 
 ### Extract a network recipe
 

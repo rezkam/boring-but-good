@@ -10,7 +10,7 @@ import {
 import { basename, dirname, extname, parse, resolve } from 'node:path';
 import { activePage, connectBrowser } from './browser-control.mjs';
 
-export const CDP_RESOURCE_TYPES = [
+export const HAR_RESOURCE_TYPES = [
   'Document',
   'Stylesheet',
   'Image',
@@ -22,7 +22,6 @@ export const CDP_RESOURCE_TYPES = [
   'Fetch',
   'Prefetch',
   'EventSource',
-  'WebSocket',
   'Manifest',
   'SignedExchange',
   'Ping',
@@ -32,10 +31,10 @@ export const CDP_RESOURCE_TYPES = [
   'Other',
 ];
 
-export const CDP_RESOURCE_PRESETS = {
-  api: ['XHR', 'Fetch', 'Preflight', 'EventSource', 'WebSocket'],
+export const HAR_RESOURCE_PRESETS = {
+  api: ['XHR', 'Fetch', 'Preflight', 'EventSource'],
   page: ['Document', 'Script', 'Stylesheet', 'XHR', 'Fetch'],
-  all: [...CDP_RESOURCE_TYPES],
+  all: [...HAR_RESOURCE_TYPES],
 };
 
 export const BLOCKED_CDP_METHODS = new Set([
@@ -51,6 +50,7 @@ export const BLOCKED_CDP_METHODS = new Set([
 ]);
 
 const SENSITIVE_NAME = /(?:^|[-_])(?:authorization|proxy[-_]?authorization|cookie|set[-_]?cookie|api[-_]?key|access[-_]?token|refresh[-_]?token|id[-_]?token|token|secret|password|passwd|session|csrf|xsrf)(?:$|[-_])/i;
+const URL_HEADER_NAME = /^(?:content-location|location|origin|referer|referrer)$/i;
 const GENERIC_CAPTURE_STEMS = new Set(['capture', 'network', 'output', 'recording', 'trace', 'untitled', 'test']);
 
 export function validateCdpMethod(value, { allowBlocked = false } = {}) {
@@ -80,18 +80,22 @@ export function optionValues(args, name) {
     .flatMap((value) => value.split(',').map((part) => part.trim()).filter(Boolean));
 }
 
+export function patternOptionValues(args, name) {
+  return rawOptionValues(args, name).map((value) => value.trim()).filter(Boolean);
+}
+
 export function normalizeResourceTypes(values, { allowEmpty = true } = {}) {
   if (!values.length && allowEmpty) return [];
-  const canonical = new Map(CDP_RESOURCE_TYPES.map((type) => [type.toLowerCase(), type]));
+  const canonical = new Map(HAR_RESOURCE_TYPES.map((type) => [type.toLowerCase(), type]));
   return [...new Set(values.map((value) => {
     const type = canonical.get(String(value).toLowerCase());
-    if (!type) throw new Error(`Unknown CDP resource type: ${value}. Expected one of: ${CDP_RESOURCE_TYPES.join(', ')}`);
+    if (!type) throw new Error(`Unsupported HAR resource type: ${value}. Expected one of: ${HAR_RESOURCE_TYPES.join(', ')}`);
     return type;
   }))];
 }
 
 export function resourceTypesForPreset(preset = 'all') {
-  const types = CDP_RESOURCE_PRESETS[String(preset).toLowerCase()];
+  const types = HAR_RESOURCE_PRESETS[String(preset).toLowerCase()];
   if (!types) throw new Error(`Unknown capture preset: ${preset}. Expected api, page, or all`);
   return [...types];
 }
@@ -132,14 +136,28 @@ export function matchesStatus(status, includes = [], excludes = []) {
 
 export function redactUrl(value, { includeSensitive = false } = {}) {
   if (includeSensitive) return value;
+  const text = String(value);
   try {
-    const url = new URL(String(value));
+    const url = new URL(text);
     for (const key of [...url.searchParams.keys()]) {
       if (isSensitiveName(key)) url.searchParams.set(key, '<redacted>');
     }
     return url.toString();
   } catch {
-    return value;
+    const hashIndex = text.indexOf('#');
+    const beforeHash = hashIndex >= 0 ? text.slice(0, hashIndex) : text;
+    const hash = hashIndex >= 0 ? text.slice(hashIndex) : '';
+    const queryIndex = beforeHash.indexOf('?');
+    if (queryIndex < 0) return value;
+    const params = new URLSearchParams(beforeHash.slice(queryIndex + 1));
+    let changed = false;
+    for (const key of [...params.keys()]) {
+      if (isSensitiveName(key)) {
+        params.set(key, '<redacted>');
+        changed = true;
+      }
+    }
+    return changed ? `${beforeHash.slice(0, queryIndex)}?${params}${hash}` : value;
   }
 }
 
@@ -173,8 +191,16 @@ export function redactSensitive(value, { includeSensitive = false, parentKey = '
       result[key] = '<redacted>';
       continue;
     }
+    if (URL_HEADER_NAME.test(key) && typeof child === 'string') {
+      result[key] = redactUrl(child, { includeSensitive });
+      continue;
+    }
     if (key === 'value' && isSensitiveName(value.name)) {
       result[key] = '<redacted>';
+      continue;
+    }
+    if (key === 'value' && URL_HEADER_NAME.test(value.name) && typeof child === 'string') {
+      result[key] = redactUrl(child, { includeSensitive });
       continue;
     }
     if (key === 'value' && /cookies?|associatedcookies/i.test(parentKey)) {
@@ -193,7 +219,11 @@ export function redactSensitive(value, { includeSensitive = false, parentKey = '
 export function redactHeaders(headers = {}, { includeSensitive = false } = {}) {
   return Object.entries(headers).map(([name, value]) => ({
     name,
-    value: !includeSensitive && isSensitiveName(name) ? '<redacted>' : String(value),
+    value: includeSensitive
+      ? String(value)
+      : (isSensitiveName(name)
+        ? '<redacted>'
+        : (URL_HEADER_NAME.test(name) ? redactUrl(value) : String(value))),
   }));
 }
 
