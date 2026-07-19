@@ -74,7 +74,7 @@ import { connectBrowser, activePage, withBrowser } from '@rezkam/browser-tools';
 - Every managed browser is owned by a token printed at `start`; `stop` refuses to kill a browser it does not own, another agent's browser, or your main Chrome.
 - GIF recording requires an explicit action-specific output name. `start` captures pre-action frames before returning, and `stop` captures post-action frames before finalizing the GIF.
 - `review-gif` probes frame count, duration, frame rate, and dimensions, then creates a sampled contact sheet and JSON report under the GIF's owner-only `.gif-review/` directory.
-- `record-har` captures owner-protected filtered active-tab HTTP traffic as private HAR 1.2. `extract-har` derives a compact chronological recipe without executing requests.
+- `record-har` captures owner-protected filtered active-tab HTTP traffic as private HAR 1.2. `extract-har` derives a compact chronological recipe without executing requests. WebSocket handshakes and frames require `record-cdp`.
 - `record-cdp` writes selected raw protocol events as private JSONL. `cdp call` sends one owner-protected active-tab method while blocking known managed-lifecycle bypasses.
 - HAR, recipes, raw CDP events, and direct results preserve exact debugging evidence by default. Add `--redact` to filter sensitive-looking values. Capture files are owner-only `0600`, not encrypted.
 - Config, cache, and artifact directories default to `~/.agents/browser-tools/config.json`, `~/.cache/pi-browser-tools`, and `/tmp`, overridable via `BROWSER_TOOLS_CONFIG_DIR`, `BROWSER_TOOLS_CACHE_DIR`, `BROWSER_TOOLS_ARTIFACT_DIR`, `BROWSER_TOOLS_CHROME_SOURCE_DIR`, and `BROWSER_TOOLS_CHROME_BIN`.

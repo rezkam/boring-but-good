@@ -18,6 +18,7 @@ import {
   matchesStatus,
   normalizeResourceTypes,
   optionValues,
+  patternOptionValues,
   parseStatusSelectors,
   privateOutputPath,
   redactBodyText,
@@ -65,7 +66,7 @@ function defaultOutputPath(input) {
   return join(dirname(input), `${stem}-recipe.json`);
 }
 
-function parseOptions(args) {
+export function parseHarRecipeOptions(args) {
   const preset = String(optionValue(args, '--preset', 'api')).toLowerCase();
   const explicitTypes = normalizeResourceTypes(optionValues(args, '--resource-type'));
   const presetTypes = explicitTypes.length && !args.includes('--preset') ? [] : resourceTypesForPreset(preset);
@@ -73,8 +74,8 @@ function parseOptions(args) {
     preset,
     resourceTypes: [...new Set([...presetTypes, ...explicitTypes])],
     excludedResourceTypes: normalizeResourceTypes(optionValues(args, '--exclude-resource-type')),
-    urlPatterns: optionValues(args, '--url-pattern'),
-    excludedUrlPatterns: optionValues(args, '--exclude-url-pattern'),
+    urlPatterns: patternOptionValues(args, '--url-pattern'),
+    excludedUrlPatterns: patternOptionValues(args, '--exclude-url-pattern'),
     methods: optionValues(args, '--method').map((method) => method.toUpperCase()),
     excludedMethods: optionValues(args, '--exclude-method').map((method) => method.toUpperCase()),
     statuses: parseStatusSelectors(optionValues(args, '--status')),
@@ -196,7 +197,7 @@ export async function main(args = process.argv.slice(2)) {
   const overwrite = hasFlag(rest, '--overwrite');
   const requestedOutput = requiredOptionValue(rest, '--output', null) || defaultOutputPath(input);
   const output = privateOutputPath(requestedOutput, 'json', { overwrite });
-  const options = parseOptions(rest);
+  const options = parseHarRecipeOptions(rest);
   const har = JSON.parse(readFileSync(input, 'utf-8'));
   const recipe = extractHarRecipe(har, input, options);
   writePrivateJson(output, recipe);

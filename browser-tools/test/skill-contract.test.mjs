@@ -106,6 +106,7 @@ test('network capture contract documents owner protection, raw debugging, option
     assert.match(documentation, /--redact/);
     assert.match(documentation, /raw|unredacted/i);
     assert.match(documentation, /not encrypted/i);
+    assert.match(documentation, /WebSocket[\s\S]*raw CDP|raw CDP[\s\S]*WebSocket/i);
     assert.match(documentation, /never.*(?:execute|replay)|does not execute/i);
   }
 });

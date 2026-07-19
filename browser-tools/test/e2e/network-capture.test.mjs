@@ -168,6 +168,18 @@ test('public CLI records selected CDP events as private explicitly redacted JSON
     writeFileSync(output, 'old world-readable capture');
     chmodSync(output, 0o644);
 
+    const deniedStart = await runBrowserTools([
+      'record-cdp', 'start',
+      '--output', output,
+      '--domain', 'Network',
+      '--event', 'Network.*',
+      '--overwrite',
+      '--port', String(browserPort),
+    ], { ...env, BROWSER_TOOLS_OWNER_TOKEN: randomUUID() }, { allowFailure: true });
+    assert.equal(deniedStart.code, 1);
+    assert.match(deniedStart.stderr, /owner-token-mismatch/);
+    assert.equal(readFileSync(output, 'utf-8'), 'old world-readable capture');
+
     const captureStart = await runBrowserTools([
       'record-cdp', 'start',
       '--output', output,

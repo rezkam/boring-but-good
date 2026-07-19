@@ -193,19 +193,21 @@ async function runWorker(args) {
 
   let outputFd = null;
   try {
-    outputFd = openPrivateFile(output, 'w');
-    const result = await withPageCdpSession(port, ownerToken, async ({ session }) => runCdpEventCapture({
-      session,
-      options,
-      shouldStop: () => existsSync(cdpRecordingStopFile(CAPTURE_KIND, port)),
-      writeEvent: (event) => writeSync(outputFd, `${JSON.stringify(event)}\n`),
-      onPhase: (phase, reason = null) => update({
-        status: phase === 'recording' ? 'recording' : state.status,
-        phase,
-        reason: reason ?? state.reason,
-        readyAt: phase === 'recording' ? new Date().toISOString() : state.readyAt,
-      }),
-    }));
+    const result = await withPageCdpSession(port, ownerToken, async ({ session }) => {
+      outputFd = openPrivateFile(output, 'w');
+      return runCdpEventCapture({
+        session,
+        options,
+        shouldStop: () => existsSync(cdpRecordingStopFile(CAPTURE_KIND, port)),
+        writeEvent: (event) => writeSync(outputFd, `${JSON.stringify(event)}\n`),
+        onPhase: (phase, reason = null) => update({
+          status: phase === 'recording' ? 'recording' : state.status,
+          phase,
+          reason: reason ?? state.reason,
+          readyAt: phase === 'recording' ? new Date().toISOString() : state.readyAt,
+        }),
+      });
+    });
     closeSync(outputFd);
     outputFd = null;
     update({
