@@ -56,6 +56,9 @@ scripts/ai-chat.mjs --provider chatgpt --conversation launch-risks --save-conver
 scripts/ai-chat.mjs --provider chatgpt --attach-conversation https://chatgpt.com/c/example-id --save-conversation imported-chatgpt --json
 scripts/ai-chat.mjs --provider perplexity --attach-conversation 123e4567-e89b-12d3-a456-426614174000 --save-conversation imported-pplx --json
 
+# Continue a Perplexity thread URL returned in a previous response.
+scripts/ai-chat.mjs --provider perplexity --conversation https://www.perplexity.ai/search/123e4567-e89b-12d3-a456-426614174000 --prompt "Follow up on the evidence" --json
+
 # Model selection and model discovery.
 scripts/ai-chat.mjs --provider chatgpt --list-models --json
 scripts/ai-chat.mjs --provider chatgpt --model extra-high --prompt-file /tmp/question.md --json
@@ -95,7 +98,7 @@ scripts/ai-chat.mjs \
 
 ## Provider notes
 
-- Perplexity has one transport, `browser-network-sse`. It runs authenticated same-origin requests in a headless-preferred managed browser, parses captured schematized SSE block patches, supports model and Thinking variants, persistent-by-default history, explicit Incognito, research filters, deep research, files, Spaces, streaming, and backend UUID continuation. It never extracts browser cookies and has no rendered HTML, element, or DOM fallback path.
+- Perplexity has one transport, `browser-network-sse`. It runs authenticated same-origin requests in a headless-preferred managed browser, parses captured schematized SSE block patches, supports model and Thinking variants, persistent-by-default history, explicit Incognito, research filters, deep research, files, Spaces, streaming, and backend UUID continuation. New responses expose the backend UUID and canonical `/search/<uuid>` thread URL. It never extracts browser cookies and has no rendered HTML, element, or DOM fallback path.
 - ChatGPT long-running requests use network SSE and WebSocket state first. Metadata reports stream handoff, timeout, partial or empty response, resumed stream, assistant turn completion, and DOM fallback when fallback is used.
 - Gemini uses WebUI API cookies from the AI Chat owned browser by default. It can fall back to an explicit Chrome profile cookie source. Native continuation can fail with backend error `1097`; metadata must show that and the local transcript fallback.
 - Grok uses browser UI labels and preflights the X/Grok composer before typing. It can verify visible labels, but not a backend model slug. In the current X/Grok app `Fast` is the reliable default; check `--list-models --verify-models` before selecting `Auto` or `Expert`.

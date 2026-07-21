@@ -239,6 +239,26 @@ test('direct provider conversation URLs allow only trusted selected provider hos
   }
 });
 
+test('direct Perplexity thread URLs retain backend state for a follow-up request', () => {
+  const backendUuid = '1fcf54fa-dd85-4b77-a916-dc12f8a8efa5';
+  const url = `https://www.perplexity.ai/search/${backendUuid}`;
+  const conversation = resolveConversationReference(buildAiChatRequest({
+    providerName: 'perplexity',
+    prompt: 'continue this thread',
+    conversationTarget: url,
+  }), undefined, perplexityProvider);
+  const payload = buildPerplexityPayload({
+    query: 'continue this thread',
+    model: resolvePerplexityModel('perplexity/best'),
+    conversation,
+  });
+
+  assert.equal(conversation.url, url);
+  assert.deepEqual(conversation.providerState, { backend_uuid: backendUuid });
+  assert.equal(payload.params.last_backend_uuid, backendUuid);
+  assert.equal(payload.params.query_source, 'followup');
+});
+
 test('runAiChat rejects untrusted ChatGPT conversation URLs before browser navigation', async () => {
   const request = buildAiChatRequest({
     providerName: 'chatgpt',

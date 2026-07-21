@@ -15,8 +15,10 @@ import {
   normalizePerplexitySpaceUuid,
   openPerplexityNetworkPage,
   parseSseLine,
+  perplexityConversationUrl,
   perplexityAuthFailureMessage,
   perplexityProvider,
+  resolvePerplexityConversationAttachment,
   resolvePerplexityModel,
   resolvePerplexityRequestModel,
   resolvePerplexityTimeoutSeconds,
@@ -46,6 +48,25 @@ test('resolves Perplexity model ids, display names, and direct tool aliases', ()
     assert.equal(resolvePerplexityModel(alias).id, expectedId, alias);
   }
   assert.equal(resolvePerplexityModel('openai/gpt-5.4-thinking'), null);
+});
+
+test('Perplexity exposes canonical provider thread URLs from backend UUIDs', () => {
+  const backendUuid = '1fcf54fa-dd85-4b77-a916-dc12f8a8efa5';
+  const url = `https://www.perplexity.ai/search/${backendUuid}`;
+
+  assert.equal(perplexityConversationUrl(backendUuid), url);
+  assert.deepEqual(resolvePerplexityConversationAttachment({ target: backendUuid }), {
+    type: 'provider_id',
+    url,
+    providerId: backendUuid,
+    providerState: { backend_uuid: backendUuid },
+  });
+  assert.deepEqual(resolvePerplexityConversationAttachment({ target: url }), {
+    type: 'url',
+    url,
+    providerId: backendUuid,
+    providerState: { backend_uuid: backendUuid },
+  });
 });
 
 test('lists Perplexity models with capability and account-tier metadata', async () => {
@@ -109,6 +130,45 @@ test('Perplexity opens a dedicated JSON network context without inspecting page 
     url: PERPLEXITY_NETWORK_BOOTSTRAP_URL,
     options: { waitUntil: 'domcontentloaded', timeout: 30000 },
   }]);
+});
+
+test('Perplexity returns the created provider thread URL from the backend UUID', async () => {
+  const backendUuid = '1fcf54fa-dd85-4b77-a916-dc12f8a8efa5';
+  const callbacks = {};
+  const page = {
+    url: () => PERPLEXITY_NETWORK_BOOTSTRAP_URL,
+    exposeFunction: async (name, callback) => { callbacks[name] = callback; },
+    evaluate: async (_fn, args) => {
+      if (typeof args === 'string') return;
+      const callback = callbacks[args.callbackName];
+      await callback({ type: 'response', status: 200, headers: [['content-type', 'application/json']] });
+      if (args.url === PERPLEXITY_NETWORK_BOOTSTRAP_URL) {
+        await callback({ type: 'chunk', chunk: JSON.stringify({ user: { id: 'account-present' } }) });
+      } else {
+        await callback({
+          type: 'chunk',
+          chunk: `data: ${JSON.stringify({
+            status: 'COMPLETED',
+            final_sse_message: true,
+            backend_uuid: backendUuid,
+            text: JSON.stringify({ answer: 'thread answer', chunks: ['thread answer'] }),
+          })}\n`,
+        });
+      }
+      await callback({ type: 'done' });
+    },
+  };
+  const result = await perplexityProvider.run({
+    browser: { pages: async () => [page] },
+    request: { prompt: 'start a thread', modelName: 'perplexity/best', timeoutSeconds: 1, providerOptions: {} },
+    selectedModel: 'perplexity/best',
+    conversation: null,
+  });
+
+  assert.equal(result.done, true);
+  assert.equal(result.providerState.backend_uuid, backendUuid);
+  assert.equal(result.providerState.thread_url, `https://www.perplexity.ai/search/${backendUuid}`);
+  assert.equal(result.finalUrl, `https://www.perplexity.ai/search/${backendUuid}`);
 });
 
 test('Perplexity exposes only the browser network transport and no UI lifecycle fallback', () => {
@@ -938,6 +998,7 @@ test('builds safe and private Perplexity provider state without leaking continua
     user_selected_model_identifier: 'gpt56_terra_thinking',
     model_selection_verified: true,
     backend_uuid: 'uuid-2',
+    thread_url: 'https://www.perplexity.ai/search/uuid-2',
     has_read_write_token: true,
     is_incognito: true,
     incognito_explicit: true,
@@ -973,6 +1034,7 @@ test('builds safe and private Perplexity provider state without leaking continua
     user_selected_model_identifier: 'gpt56_terra_thinking',
     model_selection_verified: true,
     backend_uuid: 'uuid-2',
+    thread_url: 'https://www.perplexity.ai/search/uuid-2',
     read_write_token: rawToken,
     is_incognito: true,
     incognito_explicit: true,

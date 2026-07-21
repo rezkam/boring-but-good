@@ -268,6 +268,12 @@ function extractPerplexityBackendUuidFromUrl(value) {
   }
 }
 
+export function perplexityConversationUrl(backendUuid) {
+  const value = String(backendUuid || '').trim();
+  if (!value) return null;
+  return `${API_BASE_URL}/search/${encodeURIComponent(value)}`;
+}
+
 export function resolvePerplexityConversationAttachment({ target }) {
   const value = String(target || '').trim();
   if (!value) throw new Error('[perplexity] Conversation attachment is empty');
@@ -275,14 +281,14 @@ export function resolvePerplexityConversationAttachment({ target }) {
     const backendUuid = extractPerplexityBackendUuidFromUrl(value);
     return {
       type: 'url',
-      url: value,
+      url: perplexityConversationUrl(backendUuid) || value,
       providerId: backendUuid,
       providerState: backendUuid ? { backend_uuid: backendUuid } : null,
     };
   }
   return {
     type: 'provider_id',
-    url: null,
+    url: perplexityConversationUrl(value),
     providerId: value,
     providerState: { backend_uuid: value },
   };
@@ -575,6 +581,7 @@ export function buildPerplexityProviderStates({ backendUuid = null, readWriteTok
     ...(userSelectedModelIdentifier ? { user_selected_model_identifier: userSelectedModelIdentifier } : {}),
     ...(requestedModelIdentifier ? { model_selection_verified: observedModelIdentifier ? observedModelIdentifier === requestedModelIdentifier : null } : {}),
     backend_uuid,
+    ...(backend_uuid ? { thread_url: perplexityConversationUrl(backend_uuid) } : {}),
     is_incognito: !!isIncognito,
     incognito_explicit: !!incognitoExplicit,
     privacy_state: privacyState || (isIncognito ? 'INCOGNITO' : 'PERSISTENT'),
@@ -1248,6 +1255,10 @@ export const perplexityProvider = {
     transportField: 'params.is_incognito',
   },
   resolveConversationAttachment: resolvePerplexityConversationAttachment,
+  conversationUrlFromState({ conversation } = {}) {
+    const continuation = previousPerplexityContinuationState(conversation);
+    return perplexityConversationUrl(continuation.backendUuid) || conversation?.url || null;
+  },
 
   listModelsRequiresBrowser({ request } = {}) {
     return !!request?.verifyModels;
@@ -1330,7 +1341,7 @@ export const perplexityProvider = {
       rawText: text,
       done: !!state.done,
       modelUsed: model.id,
-      finalUrl: null,
+      finalUrl: perplexityConversationUrl(state.backendUuid || previousContinuation.backendUuid),
       providerState: providerStates.providerState,
       attachments: payload.requestMetadata.attachments,
       searchResults: state.searchResults || [],
