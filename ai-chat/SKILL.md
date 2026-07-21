@@ -14,7 +14,7 @@ Use this skill when the task is about using AI provider web sessions as tools. D
 
 AI Chat owns its normal Browser Tools browser lifecycle.
 
-- Startup: when a provider needs browser access and no healthy AI Chat owned browser exists, AI Chat starts Browser Tools with owner id `ai-chat`, task profile `ai-chat`, and fallback Chrome profile `Default` when no `ai-chat` task profile is configured. If the default port is busy and no explicit `--port` was passed, Browser Tools auto-allocates a free port.
+- Startup: when a provider needs browser access and no healthy AI Chat owned browser exists, AI Chat starts Browser Tools with owner id `ai-chat`, task profile `ai-chat`, and fallback Chrome profile `Default` when no `ai-chat` task profile is configured. Perplexity prefers a headless launch because its only transport is same-origin HTTP and SSE. If the default port is busy and no explicit `--port` was passed, Browser Tools auto-allocates a free port.
 - Reuse: later AI Chat commands read the private state file `~/.cache/pi-browser-tools/ai-chat-browser.json`, validate Browser Tools managed state, owner token, and copied profile presence, then reconnect to the same browser. The same browser can be reused across Grok, ChatGPT, Gemini, and Perplexity.
 - Refusal: AI Chat refuses unmanaged Chrome, missing owner tokens, wrong owner tokens, browsers owned by another agent, and live owned browsers with an unavailable debug port. Error messages include the reason and recovery path.
 - Stale recovery: stale private state where the process is gone is discarded and a new owned browser is started. Unsafe live state is not killed or replaced.
@@ -29,7 +29,7 @@ By default, AI Chat copies and uses Chrome profile `Default`, so normal logged-i
 | Ask a new question | Grok, ChatGPT, Gemini, Perplexity | Starts or reuses the AI Chat owned Browser Tools browser when needed |
 | Save and continue a conversation | Grok, ChatGPT, Gemini, Perplexity | Save with `--save-conversation`, continue with `--conversation` |
 | Attach an existing provider chat | Grok, ChatGPT, Gemini, Perplexity | Use `--attach-conversation <provider-id-or-url> --save-conversation <local-id>` |
-| Select a model | Grok, ChatGPT, Gemini, Perplexity | Use `--model <id-or-alias>` or `--task <task>` |
+| Select a model | Grok, ChatGPT, Gemini, Perplexity | Use `--model <id-or-alias>` or `--task <task>`. Perplexity also supports `--thinking` when a captured Thinking variant exists |
 | List known or discovered models | ChatGPT, Gemini, Perplexity, Grok | Use `--list-models --json`; add `--verify-models` where supported |
 | Deep research | Perplexity | Uses `perplexity/deep-research` and a 3600 second timeout unless `--timeout` is explicit |
 | Research filters | Perplexity | `--source-focus`, `--search-focus`, `--time-range`, `--citation-mode`, `--language`, `--timezone` |
@@ -61,7 +61,7 @@ scripts/ai-chat.mjs --provider chatgpt --list-models --json
 scripts/ai-chat.mjs --provider chatgpt --model extra-high --prompt-file /tmp/question.md --json
 scripts/ai-chat.mjs --provider gemini --task reasoning --prompt "Explain this tradeoff" --verify-session --json
 scripts/ai-chat.mjs --provider perplexity --list-models --verify-models --verify-model-timeout 180 --json
-scripts/ai-chat.mjs --provider perplexity --model openai/gpt-5.4-thinking --prompt "Find recent evidence" --json
+scripts/ai-chat.mjs --provider perplexity --model openai/gpt-5.6-terra --thinking --prompt "Find recent evidence" --json
 
 # Perplexity research options with saved continuation state.
 scripts/ai-chat.mjs \
@@ -92,7 +92,7 @@ scripts/ai-chat.mjs \
 
 ## Provider notes
 
-- Perplexity is expected to match the standalone Perplexity skill for the browser-authenticated WebUI API path: managed-browser cookie auth only, Pro-tier model ids and direct tool aliases, Max-tier filtering, account acceptance checks, research filters, deep research, files, Spaces, streaming, and backend UUID continuation with a private read-write token.
+- Perplexity has one transport, `browser-network-sse`. It runs authenticated same-origin requests in a headless-preferred managed browser, parses captured schematized SSE block patches, supports model and Thinking variants, research filters, deep research, files, Spaces, streaming, and backend UUID continuation. It never extracts browser cookies and has no rendered HTML, element, or DOM fallback path.
 - ChatGPT long-running requests use network SSE and WebSocket state first. Metadata reports stream handoff, timeout, partial or empty response, resumed stream, assistant turn completion, and DOM fallback when fallback is used.
 - Gemini uses WebUI API cookies from the AI Chat owned browser by default. It can fall back to an explicit Chrome profile cookie source. Native continuation can fail with backend error `1097`; metadata must show that and the local transcript fallback.
 - Grok uses browser UI labels and preflights the X/Grok composer before typing. It can verify visible labels, but not a backend model slug. In the current X/Grok app `Fast` is the reliable default; check `--list-models --verify-models` before selecting `Auto` or `Expert`.
@@ -111,10 +111,10 @@ scripts/ai-chat.mjs \
 - Use Browser Tools managed Chrome only. Do not connect to main Chrome or unmanaged DevTools sessions.
 - AI Chat starts and reuses its own Browser Tools browser. Do not manually attach it to another agent browser. Do not stop a browser unless Browser Tools owner-token checks prove it is the AI Chat owned browser.
 - Browser Tools uses a copied profile. AI Chat defaults to copied Chrome profile `Default`, or the configured `ai-chat` task profile when set. If a provider is logged in in normal Chrome but logged out in managed Chrome, cleanly stop the AI Chat owned browser, then rerun so Browser Tools resyncs the copied profile.
-- Perplexity auth uses only the managed Browser Tools Chrome session cookie. AI Chat does not read `PERPLEXITY_SESSION_TOKEN` or `PPLX_SESSION_TOKEN`, never prints the cookie value, and reports missing or expired auth with login and profile-sync recovery guidance.
+- Perplexity auth stays inside managed Chrome through browser `fetch` with credentials. AI Chat never reads the Perplexity cookie, ignores `PERPLEXITY_SESSION_TOKEN` and `PPLX_SESSION_TOKEN`, and reports missing or expired auth with login and profile-sync recovery guidance.
 - Grok preflights the X/Grok composer before typing. Fresh, wrong, or logged-out profiles fail with an auth/session error before prompt submission.
 - Open any browser tabs in the background with `browser.newPage({ background: true })`.
-- Prefer provider APIs and network streams whenever possible. Use browser UI automation to authenticate, trigger, and verify. Read DOM text only as a fallback when structured messages are unavailable, and mark that fallback in metadata.
+- Prefer provider APIs and network streams whenever possible. Perplexity is strictly network-only and must not add UI automation or DOM parsing. Other UI providers can use browser interaction to authenticate, trigger, and verify; any DOM fallback must be explicit in metadata.
 - For multi-turn work, save a conversation id on the first turn and continue by id. Attach existing provider links or backend ids with `--attach-conversation` and `--save-conversation`. For ChatGPT timeouts, run `--conversation <id> --save-conversation <id>` without a prompt to recheck the same saved turn. Do not replay the whole chat history unless the provider lacks backend continuation.
 - For model selection, prefer a provider adapter that can list or verify available models. If the account gates models, report which models were visible or accepted. Fallbacks must be explicit in metadata and must not hide a rejected requested model.
 - For live verification, save JSON output, stderr, notes, and screenshots when applicable under `/tmp/ai-chat-verify/...`. Never commit provider responses, model acceptance lists, screenshots, account-visible metadata, conversation records, owner tokens, or read-write tokens.

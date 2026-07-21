@@ -43,7 +43,7 @@ scripts/ai-chat.mjs --provider chatgpt --conversation research-x --save-conversa
 scripts/ai-chat.mjs --provider chatgpt --list-models --json
 scripts/ai-chat.mjs --provider gemini --list-models --verify-models --json
 scripts/ai-chat.mjs --provider perplexity --list-models --verify-models --verify-model-timeout 180 --json
-scripts/ai-chat.mjs --provider perplexity --model openai/gpt-5.4-thinking --prompt-file /tmp/q.txt --json
+scripts/ai-chat.mjs --provider perplexity --model openai/gpt-5.6-terra --thinking --prompt-file "$HOME/.agents/questions/q.txt" --json
 scripts/ai-chat.mjs --provider gemini --task reasoning --prompt "Explain this" --verify-session --json
 
 # Perplexity research and deep research.
@@ -134,14 +134,15 @@ Rules:
 ### Perplexity
 
 - URL: `perplexity.ai`.
-- Uses the managed Browser Tools browser cookie only. Environment token variables are ignored by AI Chat.
-- `--list-models` exposes the bundled Pro-tier WebUI registry with thinking levels, tiers, modes, aliases, and direct tool aliases. Max-tier models are filtered.
+- Uses a headless-preferred managed browser and same-origin `fetch` with browser credentials. The adapter never reads the cookie, and environment token variables are ignored.
+- Perplexity has no rendered HTML parser, element interaction, UI transport, or DOM fallback.
+- `--list-models` exposes the network-contract registry with Thinking levels, tiers, modes, aliases, and direct tool aliases. Max-tier models are filtered.
 - `--verify-models` checks current-account acceptance through incognito WebUI API prompts.
 - Default chats are incognito. Use `--save-to-library` when the user wants Perplexity library history or when a Space requires non-incognito behavior.
 - Research options are available with `--source-focus`, `--search-focus`, `--time-range`, `--citation-mode`, `--language`, and `--timezone`.
 - File analysis uses repeatable `--file` and uploads validated local files through the WebUI upload flow. Metadata includes filename, MIME type, size, image flag, status, and URL presence, not file contents.
 - Spaces use `--space-uuid` or `--space` with a user-provided UUID and make the request non-incognito.
-- `--stream` emits useful incremental progress to stderr and still returns the same final JSON output contract.
+- `--stream` applies captured schematized SSE block patches, emits incremental answer deltas to stderr, and waits for the completed stream event before returning final JSON.
 - Deep research uses `perplexity/deep-research` through the WebUI API and gets a 3600 second timeout unless `--timeout` is explicit.
 - JSON output includes `requested_model`, `selected_model`, `complete`, `provider_state`, `sources`, `search_results`, `captured_at`, and `conversation_id` when applicable.
 
@@ -166,7 +167,7 @@ Rules:
 
 ## Completion detection
 
-The helper does not use only fixed sleeps. The AI Chat Module submits the prompt and delegates provider-specific completion to the adapter. Adapters can parse WebUI APIs, SSE, WebSocket messages, network CDP events, visible UI labels, and DOM text fallback. When DOM fallback is used, provider metadata must make that visible.
+The helper does not use only fixed sleeps. The AI Chat Module submits the prompt and delegates provider-specific completion to the adapter. Adapters can parse WebUI APIs, SSE, WebSocket messages, network CDP events, visible UI labels, and provider-specific DOM fallback. Perplexity is the strict exception: it completes only from SSE network state and has no DOM path. When another provider uses DOM fallback, provider metadata must make that visible.
 
 ## Output files and private state
 
@@ -176,7 +177,7 @@ When `--out` is used, the helper writes:
 - `<out>.meta.json` with metadata
 - `<out>.raw.txt` when raw visible text or raw stream text is available
 
-Use `--json` when downstream code needs metadata and response in one JSON document. When `--evidence` or `--evidence-path` is used, metadata includes `evidence_path` and `evidence_url` when a screenshot can be captured. If the provider transport has no final browser URL, metadata includes `evidence_skipped_reason`.
+AI Chat writes `--out` files and their metadata and raw-text sidecars with owner-only mode `0600`, including overwrites. Use `--json` when downstream code needs metadata and response in one JSON document. When `--evidence` or `--evidence-path` is used, metadata includes `evidence_path` and `evidence_url` when a screenshot can be captured. If the provider transport has no final browser URL, metadata includes `evidence_skipped_reason`.
 
 Private local state:
 

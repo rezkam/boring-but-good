@@ -6,7 +6,7 @@ This records the implementation contract for the AI Chat provider unification wo
 
 AI Chat is the single multi-provider entry point for browser-authenticated Grok, ChatGPT, Gemini, and Perplexity work. Provider-specific skills can remain as references or deeper workflows, but AI Chat owns the common command shape, browser lifecycle, local conversation records, cache policy, metadata shape, output artifacts, and cross-provider verification.
 
-Provider adapters own provider-specific behavior only. They may read cookies from the managed browser, build provider request payloads, parse provider streams, resolve provider model ids, and return provider state. They must not start or stop Chrome, write browser ownership state, choose global cache behavior, or emit private tokens to normal output.
+Provider adapters own provider-specific behavior only. They may build provider request payloads, parse provider streams, resolve provider model ids, and return provider state. Providers that require explicit cookie APIs may read only from the managed browser. Perplexity is stricter: credentials stay inside same-origin browser fetch and its adapter must not read cookie values. Adapters must not start or stop Chrome, write browser ownership state, choose global cache behavior, or emit private tokens to normal output.
 
 ## Browser ownership lifecycle
 
@@ -65,14 +65,15 @@ Browser Tools owns:
 
 ## Perplexity parity scope
 
-Perplexity inside AI Chat should reach feature parity with the standalone Perplexity skill for the browser-authenticated WebUI API path.
+Perplexity inside AI Chat uses one browser-authenticated network path derived from Browser Tools captures. It has no UI or DOM transport.
 
 In scope:
 
-- session-cookie auth from the AI Chat owned Browser Tools browser, without printing or storing the Perplexity session token in public artifacts
+- headless-preferred Browser Tools startup from the `ai-chat` task profile or fallback Chrome profile `Default`
+- same-origin authenticated fetch where browser credentials never leave managed Chrome
 - auth recovery guidance aligned with Browser Tools copied-profile behavior
-- model ids, direct tool aliases, task defaults, thinking variants, account-tier metadata, and live account acceptance verification
-- normal ask and deep research through `/rest/sse/perplexity_ask`, not DOM scraping
+- captured model ids, direct tool aliases, task defaults, Thinking variants, account-tier metadata, and live account acceptance verification
+- normal ask and deep research through `/rest/sse/perplexity_ask`, with schematized block-patch streaming and no DOM path
 - source focus, search focus, time range, citation mode, language, timezone, and save-to-library behavior
 - safe file attachments with path validation and metadata that avoids leaking file contents
 - Spaces selection by explicit user-provided Space identifier
@@ -81,7 +82,8 @@ In scope:
 
 Out of scope for this unification pass:
 
-- making AI Chat shell out to the standalone Perplexity CLI for normal requests
+- making AI Chat shell out to another Perplexity CLI for normal requests
+- retaining or reintroducing Perplexity rendered HTML parsing, element interaction, or DOM fallback
 - committing live model acceptance output or account-specific provider evidence
 - supporting Max-tier-only behavior that is not present in the current skill contract
 - discovering private Perplexity Space ids without the user providing them

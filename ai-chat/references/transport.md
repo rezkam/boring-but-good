@@ -15,7 +15,7 @@ The durable provider model is: use the browser session for authentication, then 
 
 | Provider | Current transport | Notes and next direction |
 | --- | --- | --- |
-| Perplexity | WebUI API via managed-browser session cookie, uploads API for files, SSE parser for ask and deep research | Keep. Auth is browser-cookie only inside AI Chat. Deepen live verification for files and Spaces as needed |
+| Perplexity | Headless-preferred managed-browser same-origin fetch, uploads API for files, and schematized SSE block-patch parsing | Only transport. Browser credentials remain inside Chrome. No cookie extraction, rendered HTML parsing, element interaction, or DOM fallback |
 | ChatGPT | Network-observed authenticated request. The UI creates valid context, the adapter rewrites backend payloads, then parses SSE and WebSocket catchups | Keep stream parsing first. DOM text remains fallback only and must be marked in metadata |
 | Gemini | WebUI API via Browser Tools managed Chrome cookies by default, account model RPC, and stream parser. Direct Chrome profile cookie fallback is explicit | Keep. Native continuation error `1097` remains a known provider limitation with transcript fallback |
 | Grok | Browser UI submit, visible model labels, auth preflight, partial network progress tracking, DOM-derived response cleanup | Move toward structured network body parsing when a stable Grok stream body contract is captured. Until then, make DOM fallback and limitations visible |
@@ -46,10 +46,11 @@ Saved conversations should preserve provider state so follow-up prompts can send
 ## Browser rules for transports
 
 - Use only the AI Chat owned Browser Tools managed browser for browser-authenticated transports.
+- Perplexity uses a dedicated background JSON endpoint page only as a same-origin network context. Do not add Perplexity UI lifecycle methods, selectors, clicks, typing, rendered page parsing, or DOM fallback.
 - Open provider tabs in the background with `browser.newPage({ background: true })`.
 - Do not bring pages to front unless a task explicitly needs user-visible interaction.
 - Do not connect to unmanaged Chrome or another agent's Browser Tools browser.
-- Do not print or cache Browser Tools owner tokens, cookies, Perplexity read-write tokens, or provider session tokens.
+- Do not print or cache Browser Tools owner tokens, cookies, Perplexity read-write tokens, or provider session tokens. Perplexity must not read its browser cookie at all.
 - Successful AI Chat runs disconnect from CDP but leave the owned browser open for reuse.
 
 ## Migration rules

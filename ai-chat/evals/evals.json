@@ -28,12 +28,12 @@
     {
       "id": 3,
       "prompt": "List and live-verify the available Perplexity models for my current account, including thinking levels, Pro or Max tier, default model, task defaults, and whether chats save to library by default. Return JSON.",
-      "expected_output": "Uses --list-models --verify-models for provider perplexity and returns the WebUI model registry with model ids, display names, mode, tier, thinking metadata, history policy, task defaults, and account availability.",
+      "expected_output": "Uses --list-models --verify-models for provider perplexity and returns the network-contract registry with model ids, display names, mode, tier, Thinking metadata, history policy, task defaults, and account availability.",
       "files": [],
       "expectations": [
         "The run uses scripts/ai-chat.mjs --provider perplexity --list-models --verify-models --json.",
-        "The output includes perplexity/deep-research.",
-        "The output includes OpenAI, Gemini, Anthropic, Moonshot, and NVIDIA model ids.",
+        "The output includes perplexity/deep-research and the captured openai/gpt-5.6-terra Thinking pair.",
+        "The output includes only captured or live-verified network identifiers and includes OpenAI GPT-5.6 Terra, Perplexity Sonar 2, and NVIDIA Nemotron 3 Ultra Thinking.",
         "The output includes min_tier, mode, thinking, thinking_level, available, default_model, task_models, and history_policy."
       ]
     },
@@ -59,6 +59,18 @@
         "The output includes account_specific true or a clear discovery error.",
         "The output includes default_model, task_models, history_policy, available, and verification.status.",
         "The reasoning task output has model_task reasoning, is_temporary true, saved_to_library false, and a non-empty chrome_profile value."
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Ask Perplexity with GPT-5.6 Terra Thinking enabled, stream the answer, and prove from metadata that it used the network-only path. Do not parse or automate the Perplexity page UI.",
+      "expected_output": "Uses --provider perplexity --model openai/gpt-5.6-terra --thinking --stream --json. The selected model is the captured Thinking variant and provider state proves browser-network-sse with no DOM processing.",
+      "files": [],
+      "expectations": [
+        "The run selects openai/gpt-5.6-terra with --thinking and reports selected_model openai/gpt-5.6-terra-thinking.",
+        "The output reports provider_state.transport browser-network-sse, network_only true, and dom_processing false.",
+        "The stream completes from SSE state and does not use rendered HTML, selectors, element clicks, typing, or DOM fallback.",
+        "No Perplexity cookie, owner token, or read-write token appears in public output."
       ]
     }
   ]

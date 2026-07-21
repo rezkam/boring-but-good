@@ -6,7 +6,7 @@ Use `scripts/ai-chat.mjs` for all browser-authenticated AI chat providers. AI Ch
 
 | Provider | Transport | Model strategy | Continuation strategy | Main limitations |
 | --- | --- | --- | --- | --- |
-| `perplexity` | WebUI API authenticated from the AI Chat owned Browser Tools browser cookie. Sends `/rest/sse/perplexity_ask` and parses SSE | Bundled Pro-tier registry from `perplexity-webui-scraper`, direct tool aliases, task defaults, thinking variants, Max-tier filtering, and optional live `--verify-models` account acceptance | Backend UUID plus private read-write token in local conversation record | Account tier decides accepted models. WebUI API responses usually have no final browser URL for screenshots. Environment token variables are ignored by AI Chat |
+| `perplexity` | Headless-preferred same-origin browser fetch to `/rest/sse/perplexity_ask`, with captured schematized SSE block-patch parsing | Network-contract registry, direct tool aliases, task defaults, captured Thinking variants, Max-tier filtering, and optional live `--verify-models` acceptance | Backend UUID plus private read-write token in local conversation record | Credentials stay inside managed Chrome. No UI or DOM fallback. Account tier decides accepted models. Responses usually have no final URL for screenshots |
 | `chatgpt` | Browser UI creates the authenticated request, then the adapter rewrites the backend payload and reads SSE plus WebSocket state through CDP | Static request profiles for `instant`, `extra-high`, `pro-extended`, and `gpt-5.5` aliases. Observed stream metadata reports the selected backend slug where available | Browser conversation URL plus backend conversation id, topic id, turn exchange id, message id, and stream state | No public model list API. Old `medium` and `high` `thinking_effort` payloads are not exposed because the current backend rejects them with HTTP 422. Live checks create normal ChatGPT conversations |
 | `gemini` | WebUI API with Browser Tools managed Chrome cookies by default. Direct Chrome profile cookie fallback is explicit | Live account model discovery through Gemini `otAQ7b` RPC, fallback known headers, aliases, tiers, thinking flags, defaults, task suggestions, and optional live `--verify-models` checks | Gemini metadata continuation first, explicit `1097` error reporting, then local transcript fallback | Direct auth can pass while the browser UI is not ready. Model fallback on `1052` must be explicit. Deep research is not a stable AI Chat profile |
 | `grok` | Browser UI with X/Grok composer auth preflight and partial network progress tracking | UI labels are account/UI dependent. `fast` is the reliable default in the current X/Grok app. `--list-models --verify-models` reports whether `auto` or `expert` are visible | Browser conversation URL | No backend model slug. Response text is DOM-derived with network completion heuristics. Live checks create normal Grok conversations |
@@ -69,12 +69,14 @@ scripts/ai-chat.mjs --provider chatgpt --conversation imported-chatgpt --save-co
 
 ### Perplexity parity
 
-Perplexity in AI Chat should match the standalone Perplexity skill for the browser-authenticated WebUI API path:
+Perplexity in AI Chat has one browser-authenticated network path:
 
-- Auth comes from the AI Chat owned managed browser session cookie only. `PERPLEXITY_SESSION_TOKEN` and `PPLX_SESSION_TOKEN` are not read by AI Chat.
-- Model ids, direct tool aliases, task defaults, thinking variants, tiers, and provider families match the bundled Pro-tier registry. Max-tier models are filtered.
+- New Perplexity-owned sessions prefer a headless managed Chrome using the `ai-chat` task profile or fallback profile `Default`.
+- Auth uses browser `fetch` with credentials inside managed Chrome. The adapter never reads the cookie and ignores `PERPLEXITY_SESSION_TOKEN` and `PPLX_SESSION_TOKEN`.
+- Rendered HTML parsing, element interaction, and DOM fallback are not supported.
+- Model ids, direct tool aliases, task defaults, captured Thinking variants, tiers, and provider families come from the network-contract registry. Max-tier models are filtered.
 - `--verify-models` sends tiny incognito WebUI API checks and reports accepted and rejected model ids for the current account.
-- Normal ask, deep research, source focus, search focus, recency, citation mode, language, timezone, file attachments, Spaces, streaming, save-to-library, and multi-turn continuation use one output contract.
+- Normal ask, deep research, source focus, search focus, recency, citation mode, language, timezone, file attachments, Spaces, streaming, save-to-library, and multi-turn continuation use one output contract and one network transport.
 - Continuation secrets stay in the private local conversation record. Public output exposes redacted state only.
 
 Known limits:
