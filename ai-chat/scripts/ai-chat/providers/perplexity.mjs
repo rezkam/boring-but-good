@@ -3,12 +3,11 @@ import { Blob } from 'node:buffer';
 import { readFileSync, statSync } from 'node:fs';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { sleep, urlHasAllowedHostname } from './shared.mjs';
 
 const API_BASE_URL = 'https://www.perplexity.ai';
 const PERPLEXITY_HOSTNAMES = ['perplexity.ai', 'www.perplexity.ai'];
 const ENDPOINT_ASK = '/rest/sse/perplexity_ask';
-const ENDPOINT_SEARCH_INIT = '/search/new';
+export const PERPLEXITY_NETWORK_BOOTSTRAP_URL = `${API_BASE_URL}/api/auth/session`;
 const ENDPOINT_UPLOAD = '/rest/uploads/batch_create_upload_urls';
 const SESSION_COOKIE_NAME = '__Secure-next-auth.session-token';
 const API_VERSION = '2.18';
@@ -20,15 +19,41 @@ const DEFAULT_PERPLEXITY_MODEL = 'perplexity/best';
 export const DEFAULT_PERPLEXITY_DEEP_RESEARCH_TIMEOUT_SECONDS = 3600;
 const RAW_MODELS = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'perplexity-models.json'), 'utf-8'));
 const MODELS = RAW_MODELS.filter(model => model.min_tier !== 'max');
-const AUTH_SOURCE_BROWSER_TOOLS = 'Browser Tools Chrome profile';
-export const PERPLEXITY_SESSION_LOOKUP_ORDER = [
-  { url: API_BASE_URL, source: AUTH_SOURCE_BROWSER_TOOLS, label: 'www.perplexity.ai cookie' },
-  { url: 'https://perplexity.ai', source: AUTH_SOURCE_BROWSER_TOOLS, label: 'perplexity.ai cookie' },
+const AUTH_SOURCE_BROWSER_TOOLS = 'Browser Tools same-origin network session';
+const SUPPORTED_BLOCK_USE_CASES = [
+  'answer_modes',
+  'media_items',
+  'knowledge_cards',
+  'inline_entity_cards',
+  'place_widgets',
+  'finance_widgets',
+  'sports_widgets',
+  'news_widgets',
+  'shopping_widgets',
+  'jobs_widgets',
+  'search_result_widgets',
+  'inline_images',
+  'inline_assets',
+  'placeholder_cards',
+  'diff_blocks',
+  'inline_knowledge_cards',
+  'entity_group_v2',
+  'refinement_filters',
+  'canvas_mode',
+  'maps_preview',
+  'answer_tabs',
+  'price_comparison_widgets',
+  'preserve_latex',
+  'generic_onboarding_widgets',
+  'in_context_suggestions',
+  'pending_followups',
+  'inline_claims',
+  'unified_assets',
+  'workflow_steps',
+  'workflow_widgets',
+  'navigation_results',
+  'background_agents',
 ];
-function isPerplexityUrl(url) {
-  return urlHasAllowedHostname(url, PERPLEXITY_HOSTNAMES);
-}
-
 const TASK_MODEL_ALIASES = new Map(Object.entries({
   best: 'perplexity/best',
   default: 'perplexity/best',
@@ -37,8 +62,8 @@ const TASK_MODEL_ALIASES = new Map(Object.entries({
   deep_research: 'perplexity/deep-research',
   deep: 'perplexity/deep-research',
   sonar: 'perplexity/sonar-2',
-  reasoning: 'openai/gpt-5.4-thinking',
-  coding: 'anthropic/claude-sonnet-4.6',
+  reasoning: 'openai/gpt-5.6-terra-thinking',
+  coding: 'openai/gpt-5.6-terra',
 }));
 function uniqueStrings(values) {
   return [...new Set(values.filter(value => typeof value === 'string' && value.trim()).map(value => value.trim()))];
@@ -254,9 +279,16 @@ export function resolvePerplexityConversationAttachment({ target }) {
 
 export function resolvePerplexityRequestModel({ request = {}, selectedModel = 'default' } = {}) {
   const modelName = selectedPerplexityModelName({ request, selectedModel });
-  const model = resolvePerplexityModel(modelName);
+  let model = resolvePerplexityModel(modelName);
   if (!model) {
     throw new Error(`[perplexity] Unknown model: ${modelName}. Run scripts/ai-chat.mjs --provider perplexity --list-models --json to inspect selectable model ids and aliases.`);
+  }
+  if (request.thinking && !model.thinking) {
+    const thinkingModel = model.thinking_model_id ? MODEL_BY_ID.get(model.thinking_model_id) : null;
+    if (!thinkingModel) {
+      throw new Error(`[perplexity] Model ${model.id} has no captured Thinking variant. Select an explicit *-thinking model from --list-models instead.`);
+    }
+    model = thinkingModel;
   }
   return model;
 }
@@ -271,7 +303,7 @@ export function resolvePerplexityTimeoutSeconds({ model, request = {} } = {}) {
 
 function annotatePerplexityModel(model) {
   const text = `${model.id} ${model.name} ${model.identifier}`;
-  const thinking = /thinking/i.test(text);
+  const thinking = model.thinking === true || /thinking/i.test(text);
   const thinkingLevel = /thinking[-_ ]low/i.test(text) ? 'low' : (/thinking[-_ ]high/i.test(text) ? 'high' : (thinking ? 'default' : null));
   const providerFamily = model.id.includes('/') ? model.id.split('/')[0] : 'perplexity';
   return {
@@ -281,7 +313,7 @@ function annotatePerplexityModel(model) {
     thinking_level: thinkingLevel,
     account_specific: false,
     account_tier: { required: model.min_tier || null, verified: null },
-    source: 'bundled-registry-from-perplexity-webui-scraper',
+    source: model.contract_source || 'bundled-network-contract-registry',
     selected_by: uniqueStrings(['--model', ...perModelAliases(model)]),
   };
 }
@@ -297,19 +329,42 @@ export function buildPerplexityPayload({ query, model, options = {}, conversatio
     attachments: uploadedAttachments.map(item => item.url),
     language: normalizedOptions.language,
     timezone: normalizedOptions.timezone,
-    client_coordinates: null,
-    sources,
-    model_preference: model.identifier,
-    mode: model.mode,
     search_focus: SEARCH_MAP[normalizedOptions.searchFocus],
-    search_recency_filter: TIME_MAP[normalizedOptions.timeRange] || null,
-    is_incognito: !normalizedOptions.saveToLibrary,
-    use_schematized_api: false,
-    local_search_enabled: false,
+    sources,
+    frontend_uuid: randomUUID(),
+    mode: model.mode,
+    model_preference: model.identifier,
+    is_related_query: false,
+    is_sponsored: false,
+    frontend_context_uuid: randomUUID(),
     prompt_source: 'user',
-    send_back_text_in_streaming_api: true,
+    query_source: 'home',
+    is_incognito: !normalizedOptions.saveToLibrary,
+    time_from_first_type: 0,
+    local_search_enabled: false,
+    use_schematized_api: true,
+    send_back_text_in_streaming_api: false,
+    supported_block_use_cases: [...SUPPORTED_BLOCK_USE_CASES],
+    client_coordinates: null,
+    mentions: [],
+    dsl_query: query,
+    skip_search_enabled: true,
+    is_nav_suggestions_disabled: false,
+    source: 'default',
+    always_search_override: false,
+    override_no_search: false,
+    should_ask_for_mcp_tool_confirmation: true,
+    supports_tool_approval_modal: true,
+    browser_agent_allow_once_from_toggle: false,
+    force_enable_browser_agent: false,
+    supported_features: ['browser_agent_permission_banner_v1.1'],
+    extended_context: false,
     version: API_VERSION,
+    rum_session_id: randomUUID(),
   };
+
+  const recency = TIME_MAP[normalizedOptions.timeRange];
+  if (recency) params.search_recency_filter = recency;
 
   if (normalizedOptions.spaceUuid) {
     params.target_collection_uuid = normalizedOptions.spaceUuid;
@@ -345,11 +400,91 @@ export function parseSseLine(line) {
   return JSON.parse(text.slice(6));
 }
 
+function jsonPointerSegments(path) {
+  if (!path) return [];
+  return String(path).split('/').slice(1).map(segment => segment.replace(/~1/g, '/').replace(/~0/g, '~'));
+}
+
+function applyJsonPatch(target, patches = []) {
+  let value = target && typeof target === 'object' ? structuredClone(target) : {};
+  for (const patch of patches) {
+    if (!patch || !['add', 'replace', 'remove'].includes(patch.op)) continue;
+    const segments = jsonPointerSegments(patch.path);
+    if (segments.length === 0) {
+      value = patch.op === 'remove' ? {} : structuredClone(patch.value);
+      continue;
+    }
+
+    let parent = value;
+    for (const segment of segments.slice(0, -1)) {
+      if (!parent[segment] || typeof parent[segment] !== 'object') parent[segment] = {};
+      parent = parent[segment];
+    }
+    const key = segments.at(-1);
+    if (patch.op === 'remove') {
+      if (Array.isArray(parent)) parent.splice(Number.parseInt(key, 10), 1);
+      else delete parent[key];
+    } else if (Array.isArray(parent) && key === '-') {
+      parent.push(structuredClone(patch.value));
+    } else {
+      parent[key] = structuredClone(patch.value);
+    }
+  }
+  return value;
+}
+
+function markdownText(block = {}) {
+  if (typeof block.answer === 'string') return block.answer;
+  if (Array.isArray(block.chunks)) return block.chunks.filter(Boolean).map(String).join('');
+  return '';
+}
+
+function extractPerplexityBlockState(data, state, citationMode) {
+  if (!Array.isArray(data.blocks)) return;
+  state.blockStates ||= {};
+  for (const block of data.blocks) {
+    const usage = block?.intended_usage;
+    if (!usage) continue;
+    if (block.markdown_block && typeof block.markdown_block === 'object') {
+      state.blockStates[usage] = structuredClone(block.markdown_block);
+    } else if (block.diff_block?.field === 'markdown_block') {
+      state.blockStates[usage] = applyJsonPatch(state.blockStates[usage], block.diff_block.patches);
+    }
+  }
+
+  const preferred = state.blockStates.ask_text || state.blockStates.ask_text_0_markdown;
+  const text = markdownText(preferred);
+  if (text) {
+    state.chunks = Array.isArray(preferred.chunks) ? preferred.chunks.filter(Boolean).map(String) : [text];
+    state.answer = formatCitations(text, citationMode, state.searchResults);
+  }
+}
+
+function normalizePerplexitySearchResults(values) {
+  if (!Array.isArray(values)) return [];
+  return values
+    .filter(result => result && typeof result === 'object' && result.url)
+    .map(result => ({
+      title: result.name || result.title || null,
+      url: result.url,
+      snippet: result.snippet || result.description || null,
+    }));
+}
+
 export function extractPerplexityState(data, state = { chunks: [], searchResults: [], rawData: {} }, citationMode = 'clean') {
   if (data.backend_uuid) state.backendUuid = data.backend_uuid;
   if (data.read_write_token) state.readWriteToken = data.read_write_token;
+  if (data.display_model) state.displayModel = data.display_model;
+  if (data.user_selected_model) state.userSelectedModel = data.user_selected_model;
+  if (data.cursor) state.cursor = data.cursor;
+  const topLevelResults = normalizePerplexitySearchResults(data.web_results || data.search_results || data.sources);
+  if (topLevelResults.length) state.searchResults = topLevelResults;
   if (data.status === 'FAILED') throw new Error(`Perplexity query failed: ${data.text || 'unknown error'}`);
-  if (!data.text && !data.blocks) return state;
+  extractPerplexityBlockState(data, state, citationMode);
+  if (!data.text) {
+    if (data.status === 'COMPLETED' || data.final_sse_message === true) state.done = true;
+    return state;
+  }
 
   let payload;
   try {
@@ -377,17 +512,13 @@ export function extractPerplexityState(data, state = { chunks: [], searchResults
 
   if (payload && typeof payload === 'object') {
     if (Array.isArray(payload.web_results) && payload.web_results.length > 0) {
-      state.searchResults = payload.web_results.map(result => ({
-        title: result.name || null,
-        url: result.url || null,
-        snippet: result.snippet || null,
-      }));
+      state.searchResults = normalizePerplexitySearchResults(payload.web_results);
     }
     if (Array.isArray(payload.chunks)) state.chunks = payload.chunks.filter(Boolean).map(String);
     if (typeof payload.answer === 'string') state.answer = formatCitations(payload.answer, citationMode, state.searchResults);
     state.rawData = payload;
   }
-  if (data.final) state.done = true;
+  if (data.status === 'COMPLETED' || data.final_sse_message === true) state.done = true;
   return state;
 }
 
@@ -408,12 +539,20 @@ export function formatCitations(text, citationMode = 'clean', searchResults = []
   });
 }
 
-export function buildPerplexityProviderStates({ backendUuid = null, readWriteToken = null, previousBackendUuid = null, previousReadWriteToken = null, isIncognito = true, attachments = [], spaceUuid = null, streamState = null } = {}) {
+export function buildPerplexityProviderStates({ backendUuid = null, readWriteToken = null, previousBackendUuid = null, previousReadWriteToken = null, requestedModelIdentifier = null, responseModelIdentifier = null, userSelectedModelIdentifier = null, isIncognito = true, attachments = [], spaceUuid = null, streamState = null } = {}) {
   const backend_uuid = backendUuid || previousBackendUuid || null;
   const privateReadWriteToken = readWriteToken || previousReadWriteToken || null;
   const hasReadWriteToken = !!privateReadWriteToken;
   const safeAttachments = (Array.isArray(attachments) ? attachments : []).map(item => safePerplexityAttachmentMetadata(item));
+  const observedModelIdentifier = userSelectedModelIdentifier || responseModelIdentifier || null;
   const baseState = {
+    transport: 'browser-network-sse',
+    network_only: true,
+    dom_processing: false,
+    ...(requestedModelIdentifier ? { requested_model_identifier: requestedModelIdentifier } : {}),
+    ...(responseModelIdentifier ? { response_model_identifier: responseModelIdentifier } : {}),
+    ...(userSelectedModelIdentifier ? { user_selected_model_identifier: userSelectedModelIdentifier } : {}),
+    ...(requestedModelIdentifier ? { model_selection_verified: observedModelIdentifier ? observedModelIdentifier === requestedModelIdentifier : null } : {}),
     backend_uuid,
     is_incognito: !!isIncognito,
     saved_to_library: !isIncognito,
@@ -462,11 +601,11 @@ export function redactPerplexitySecrets(value, secrets = []) {
 }
 
 export function perplexityAuthFailureMessage({ source = AUTH_SOURCE_BROWSER_TOOLS, chromeError = null, detail = null, secrets = [] } = {}) {
-  const sourceName = source || 'configured token';
+  const sourceName = source || AUTH_SOURCE_BROWSER_TOOLS;
   const hints = [
-    `Perplexity authentication failed for ${sourceName}; session token invalid or expired.`,
-    'Log in to perplexity.ai in the selected Chrome profile, then retry. For standalone Perplexity token checks, PPLX_BROWSER_TOOLS_SYNC=1 forces a fresh profile sync. For AI Chat, restart the managed Browser Tools profile with --sync.',
-    'AI Chat uses the managed Browser Tools Chrome session and does not read PERPLEXITY_SESSION_TOKEN or PPLX_SESSION_TOKEN. If managed Chrome is using a stale copied profile, stop it with --clean, restart with --sync, and retry.',
+    `Perplexity authentication failed for ${sourceName}.`,
+    'Log in to perplexity.ai in the selected Chrome profile, then retry.',
+    'AI Chat sends requests inside the managed Browser Tools browser and never extracts Perplexity cookies or reads PERPLEXITY_SESSION_TOKEN or PPLX_SESSION_TOKEN. If managed Chrome is using a stale copied profile, stop it with --clean, restart with --sync, and retry.',
   ];
   if (chromeError) hints.push(`Browser Tools detail: ${redactPerplexitySecrets(chromeError, secrets)}.`);
   if (detail) hints.push(`Detail: ${redactPerplexitySecrets(detail, secrets)}.`);
@@ -484,13 +623,10 @@ function isAuthenticationStatus(status) {
   return status === 401 || status === 403;
 }
 
-function buildPerplexityHeaders(token, extra = {}) {
+function buildPerplexityHeaders(extra = {}) {
   return {
     Accept: 'text/event-stream, application/json',
     'Content-Type': 'application/json',
-    Referer: `${API_BASE_URL}/`,
-    Origin: API_BASE_URL,
-    Cookie: `${SESSION_COOKIE_NAME}=${token}`,
     ...extra,
   };
 }
@@ -533,6 +669,7 @@ function responseFromBrowserStream({ page, callbackName, url, options, signal })
   const encoder = new TextEncoder();
   let streamController = null;
   let settled = false;
+  let finished = false;
   const body = new ReadableStream({
     start(controller) {
       streamController = controller;
@@ -540,18 +677,35 @@ function responseFromBrowserStream({ page, callbackName, url, options, signal })
   });
 
   let removeAbortListener = () => {};
+  const abortName = `${callbackName}Abort`;
+  const cleanup = () => {
+    removeAbortListener();
+    if (typeof page.removeExposedFunction === 'function') {
+      const cleanupTimer = setTimeout(() => page.removeExposedFunction(callbackName).catch(() => {}), 100);
+      cleanupTimer.unref?.();
+    }
+  };
   const responsePromise = new Promise((resolve, reject) => {
     const fail = (error) => {
+      if (finished) return;
+      finished = true;
       if (settled) {
         streamController?.error(error);
+        cleanup();
         return;
       }
       settled = true;
+      cleanup();
       reject(error);
     };
 
     if (signal) {
-      const abort = () => fail(new Error('[perplexity] Browser fetch aborted'));
+      const abort = () => {
+        page.evaluate((name) => globalThis[name]?.(), abortName).catch(() => {});
+        const error = new Error('[perplexity] Browser fetch aborted');
+        error.name = 'AbortError';
+        fail(error);
+      };
       if (signal.aborted) {
         abort();
       } else {
@@ -569,23 +723,28 @@ function responseFromBrowserStream({ page, callbackName, url, options, signal })
           headers: event.headers || [],
         }));
       } else if (event.type === 'chunk') {
-        streamController?.enqueue(encoder.encode(String(event.chunk || '')));
+        if (!finished) streamController?.enqueue(encoder.encode(String(event.chunk || '')));
       } else if (event.type === 'done') {
+        if (finished) return;
+        finished = true;
         streamController?.close();
-        removeAbortListener();
+        cleanup();
       } else if (event.type === 'error') {
         fail(new Error(event.message || '[perplexity] Browser fetch failed'));
-        removeAbortListener();
       }
     }).then(() => {
-      page.evaluate(async ({ callbackName: exposedName, url: fetchUrl, options: fetchOptions }) => {
-        const send = async event => window[exposedName](event);
+      if (finished) return;
+      page.evaluate(async ({ callbackName: exposedName, abortName: browserAbortName, url: fetchUrl, options: fetchOptions }) => {
+        const send = async event => globalThis[exposedName](event);
+        const controller = new AbortController();
+        globalThis[browserAbortName] = () => controller.abort();
         try {
           const response = await fetch(fetchUrl, {
             method: fetchOptions.method,
             headers: fetchOptions.headers,
             body: fetchOptions.body,
             credentials: 'include',
+            signal: controller.signal,
           });
           await send({
             type: 'response',
@@ -613,8 +772,10 @@ function responseFromBrowserStream({ page, callbackName, url, options, signal })
           await send({ type: 'done' });
         } catch (error) {
           await send({ type: 'error', message: error?.message || String(error) });
+        } finally {
+          delete globalThis[browserAbortName];
         }
-      }, { callbackName, url, options }).catch(error => fail(error));
+      }, { callbackName, abortName, url, options }).catch(error => fail(error));
     }).catch(error => fail(error));
   });
 
@@ -624,7 +785,9 @@ function responseFromBrowserStream({ page, callbackName, url, options, signal })
 export function createPerplexityBrowserFetch(page, fallbackFetch = globalThis.fetch) {
   return async function perplexityBrowserFetch(url, options = {}) {
     if (!samePerplexityOrigin(url)) return fallbackFetch(url, options);
-    if (!page?.evaluate || !page?.exposeFunction) return fallbackFetch(url, options);
+    if (!page?.evaluate || !page?.exposeFunction) {
+      throw new Error('[perplexity] Same-origin network requests require the managed Browser Tools page context. DOM and Node-fetch fallbacks are disabled.');
+    }
     const fetchUrl = String(url).startsWith('http') ? String(url) : new URL(String(url), API_BASE_URL).toString();
     const body = typeof options.body === 'string' ? options.body : (options.body == null ? null : String(options.body));
     const browserOptions = {
@@ -711,7 +874,7 @@ async function fetchPerplexityUpload({ fetchImpl, url, options, attachment, phas
   }
 }
 
-async function uploadSinglePerplexityAttachment({ token, attachment, fetchImpl, signal, timeoutMs }) {
+async function uploadSinglePerplexityAttachment({ attachment, fetchImpl, signal, timeoutMs }) {
   const fileUuid = randomUUID();
   const requestBody = {
     files: {
@@ -734,14 +897,14 @@ async function uploadSinglePerplexityAttachment({ token, attachment, fetchImpl, 
     timeoutMs,
     options: {
       method: 'POST',
-      headers: buildPerplexityHeaders(token, { Accept: 'application/json' }),
+      headers: buildPerplexityHeaders({ Accept: 'application/json' }),
       body: JSON.stringify(requestBody),
     },
   });
   if (!initResponse.ok) {
     const detail = `upload URL HTTP ${initResponse.status}: ${await responseText(initResponse)}`;
-    if (isAuthenticationStatus(initResponse.status)) throw perplexityAuthError({ detail, secrets: [token] });
-    throw new Error(`[perplexity] File upload initialization failed for ${attachment.filename}: ${redactPerplexitySecrets(detail, [token])}`);
+    if (isAuthenticationStatus(initResponse.status)) throw perplexityAuthError({ detail });
+    throw new Error(`[perplexity] File upload initialization failed for ${attachment.filename}: ${redactPerplexitySecrets(detail)}`);
   }
 
   const data = await responseJson(initResponse, 'file upload initialization');
@@ -779,17 +942,17 @@ async function uploadSinglePerplexityAttachment({ token, attachment, fetchImpl, 
   };
 }
 
-export async function uploadPerplexityAttachments({ token, files = [], attachments = null, fetchImpl = globalThis.fetch, timeoutMs = DEFAULT_PERPLEXITY_UPLOAD_TIMEOUT_MS } = {}) {
+export async function uploadPerplexityAttachments({ files = [], attachments = null, fetchImpl, timeoutMs = DEFAULT_PERPLEXITY_UPLOAD_TIMEOUT_MS } = {}) {
   const normalized = attachments || normalizePerplexityFileAttachments(files);
   if (!normalized.length) return [];
-  if (!token) throw perplexityAuthError({ detail: 'session token missing' });
+  if (typeof fetchImpl !== 'function') throw new Error('[perplexity] File uploads require the managed browser network transport.');
   const uploadTimeoutMs = resolvePerplexityUploadTimeoutMs(timeoutMs);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), uploadTimeoutMs);
   const uploaded = [];
   try {
     for (const attachment of normalized) {
-      uploaded.push(await uploadSinglePerplexityAttachment({ token, attachment, fetchImpl, signal: controller.signal, timeoutMs: uploadTimeoutMs }));
+      uploaded.push(await uploadSinglePerplexityAttachment({ attachment, fetchImpl, signal: controller.signal, timeoutMs: uploadTimeoutMs }));
     }
     return uploaded;
   } finally {
@@ -797,46 +960,28 @@ export async function uploadPerplexityAttachments({ token, files = [], attachmen
   }
 }
 
-function attachNonEnumerableToken(target, token) {
-  Object.defineProperty(target, 'token', {
-    value: token,
-    enumerable: false,
-    configurable: true,
-  });
-  return target;
-}
-
-function makeSession({ token, lookup }) {
-  return attachNonEnumerableToken({
-    source: lookup.source,
-    cookie_url: lookup.url,
-    lookup_order: PERPLEXITY_SESSION_LOOKUP_ORDER.map(item => item.url),
-    token_present: true,
-  }, token);
-}
-
-export async function validatePerplexitySession({ token, fetchImpl = globalThis.fetch } = {}) {
-  if (!token) throw perplexityAuthError({ detail: 'session token missing' });
+export async function validatePerplexitySession({ fetchImpl } = {}) {
+  if (typeof fetchImpl !== 'function') throw new Error('[perplexity] Session validation requires the managed browser network transport.');
   const response = await fetchImpl(`${API_BASE_URL}/api/auth/session`, {
-    headers: buildPerplexityHeaders(token, { Accept: 'application/json' }),
+    headers: buildPerplexityHeaders({ Accept: 'application/json' }),
   });
   if (!response.ok) {
     const body = await responseText(response);
     const detail = `auth session check HTTP ${response.status}: ${body}`;
-    if (isAuthenticationStatus(response.status)) throw perplexityAuthError({ detail, secrets: [token] });
-    throw new Error(`Perplexity auth session check failed: ${redactPerplexitySecrets(detail, [token])}`);
+    if (isAuthenticationStatus(response.status)) throw perplexityAuthError({ detail });
+    throw new Error(`Perplexity auth session check failed: ${redactPerplexitySecrets(detail)}`);
   }
 
   let data;
   try {
     data = await response.json();
   } catch (error) {
-    throw perplexityAuthError({ detail: `auth session endpoint did not return JSON: ${error.message}`, secrets: [token] });
+    throw perplexityAuthError({ detail: `auth session endpoint did not return JSON: ${error.message}` });
   }
 
   const user = data?.user;
   if (!user || typeof user !== 'object' || !user.id) {
-    throw perplexityAuthError({ detail: 'auth session endpoint did not return a logged-in user', secrets: [token] });
+    throw perplexityAuthError({ detail: 'auth session endpoint did not return a logged-in user' });
   }
 
   return {
@@ -845,27 +990,6 @@ export async function validatePerplexitySession({ token, fetchImpl = globalThis.
     user_present: true,
     user_id_present: true,
   };
-}
-
-export async function readPerplexitySession(page, { validate = false, fetchImpl = globalThis.fetch } = {}) {
-  const lookupErrors = [];
-  for (const lookup of PERPLEXITY_SESSION_LOOKUP_ORDER) {
-    let cookies = [];
-    try {
-      cookies = await page.cookies(lookup.url);
-    } catch (error) {
-      lookupErrors.push(`${lookup.label}: ${error.message}`);
-      continue;
-    }
-    const cookie = cookies.find(candidate => candidate.name === SESSION_COOKIE_NAME && candidate.value);
-    if (!cookie?.value) continue;
-    const session = makeSession({ token: cookie.value, lookup });
-    if (validate) session.auth = await validatePerplexitySession({ token: cookie.value, fetchImpl });
-    return session;
-  }
-
-  const detail = lookupErrors.length ? lookupErrors.join('; ') : 'session cookie not found in managed browser';
-  throw perplexityAuthError({ source: AUTH_SOURCE_BROWSER_TOOLS, chromeError: detail });
 }
 
 function currentPerplexityText(state) {
@@ -921,16 +1045,13 @@ function emitPerplexityProgress({ state, previousText, onProgress }) {
   return { currentText, emitted: true };
 }
 
-export async function streamPerplexity({ token, payload, timeoutMs, citationMode, fetchImpl = globalThis.fetch, authPrevalidated = false, onProgress = null }) {
+export async function streamPerplexity({ payload, timeoutMs, citationMode, fetchImpl, authPrevalidated = false, onProgress = null }) {
+  if (typeof fetchImpl !== 'function') throw new Error('[perplexity] Streaming requires the managed browser network transport.');
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  const headers = buildPerplexityHeaders(token);
+  const headers = buildPerplexityHeaders();
 
   try {
-    const initResponse = await fetchImpl(`${API_BASE_URL}${ENDPOINT_SEARCH_INIT}?q=${encodeURIComponent(payload.query_str.slice(0, 2000))}`, { headers, signal: controller.signal });
-    if (!initResponse.ok && isAuthenticationStatus(initResponse.status)) {
-      throw perplexityAuthError({ detail: `search init HTTP ${initResponse.status}: ${await responseText(initResponse)}`, secrets: [token] });
-    }
     const response = await fetchImpl(`${API_BASE_URL}${ENDPOINT_ASK}`, {
       method: 'POST',
       headers,
@@ -940,9 +1061,9 @@ export async function streamPerplexity({ token, payload, timeoutMs, citationMode
     if (!response.ok) {
       const body = await responseText(response);
       const detail = `Perplexity HTTP ${response.status}: ${body}`;
-      if (response.status === 401 || (response.status === 403 && !authPrevalidated)) throw perplexityAuthError({ detail, secrets: [token] });
-      if (response.status === 403) throw new Error(`Perplexity model rejected or unavailable: ${redactPerplexitySecrets(detail, [token])}`);
-      throw new Error(redactPerplexitySecrets(detail, [token]));
+      if (response.status === 401 || (response.status === 403 && !authPrevalidated)) throw perplexityAuthError({ detail });
+      if (response.status === 403) throw new Error(`Perplexity model rejected or unavailable: ${redactPerplexitySecrets(detail)}`);
+      throw new Error(redactPerplexitySecrets(detail));
     }
 
     const reader = response.body.getReader();
@@ -989,8 +1110,8 @@ function normalizePerplexityProviderRequestOptions(providerOptions = {}) {
   };
 }
 
-async function preparePerplexityProviderRequestOptions({ token, request, normalized, fetchImpl = globalThis.fetch, timeoutMs = DEFAULT_PERPLEXITY_UPLOAD_TIMEOUT_MS }) {
-  const uploadedAttachments = await uploadPerplexityAttachments({ token, attachments: normalized.attachments, fetchImpl, timeoutMs });
+async function preparePerplexityProviderRequestOptions({ request, normalized, fetchImpl, timeoutMs = DEFAULT_PERPLEXITY_UPLOAD_TIMEOUT_MS }) {
+  const uploadedAttachments = await uploadPerplexityAttachments({ attachments: normalized.attachments, fetchImpl, timeoutMs });
   return {
     ...(request.providerOptions || {}),
     spaceUuid: normalized.spaceUuid,
@@ -998,7 +1119,7 @@ async function preparePerplexityProviderRequestOptions({ token, request, normali
   };
 }
 
-export async function verifyPerplexityModels({ token, models, timeoutMs, streamFn = streamPerplexity }) {
+export async function verifyPerplexityModels({ models, timeoutMs, streamFn = streamPerplexity }) {
   const verifiedAt = new Date().toISOString();
   const prompt = 'AI_CHAT_MODEL_CHECK';
   const verified = [];
@@ -1009,7 +1130,7 @@ export async function verifyPerplexityModels({ token, models, timeoutMs, streamF
       options: { saveToLibrary: false, sourceFocus: 'web', searchFocus: 'web' },
     });
     try {
-      const state = await streamFn({ token, payload, timeoutMs, citationMode: 'clean', model, authPrevalidated: true });
+      const state = await streamFn({ payload, timeoutMs, citationMode: 'clean', model, authPrevalidated: true });
       const text = state.answer || state.chunks.at(-1) || state.chunks.join('') || '';
       const exactAccepted = text.includes(prompt);
       verified.push({
@@ -1027,7 +1148,7 @@ export async function verifyPerplexityModels({ token, models, timeoutMs, streamF
         },
       });
     } catch (error) {
-      const errorMessage = redactPerplexitySecrets(error.message, [token]);
+      const errorMessage = redactPerplexitySecrets(error.message);
       const clarification = /requested clarification/i.test(errorMessage);
       verified.push({
         ...model,
@@ -1062,11 +1183,22 @@ export async function verifyPerplexityModels({ token, models, timeoutMs, streamF
   };
 }
 
+export async function openPerplexityNetworkPage(browser) {
+  const pages = await browser.pages();
+  let page = pages.find(candidate => candidate.url() === PERPLEXITY_NETWORK_BOOTSTRAP_URL);
+  if (!page) page = await browser.newPage({ background: true });
+  if (page.url() !== PERPLEXITY_NETWORK_BOOTSTRAP_URL) {
+    await page.goto(PERPLEXITY_NETWORK_BOOTSTRAP_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  }
+  return page;
+}
+
 export const perplexityProvider = {
   name: 'perplexity',
   url: API_BASE_URL,
   trustedConversationHostnames: PERPLEXITY_HOSTNAMES,
-  transport: 'webui-api',
+  transport: 'browser-network-sse',
+  preferredBrowserHeadless: true,
 
   defaultModel: DEFAULT_PERPLEXITY_MODEL,
   taskModels: {
@@ -1074,8 +1206,8 @@ export const perplexityProvider = {
     quick_web: DEFAULT_PERPLEXITY_MODEL,
     deep_research: 'perplexity/deep-research',
     sonar: 'perplexity/sonar-2',
-    reasoning: 'openai/gpt-5.4-thinking',
-    coding: 'anthropic/claude-sonnet-4.6',
+    reasoning: 'openai/gpt-5.6-terra-thinking',
+    coding: 'openai/gpt-5.6-terra',
   },
   historyPolicy: {
     default: 'incognito',
@@ -1092,26 +1224,25 @@ export const perplexityProvider = {
     const baseModels = MODELS.map(annotatePerplexityModel);
     if (!request?.verifyModels) {
       return {
-        model_source: 'bundled-registry-from-perplexity-webui-scraper',
+        model_source: 'browser-tools-network-contract-registry',
         account_specific: false,
         verification: { enabled: false },
         models: baseModels,
       };
     }
 
-    const page = await this.findPage({ browser });
+    const page = await openPerplexityNetworkPage(browser);
     const fetchImpl = createPerplexityBrowserFetch(page);
-    const session = await readPerplexitySession(page, { validate: true, fetchImpl });
+    const authSession = await validatePerplexitySession({ fetchImpl });
     const verifiedModels = await verifyPerplexityModels({
-      token: session.token,
       models: baseModels,
       timeoutMs: (request.verifyModelTimeoutSeconds || 90) * 1000,
       streamFn: args => streamPerplexity({ ...args, fetchImpl }),
     });
     return {
-      model_source: 'bundled-registry-from-perplexity-webui-scraper',
+      model_source: 'browser-tools-network-contract-registry',
       account_specific: true,
-      auth_session: session.auth || null,
+      auth_session: authSession,
       verification: verifiedModels.verification,
       models: verifiedModels.models,
     };
@@ -1120,11 +1251,11 @@ export const perplexityProvider = {
   async run({ browser, request, selectedModel, conversation }) {
     const model = resolvePerplexityRequestModel({ request, selectedModel });
     const normalizedOptions = normalizePerplexityProviderRequestOptions(request.providerOptions || {});
-    const page = await this.findPage({ browser });
+    const page = await openPerplexityNetworkPage(browser);
     const fetchImpl = createPerplexityBrowserFetch(page);
-    const session = await readPerplexitySession(page, { validate: !!request.providerOptions?.verifySession, fetchImpl });
+    const authSession = await validatePerplexitySession({ fetchImpl });
     const requestTimeoutMs = resolvePerplexityTimeoutSeconds({ model, request }) * 1000;
-    const effectiveOptions = await preparePerplexityProviderRequestOptions({ token: session.token, request, normalized: normalizedOptions, fetchImpl, timeoutMs: requestTimeoutMs });
+    const effectiveOptions = await preparePerplexityProviderRequestOptions({ request, normalized: normalizedOptions, fetchImpl, timeoutMs: requestTimeoutMs });
     console.error(`[perplexity] Model resolved: ${model.id}`);
     const payload = buildPerplexityPayload({
       query: request.prompt,
@@ -1133,12 +1264,11 @@ export const perplexityProvider = {
       conversation,
     });
     const state = await streamPerplexity({
-      token: session.token,
       payload,
       timeoutMs: requestTimeoutMs,
       citationMode: request.providerOptions?.citationMode || 'clean',
       fetchImpl,
-      authPrevalidated: !!session.auth,
+      authPrevalidated: !!authSession.authenticated,
       onProgress: perplexityProgressCallback(request),
     });
     const text = currentPerplexityText(state);
@@ -1149,6 +1279,9 @@ export const perplexityProvider = {
       readWriteToken: state.readWriteToken,
       previousBackendUuid: previousContinuation.backendUuid,
       previousReadWriteToken: previousContinuation.readWriteToken,
+      requestedModelIdentifier: model.identifier,
+      responseModelIdentifier: state.displayModel,
+      userSelectedModelIdentifier: state.userSelectedModel,
       isIncognito: payload.params.is_incognito,
       attachments: effectiveOptions.uploadedAttachments,
       spaceUuid: effectiveOptions.spaceUuid,
@@ -1167,75 +1300,4 @@ export const perplexityProvider = {
     }, providerStates.privateProviderState);
   },
 
-  async findPage({ browser }) {
-    const pages = await browser.pages();
-    let page = pages.find(candidate => isPerplexityUrl(candidate.url()));
-    if (!page) page = await browser.newPage({ background: true });
-    if (!isPerplexityUrl(page.url())) await page.goto(API_BASE_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await sleep(1000);
-    return page;
-  },
-
-  async createAttemptContext({ page, request, selectedModel, conversation }) {
-    const model = resolvePerplexityRequestModel({ request, selectedModel });
-    const normalizedOptions = normalizePerplexityProviderRequestOptions(request.providerOptions || {});
-    const fetchImpl = createPerplexityBrowserFetch(page);
-    const session = await readPerplexitySession(page, { validate: !!request.providerOptions?.verifySession, fetchImpl });
-    const requestTimeoutMs = resolvePerplexityTimeoutSeconds({ model, request }) * 1000;
-    const effectiveOptions = await preparePerplexityProviderRequestOptions({ token: session.token, request, normalized: normalizedOptions, fetchImpl, timeoutMs: requestTimeoutMs });
-    return attachNonEnumerableToken({ model, conversation, authSession: session.auth || null, providerOptions: effectiveOptions, fetchImpl }, session.token);
-  },
-
-  async setModel({ request, selectedModel }) {
-    const model = resolvePerplexityRequestModel({ request, selectedModel });
-    console.error(`[perplexity] Model resolved: ${model.id}`);
-  },
-
-  async clearInput() {},
-  async typePrompt() {},
-  async submit() {},
-
-  async waitForResponse({ request, timeoutMs, attemptContext }) {
-    const model = attemptContext.model;
-    const effectiveOptions = attemptContext.providerOptions || request.providerOptions || {};
-    const payload = buildPerplexityPayload({
-      query: request.prompt,
-      model,
-      options: effectiveOptions,
-      conversation: attemptContext.conversation,
-    });
-    const state = await streamPerplexity({
-      token: attemptContext.token,
-      payload,
-      timeoutMs: request.timeoutExplicit ? timeoutMs : resolvePerplexityTimeoutSeconds({ model, request }) * 1000,
-      citationMode: request.providerOptions?.citationMode || 'clean',
-      fetchImpl: attemptContext.fetchImpl || globalThis.fetch,
-      authPrevalidated: !!attemptContext.authSession,
-      onProgress: perplexityProgressCallback(request),
-    });
-    const text = currentPerplexityText(state);
-    const streamState = buildPerplexityStreamState(state, { stream: request.stream });
-    const previousContinuation = previousPerplexityContinuationState(attemptContext.conversation);
-    const providerStates = buildPerplexityProviderStates({
-      backendUuid: state.backendUuid,
-      readWriteToken: state.readWriteToken,
-      previousBackendUuid: previousContinuation.backendUuid,
-      previousReadWriteToken: previousContinuation.readWriteToken,
-      isIncognito: payload.params.is_incognito,
-      attachments: effectiveOptions.uploadedAttachments,
-      spaceUuid: effectiveOptions.spaceUuid,
-      streamState,
-    });
-    return attachPrivateProviderState({
-      text,
-      rawText: text,
-      done: !!state.done,
-      modelUsed: model.id,
-      finalUrl: null,
-      providerState: providerStates.providerState,
-      attachments: payload.requestMetadata.attachments,
-      searchResults: state.searchResults || [],
-      rawData: state.rawData || {},
-    }, providerStates.privateProviderState);
-  },
 };

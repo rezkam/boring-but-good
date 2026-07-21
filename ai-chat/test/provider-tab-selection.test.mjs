@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { chatgptProvider } from '../scripts/ai-chat/providers/chatgpt.mjs';
 import { grokProvider } from '../scripts/ai-chat/providers/grok.mjs';
-import { perplexityProvider } from '../scripts/ai-chat/providers/perplexity.mjs';
+import { PERPLEXITY_NETWORK_BOOTSTRAP_URL, openPerplexityNetworkPage } from '../scripts/ai-chat/providers/perplexity.mjs';
 
 async function withFastTimeouts(fn) {
   const originalSetTimeout = globalThis.setTimeout;
@@ -97,27 +97,27 @@ test('Grok tab selection reuses a real provider host', async () => withFastTimeo
   assert.deepEqual(real.navigations, ['https://x.com/i/grok']);
 }));
 
-test('Perplexity tab selection ignores provider domains outside the hostname and opens a background tab', async () => withFastTimeouts(async () => {
+test('Perplexity network context ignores unrelated and rendered provider pages', async () => withFastTimeouts(async () => {
   const fakePath = makePage('https://evil.example/perplexity.ai');
-  const fakeFragment = makePage('https://evil.example/#perplexity.ai');
+  const renderedProviderPage = makePage('https://www.perplexity.ai/search/example');
   const trustedNew = makePage('about:blank');
-  const browser = makeBrowser({ pages: [fakePath, fakeFragment], newPage: trustedNew });
+  const browser = makeBrowser({ pages: [fakePath, renderedProviderPage], newPage: trustedNew });
 
-  const page = await perplexityProvider.findPage({ browser });
+  const page = await openPerplexityNetworkPage(browser);
 
   assert.equal(page, trustedNew);
   assert.deepEqual(browser.newPageCalls, [{ background: true }]);
-  assert.deepEqual(trustedNew.navigations, ['https://www.perplexity.ai']);
+  assert.deepEqual(trustedNew.navigations, [PERPLEXITY_NETWORK_BOOTSTRAP_URL]);
 }));
 
-test('Perplexity tab selection reuses a real provider host', async () => withFastTimeouts(async () => {
-  const real = makePage('https://perplexity.ai/search?q=abc123');
+test('Perplexity network context reuses only its dedicated JSON endpoint page', async () => withFastTimeouts(async () => {
+  const real = makePage(PERPLEXITY_NETWORK_BOOTSTRAP_URL);
   const browser = {
     pages: async () => [real],
-    newPage: async () => assert.fail('real Perplexity tabs should be reused'),
+    newPage: async () => assert.fail('dedicated Perplexity network context should be reused'),
   };
 
-  const page = await perplexityProvider.findPage({ browser });
+  const page = await openPerplexityNetworkPage(browser);
 
   assert.equal(page, real);
   assert.deepEqual(real.navigations, []);

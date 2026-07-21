@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  PERPLEXITY_SESSION_LOOKUP_ORDER,
+  PERPLEXITY_NETWORK_BOOTSTRAP_URL,
   buildPerplexityPayload,
   buildPerplexityProviderStates,
   createPerplexityBrowserFetch,
@@ -13,84 +13,122 @@ import {
   formatCitations,
   normalizePerplexityFileAttachments,
   normalizePerplexitySpaceUuid,
+  openPerplexityNetworkPage,
   parseSseLine,
   perplexityAuthFailureMessage,
   perplexityProvider,
-  readPerplexitySession,
   resolvePerplexityModel,
+  resolvePerplexityRequestModel,
   resolvePerplexityTimeoutSeconds,
   streamPerplexity,
   uploadPerplexityAttachments,
+  validatePerplexitySession,
   verifyPerplexityModels,
 } from '../scripts/ai-chat/providers/perplexity.mjs';
 
 test('resolves Perplexity model ids, display names, and direct tool aliases', () => {
   assert.equal(resolvePerplexityModel('perplexity/deep-research').identifier, 'pplx_alpha');
-  assert.equal(resolvePerplexityModel('GPT-5.4 Thinking').id, 'openai/gpt-5.4-thinking');
-  assert.equal(resolvePerplexityModel('claude46sonnetthinking').id, 'anthropic/claude-sonnet-4.6-thinking');
-  assert.equal(resolvePerplexityModel('reasoning').id, 'openai/gpt-5.4-thinking');
+  assert.equal(resolvePerplexityModel('GPT-5.6 Terra').identifier, 'gpt56_terra');
+  assert.equal(resolvePerplexityModel('pplx_gpt56_terra_thinking').identifier, 'gpt56_terra_thinking');
+  assert.equal(resolvePerplexityModel('pplx_nemotron3_ultra_thinking').identifier, 'nv_nemotron_3_ultra');
+  assert.equal(resolvePerplexityModel('reasoning').id, 'openai/gpt-5.6-terra-thinking');
 
   const directTools = {
     pplx_best: 'perplexity/best',
     pplx_deep_research: 'perplexity/deep-research',
     pplx_sonar: 'perplexity/sonar-2',
-    pplx_gpt54: 'openai/gpt-5.4',
-    pplx_gpt54_thinking: 'openai/gpt-5.4-thinking',
-    pplx_gemini31_pro_think_low: 'google/gemini-3.1-pro-thinking-low',
-    pplx_gemini31_pro_think_high: 'google/gemini-3.1-pro-thinking-high',
-    pplx_claude_s46: 'anthropic/claude-sonnet-4.6',
-    pplx_claude_s46_think: 'anthropic/claude-sonnet-4.6-thinking',
-    pplx_kimi_k26_instant: 'moonshot/kimi-k2.6-instant',
-    pplx_kimi_k26_thinking: 'moonshot/kimi-k2.6-thinking',
-    pplx_nemotron3_super_think: 'nvidia/nemotron-3-super-thinking',
+    pplx_gpt56_terra: 'openai/gpt-5.6-terra',
+    pplx_gpt56_terra_thinking: 'openai/gpt-5.6-terra-thinking',
+    pplx_nemotron3_ultra_thinking: 'nvidia/nemotron-3-ultra-thinking',
   };
 
   for (const [alias, expectedId] of Object.entries(directTools)) {
     assert.equal(resolvePerplexityModel(alias).id, expectedId, alias);
   }
-  assert.equal(resolvePerplexityModel('openai/gpt-5.5-thinking'), null);
+  assert.equal(resolvePerplexityModel('openai/gpt-5.4-thinking'), null);
 });
 
 test('lists Perplexity models with capability and account-tier metadata', async () => {
   const list = await perplexityProvider.listModels({ request: { verifyModels: false } });
-  assert.equal(list.models.length >= 10, true);
+  assert.equal(list.model_source, 'browser-tools-network-contract-registry');
+  assert.equal(list.models.length, 6);
   assert.equal(list.models.some(model => model.min_tier === 'max'), false);
   assert.equal(list.models.some(model => model.id === 'openai/gpt-5.5-thinking'), false);
-  const thinking = list.models.find(model => model.id === 'google/gemini-3.1-pro-thinking-high');
+  const thinking = list.models.find(model => model.id === 'openai/gpt-5.6-terra-thinking');
   assert.equal(thinking.thinking, true);
-  assert.equal(thinking.thinking_level, 'high');
-  assert.equal(thinking.provider_family, 'google');
+  assert.equal(thinking.thinking_level, 'default');
+  assert.equal(thinking.provider_family, 'openai');
   assert.equal(thinking.min_tier, 'pro');
+  assert.equal(thinking.source, 'browser-tools-network-capture');
   assert.equal(thinking.account_specific, false);
   assert.deepEqual(thinking.account_tier, { required: 'pro', verified: null });
   assert.equal(list.verification.enabled, false);
 });
 
-test('Perplexity session lookup uses managed browser cookies and ignores env tokens', async () => {
+test('Perplexity validates auth through managed browser network requests without reading cookies or env tokens', async () => {
   const previousEnv = process.env.PERPLEXITY_SESSION_TOKEN;
   process.env.PERPLEXITY_SESSION_TOKEN = 'env-token-should-not-be-used';
-  const cookieCalls = [];
-  const page = {
-    cookies: async (url) => {
-      cookieCalls.push(url);
-      if (url === 'https://perplexity.ai') {
-        return [{ name: '__Secure-next-auth.session-token', value: 'browser-session-token' }];
-      }
-      return [];
-    },
-  };
+  const calls = [];
 
   try {
-    const session = await readPerplexitySession(page);
-    assert.equal(session.token, 'browser-session-token');
-    assert.equal(session.source, 'Browser Tools Chrome profile');
-    assert.deepEqual(cookieCalls, PERPLEXITY_SESSION_LOOKUP_ORDER.map(item => item.url));
-    assert.equal(JSON.stringify(session).includes('browser-session-token'), false);
+    const session = await validatePerplexitySession({
+      fetchImpl: async (url, options) => {
+        calls.push({ url: String(url), options });
+        return { ok: true, json: async () => ({ user: { id: 'account-present' } }) };
+      },
+    });
+    assert.equal(session.authenticated, true);
+    assert.equal(session.source, 'Browser Tools same-origin network session');
+    assert.deepEqual(calls.map(call => call.url), [PERPLEXITY_NETWORK_BOOTSTRAP_URL]);
+    assert.equal(JSON.stringify(calls).includes('Cookie'), false);
+    assert.equal(JSON.stringify(session).includes('account-present'), false);
     assert.equal(JSON.stringify(session).includes('env-token-should-not-be-used'), false);
   } finally {
     if (previousEnv === undefined) delete process.env.PERPLEXITY_SESSION_TOKEN;
     else process.env.PERPLEXITY_SESSION_TOKEN = previousEnv;
   }
+});
+
+test('Perplexity opens a dedicated JSON network context without inspecting page content', async () => {
+  const navigations = [];
+  const page = {
+    url: () => 'about:blank',
+    goto: async (url, options) => navigations.push({ url, options }),
+  };
+  const browser = {
+    pages: async () => [],
+    newPage: async (options) => {
+      assert.deepEqual(options, { background: true });
+      return page;
+    },
+  };
+
+  assert.equal(await openPerplexityNetworkPage(browser), page);
+  assert.deepEqual(navigations, [{
+    url: PERPLEXITY_NETWORK_BOOTSTRAP_URL,
+    options: { waitUntil: 'domcontentloaded', timeout: 30000 },
+  }]);
+});
+
+test('Perplexity exposes only the browser network transport and no UI lifecycle fallback', () => {
+  const source = readFileSync(new URL('../scripts/ai-chat/providers/perplexity.mjs', import.meta.url), 'utf-8');
+  for (const pattern of [
+    /document\./,
+    /querySelector/,
+    /innerText/,
+    /textContent/,
+    /\.click\(/,
+    /\.type\(/,
+    /\.cookies\(/,
+    /page\.content/,
+  ]) {
+    assert.doesNotMatch(source, pattern);
+  }
+  for (const method of ['findPage', 'createAttemptContext', 'clearInput', 'typePrompt', 'submit', 'waitForResponse']) {
+    assert.equal(Object.prototype.hasOwnProperty.call(perplexityProvider, method), false, method);
+  }
+  assert.equal(perplexityProvider.transport, 'browser-network-sse');
+  assert.equal(perplexityProvider.preferredBrowserHeadless, true);
 });
 
 test('Perplexity browser fetch uses page credentials and strips unsafe cookie headers', async () => {
@@ -134,20 +172,64 @@ test('Perplexity browser fetch uses page credentials and strips unsafe cookie he
   assert.equal(evaluated.options.body, '{"query":"hello"}');
 });
 
+test('Perplexity same-origin requests fail closed instead of falling back to Node fetch', async () => {
+  let fallbackCalls = 0;
+  const fetchImpl = createPerplexityBrowserFetch(null, async () => {
+    fallbackCalls += 1;
+    return { ok: true };
+  });
+
+  await assert.rejects(
+    () => fetchImpl('https://www.perplexity.ai/rest/sse/perplexity_ask'),
+    /managed Browser Tools page context.*fallbacks are disabled/i,
+  );
+  assert.equal(fallbackCalls, 0);
+  assert.equal((await fetchImpl('https://uploads.example.test/file')).ok, true);
+  assert.equal(fallbackCalls, 1);
+});
+
+test('Perplexity stream timeout aborts the in-browser fetch', async () => {
+  const exposed = {};
+  let browserAbortCalls = 0;
+  const page = {
+    async exposeFunction(name, callback) { exposed[name] = callback; },
+    async evaluate(_fn, args) {
+      if (typeof args === 'string') {
+        browserAbortCalls += 1;
+        return;
+      }
+      await exposed[args.callbackName]({ type: 'response', status: 200, headers: [['content-type', 'text/event-stream']] });
+      return new Promise(() => {});
+    },
+  };
+  const fetchImpl = createPerplexityBrowserFetch(page);
+
+  await assert.rejects(
+    () => streamPerplexity({
+      payload: buildPerplexityPayload({ query: 'hello', model: resolvePerplexityModel('perplexity/best') }),
+      timeoutMs: 5,
+      citationMode: 'clean',
+      fetchImpl,
+    }),
+    (error) => error.name === 'AbortError' && /Browser fetch aborted/.test(error.message),
+  );
+  assert.equal(browserAbortCalls, 1);
+});
+
 test('Perplexity auth failures include recovery guidance without token values', async () => {
   await assert.rejects(
-    () => readPerplexitySession({ cookies: async () => [] }),
-    /Perplexity authentication failed.*Log in to perplexity\.ai.*--sync.*session cookie not found/s,
+    () => validatePerplexitySession({
+      fetchImpl: async () => ({ ok: false, status: 401, text: async () => 'not authenticated' }),
+    }),
+    /Perplexity authentication failed.*Log in to perplexity\.ai.*--sync/s,
   );
 
-  const message = perplexityAuthFailureMessage({ source: 'Browser Tools Chrome profile', chromeError: 'cookie missing' });
-  assert.match(message, /Perplexity authentication failed for Browser Tools Chrome profile/i);
+  const message = perplexityAuthFailureMessage({ source: 'Browser Tools same-origin network session', chromeError: 'session missing' });
+  assert.match(message, /Perplexity authentication failed for Browser Tools same-origin network session/i);
   assert.match(message, /Log in to perplexity\.ai in the selected Chrome profile/i);
-  assert.match(message, /PPLX_BROWSER_TOOLS_SYNC=1/);
   assert.match(message, /stop it with --clean, restart with --sync/i);
-  assert.match(message, /does not read PERPLEXITY_SESSION_TOKEN or PPLX_SESSION_TOKEN/i);
+  assert.match(message, /never extracts Perplexity cookies or reads PERPLEXITY_SESSION_TOKEN or PPLX_SESSION_TOKEN/i);
 
-  const token = 'secret-session-token';
   const payload = buildPerplexityPayload({
     query: 'hello',
     model: resolvePerplexityModel('perplexity/best'),
@@ -155,30 +237,27 @@ test('Perplexity auth failures include recovery guidance without token values', 
   const fetchCalls = [];
   const fetchImpl = async (url) => {
     fetchCalls.push(String(url));
-    if (String(url).includes('/search/new')) return { ok: true, text: async () => '' };
     return {
       ok: false,
       status: 403,
-      text: async () => `expired ${token} {"read_write_token":"rw-secret"}`,
+      text: async () => '{"read_write_token":"rw-secret"}',
     };
   };
 
   await assert.rejects(
-    () => streamPerplexity({ token, payload, timeoutMs: 1000, citationMode: 'clean', fetchImpl }),
+    () => streamPerplexity({ payload, timeoutMs: 1000, citationMode: 'clean', fetchImpl }),
     (error) => {
       assert.match(error.message, /Perplexity authentication failed/);
-      assert.equal(error.message.includes(token), false);
       assert.equal(error.message.includes('rw-secret'), false);
       return true;
     },
   );
-  assert.equal(fetchCalls.length, 2);
+  assert.deepEqual(fetchCalls, ['https://www.perplexity.ai/rest/sse/perplexity_ask']);
 
   await assert.rejects(
-    () => streamPerplexity({ token, payload, timeoutMs: 1000, citationMode: 'clean', fetchImpl, authPrevalidated: true }),
+    () => streamPerplexity({ payload, timeoutMs: 1000, citationMode: 'clean', fetchImpl, authPrevalidated: true }),
     (error) => {
       assert.match(error.message, /model rejected or unavailable/i);
-      assert.equal(error.message.includes(token), false);
       assert.equal(error.message.includes('rw-secret'), false);
       return true;
     },
@@ -186,92 +265,52 @@ test('Perplexity auth failures include recovery guidance without token values', 
 });
 
 test('Perplexity live model verification reports accepted and rejected shape safely', async () => {
-  const models = [resolvePerplexityModel('perplexity/best'), resolvePerplexityModel('openai/gpt-5.4')];
-  const token = 'verification-session-token';
+  const models = [resolvePerplexityModel('perplexity/best'), resolvePerplexityModel('openai/gpt-5.6-terra')];
   const result = await verifyPerplexityModels({
-    token,
     models,
     timeoutMs: 1000,
     streamFn: async ({ model }) => {
       if (model.id === 'perplexity/best') {
         return { answer: 'AI_CHAT_MODEL_CHECK', chunks: [], backendUuid: 'uuid-accepted' };
       }
-      throw new Error(`Perplexity HTTP 403: rejected ${token}`);
+      throw new Error('Perplexity HTTP 403: {"read_write_token":"rw-verification-secret"}');
     },
   });
 
   assert.equal(result.verification.accepted_count, 1);
   assert.equal(result.verification.rejected_count, 1);
   assert.deepEqual(result.verification.accepted_model_ids, ['perplexity/best']);
-  assert.deepEqual(result.verification.rejected_model_ids, ['openai/gpt-5.4']);
+  assert.deepEqual(result.verification.rejected_model_ids, ['openai/gpt-5.6-terra']);
   assert.equal(result.models[0].verification.status, 'accepted');
   assert.equal(result.models[0].verification.accepted, true);
   assert.equal(result.models[1].verification.status, 'rejected');
   assert.equal(result.models[1].verification.accepted, false);
-  assert.equal(JSON.stringify(result).includes(token), false);
+  assert.equal(JSON.stringify(result).includes('rw-verification-secret'), false);
 });
-
-function fakePerplexitySessionPage() {
-  return {
-    cookies: async () => [{ name: '__Secure-next-auth.session-token', value: 'session-token' }],
-  };
-}
 
 test('Perplexity provider rejects unknown explicit model requests', async () => {
-  const page = fakePerplexitySessionPage();
-  const provider = { ...perplexityProvider, findPage: async () => page };
   const request = { prompt: 'hello', modelName: 'definitely-not-real', timeoutSeconds: 1, providerOptions: {} };
-  const previousFetch = globalThis.fetch;
-  let fetchCalls = 0;
-  globalThis.fetch = async () => {
-    fetchCalls += 1;
-    return {
-      ok: true,
-      text: async () => '',
-      body: {
-        getReader: () => ({ read: async () => ({ done: true }) }),
-      },
-    };
-  };
-
-  try {
-    await assert.rejects(
-      () => provider.run({ browser: {}, request, selectedModel: 'definitely-not-real' }),
-      /\[perplexity\] Unknown model: definitely-not-real.*--list-models/s,
-    );
-    await assert.rejects(
-      () => perplexityProvider.createAttemptContext({ page, request, selectedModel: 'definitely-not-real' }),
-      /\[perplexity\] Unknown model: definitely-not-real.*--list-models/s,
-    );
-    assert.equal(fetchCalls, 0);
-  } finally {
-    globalThis.fetch = previousFetch;
-  }
+  await assert.rejects(
+    () => perplexityProvider.run({ browser: {}, request, selectedModel: 'definitely-not-real' }),
+    /\[perplexity\] Unknown model: definitely-not-real.*--list-models/s,
+  );
 });
 
-test('Perplexity provider resolves valid default, alias, and task model requests', async () => {
-  const page = fakePerplexitySessionPage();
-  const defaultContext = await perplexityProvider.createAttemptContext({
-    page,
-    request: { modelName: 'default' },
-    selectedModel: 'default',
-  });
-  const aliasContext = await perplexityProvider.createAttemptContext({
-    page,
-    request: { modelName: 'default' },
-    selectedModel: 'reasoning',
-  });
-  const taskContext = await perplexityProvider.createAttemptContext({
-    page,
-    request: { modelName: 'default', modelTask: 'coding' },
-    selectedModel: perplexityProvider.taskModels.coding,
-  });
+test('Perplexity provider resolves defaults, task aliases, and captured Thinking variants', () => {
+  const defaultModel = resolvePerplexityRequestModel({ request: { modelName: 'default' }, selectedModel: 'default' });
+  const reasoningModel = resolvePerplexityRequestModel({ request: { modelName: 'default' }, selectedModel: 'reasoning' });
+  const taskModel = resolvePerplexityRequestModel({ request: { modelName: 'default', modelTask: 'coding' }, selectedModel: perplexityProvider.taskModels.coding });
+  const thinkingModel = resolvePerplexityRequestModel({ request: { thinking: true }, selectedModel: 'openai/gpt-5.6-terra' });
 
-  assert.equal(defaultContext.model.id, 'perplexity/best');
-  assert.equal(aliasContext.model.id, 'openai/gpt-5.4-thinking');
-  assert.equal(taskContext.model.id, 'anthropic/claude-sonnet-4.6');
-  assert.equal(defaultContext.token, 'session-token');
-  assert.equal(JSON.stringify(defaultContext).includes('session-token'), false);
+  assert.equal(defaultModel.id, 'perplexity/best');
+  assert.equal(reasoningModel.id, 'openai/gpt-5.6-terra-thinking');
+  assert.equal(taskModel.id, 'openai/gpt-5.6-terra');
+  assert.equal(thinkingModel.id, 'openai/gpt-5.6-terra-thinking');
+  assert.equal(thinkingModel.identifier, 'gpt56_terra_thinking');
+  assert.throws(
+    () => resolvePerplexityRequestModel({ request: { thinking: true }, selectedModel: 'perplexity/sonar-2' }),
+    /has no captured Thinking variant/,
+  );
 });
 
 test('builds Perplexity payload with continuation and research options', () => {
@@ -297,6 +336,17 @@ test('builds Perplexity payload with continuation and research options', () => {
   assert.equal(payload.params.language, 'sv-SE');
   assert.equal(payload.params.timezone, 'Europe/Stockholm');
   assert.equal(payload.params.is_incognito, false);
+  assert.equal(payload.params.use_schematized_api, true);
+  assert.equal(payload.params.send_back_text_in_streaming_api, false);
+  assert.equal(payload.params.dsl_query, 'follow up');
+  assert.equal(payload.params.skip_search_enabled, true);
+  assert.equal(payload.params.always_search_override, false);
+  assert.equal(payload.params.override_no_search, false);
+  assert.match(payload.params.frontend_uuid, /^[0-9a-f-]{36}$/i);
+  assert.match(payload.params.frontend_context_uuid, /^[0-9a-f-]{36}$/i);
+  assert.match(payload.params.rum_session_id, /^[0-9a-f-]{36}$/i);
+  assert.equal(payload.params.supported_block_use_cases.includes('diff_blocks'), true);
+  assert.equal(payload.params.supported_block_use_cases.includes('workflow_steps'), true);
   assert.equal(payload.params.last_backend_uuid, 'uuid-1');
   assert.equal(payload.params.read_write_token, 'rw-1');
   assert.equal(payload.params.query_source, 'followup');
@@ -332,6 +382,7 @@ test('builds Perplexity payload with uploaded attachments, Space selection, and 
   assert.equal(payload.params.last_backend_uuid, 'uuid-previous');
   assert.equal(payload.params.read_write_token, 'rw-previous');
   assert.equal(payload.params.query_source, 'followup');
+  assert.equal(Object.prototype.hasOwnProperty.call(payload.params, 'search_recency_filter'), false);
   assert.equal(payload.query_str, 'new user turn only');
   assert.equal(JSON.stringify(payload).includes('old turn must not be replayed'), false);
   assert.deepEqual(payload.requestMetadata.attachments, [{
@@ -374,7 +425,6 @@ test('validates Perplexity file attachments before network use', () => {
 
 test('uploads Perplexity file attachments with safe metadata', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pplx-upload-'));
-  const token = 'session-token';
   const calls = [];
   try {
     const file = join(dir, 'report.txt');
@@ -409,7 +459,7 @@ test('uploads Perplexity file attachments with safe metadata', async () => {
       return { ok: true, status: 204, text: async () => '' };
     };
 
-    const uploaded = await uploadPerplexityAttachments({ token, files: [file], fetchImpl });
+    const uploaded = await uploadPerplexityAttachments({ files: [file], fetchImpl });
     assert.equal(calls.length, 2);
     assert.equal(calls[0].options.signal, calls[1].options.signal);
     assert.equal(uploaded[0].url, 'https://uploads.example.test/report.txt');
@@ -424,8 +474,7 @@ test('uploads Perplexity file attachments with safe metadata', async () => {
     });
     assert.equal(JSON.stringify(uploaded[0].metadata).includes(file), false);
     assert.equal(JSON.stringify(uploaded[0].metadata).includes('hello file'), false);
-    assert.equal(JSON.stringify(calls[0]).includes(token), true);
-    assert.equal(JSON.stringify(uploaded[0].metadata).includes(token), false);
+    assert.equal(JSON.stringify(calls[0]).includes('Cookie'), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -433,7 +482,6 @@ test('uploads Perplexity file attachments with safe metadata', async () => {
 
 test('Perplexity file upload timeout aborts stalled initialization and S3 requests', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pplx-upload-timeout-'));
-  const token = 'session-token';
   try {
     const file = join(dir, 'report.txt');
     writeFileSync(file, 'hello file', 'utf-8');
@@ -455,10 +503,9 @@ test('Perplexity file upload timeout aborts stalled initialization and S3 reques
     };
 
     await assert.rejects(
-      () => uploadPerplexityAttachments({ token, files: [file], fetchImpl: initFetch, timeoutMs: 5 }),
+      () => uploadPerplexityAttachments({ files: [file], fetchImpl: initFetch, timeoutMs: 5 }),
       (error) => {
         assert.match(error.message, /File upload timed out for report\.txt during upload initialization after 5ms/);
-        assert.equal(error.message.includes(token), false);
         return true;
       },
     );
@@ -496,10 +543,9 @@ test('Perplexity file upload timeout aborts stalled initialization and S3 reques
     };
 
     await assert.rejects(
-      () => uploadPerplexityAttachments({ token, files: [file], fetchImpl: s3Fetch, timeoutMs: 5 }),
+      () => uploadPerplexityAttachments({ files: [file], fetchImpl: s3Fetch, timeoutMs: 5 }),
       (error) => {
         assert.match(error.message, /File upload timed out for report\.txt during S3 upload after 5ms/);
-        assert.equal(error.message.includes(token), false);
         return true;
       },
     );
@@ -574,6 +620,8 @@ test('parses Perplexity SSE data and extracts answer, citations, and thread stat
     backend_uuid: 'uuid-2',
     read_write_token: 'rw-2',
     final: true,
+    final_sse_message: true,
+    status: 'COMPLETED',
     text: JSON.stringify({
       answer: 'Answer [1]',
       chunks: ['Answer [1]'],
@@ -592,7 +640,7 @@ test('Perplexity streaming reports incremental progress and still returns final 
   const encoder = new TextEncoder();
   const lines = [
     `data: ${JSON.stringify({ text: JSON.stringify({ answer: 'Hello', chunks: ['Hello'] }) })}\n`,
-    `data: ${JSON.stringify({ final: true, backend_uuid: 'uuid-stream', text: JSON.stringify({ answer: 'Hello world', chunks: ['Hello world'] }) })}\n`,
+    `data: ${JSON.stringify({ final: true, final_sse_message: true, status: 'COMPLETED', backend_uuid: 'uuid-stream', text: JSON.stringify({ answer: 'Hello world', chunks: ['Hello world'] }) })}\n`,
   ];
   let readIndex = 0;
   const progress = [];
@@ -612,7 +660,6 @@ test('Perplexity streaming reports incremental progress and still returns final 
   };
 
   const state = await streamPerplexity({
-    token: 'session-token',
     payload: buildPerplexityPayload({ query: 'hello', model: resolvePerplexityModel('perplexity/best') }),
     timeoutMs: 1000,
     citationMode: 'clean',
@@ -628,11 +675,87 @@ test('Perplexity streaming reports incremental progress and still returns final 
   assert.equal(state.streamProgress.streamed_chars, 11);
 });
 
+test('Perplexity streaming applies captured block diffs and waits for the completed SSE event', async () => {
+  const encoder = new TextEncoder();
+  const lines = [
+    `data: ${JSON.stringify({
+      status: 'PENDING',
+      text_completed: true,
+      blocks: [{
+        intended_usage: 'ask_text',
+        diff_block: {
+          field: 'markdown_block',
+          patches: [{ op: 'replace', path: '', value: { progress: 'IN_PROGRESS', chunks: ['Hello'] } }],
+        },
+      }],
+    })}\n`,
+    `data: ${JSON.stringify({
+      status: 'PENDING',
+      final: true,
+      text_completed: true,
+      blocks: [{
+        intended_usage: 'ask_text',
+        diff_block: {
+          field: 'markdown_block',
+          patches: [{ op: 'add', path: '/chunks/1', value: ' world' }],
+        },
+      }],
+    })}\n`,
+    `data: ${JSON.stringify({
+      status: 'COMPLETED',
+      final: true,
+      final_sse_message: true,
+      backend_uuid: 'uuid-captured-schema',
+      read_write_token: 'rw-private',
+      display_model: 'gpt56_terra_thinking',
+      user_selected_model: 'gpt56_terra_thinking',
+      text: JSON.stringify([
+        { step_type: 'INITIAL_QUERY', content: { query: 'hello' } },
+        { step_type: 'FINAL', content: { answer: 'Hello world' } },
+      ]),
+      blocks: [{
+        intended_usage: 'ask_text',
+        markdown_block: { progress: 'DONE', chunks: ['Hello', ' world'], answer: 'Hello world' },
+      }],
+    })}\n`,
+  ];
+  let readIndex = 0;
+  const progress = [];
+  const state = await streamPerplexity({
+    payload: buildPerplexityPayload({ query: 'hello', model: resolvePerplexityModel('openai/gpt-5.6-terra-thinking') }),
+    timeoutMs: 1000,
+    citationMode: 'clean',
+    fetchImpl: async (url) => {
+      assert.equal(String(url), 'https://www.perplexity.ai/rest/sse/perplexity_ask');
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: async () => readIndex < lines.length
+              ? { value: encoder.encode(lines[readIndex++]), done: false }
+              : { done: true },
+          }),
+        },
+      };
+    },
+    onProgress: event => progress.push(event),
+  });
+
+  assert.equal(readIndex, 3, 'the pending final event must not end the stream');
+  assert.equal(state.answer, 'Hello world');
+  assert.equal(state.done, true);
+  assert.equal(state.backendUuid, 'uuid-captured-schema');
+  assert.equal(state.readWriteToken, 'rw-private');
+  assert.equal(state.displayModel, 'gpt56_terra_thinking');
+  assert.deepEqual(progress.map(event => event.delta), ['Hello', ' world', '']);
+  assert.equal(progress.at(-1).done, true);
+});
+
 test('Perplexity streaming consumes final SSE data without trailing newline', async () => {
   const encoder = new TextEncoder();
   const lines = [
     `data: ${JSON.stringify({ text: JSON.stringify({ answer: 'Hello', chunks: ['Hello'] }) })}\n`,
-    `data: ${JSON.stringify({ final: true, backend_uuid: 'uuid-no-newline', text: JSON.stringify({ answer: 'Hello world', chunks: ['Hello world'] }) })}`,
+    `data: ${JSON.stringify({ final: true, final_sse_message: true, status: 'COMPLETED', backend_uuid: 'uuid-no-newline', text: JSON.stringify({ answer: 'Hello world', chunks: ['Hello world'] }) })}`,
   ];
   let readIndex = 0;
   const progress = [];
@@ -652,7 +775,6 @@ test('Perplexity streaming consumes final SSE data without trailing newline', as
   };
 
   const state = await streamPerplexity({
-    token: 'session-token',
     payload: buildPerplexityPayload({ query: 'hello', model: resolvePerplexityModel('perplexity/best') }),
     timeoutMs: 1000,
     citationMode: 'clean',
@@ -673,6 +795,9 @@ test('builds safe and private Perplexity provider state without leaking continua
   const states = buildPerplexityProviderStates({
     backendUuid: 'uuid-2',
     readWriteToken: rawToken,
+    requestedModelIdentifier: 'gpt56_terra_thinking',
+    responseModelIdentifier: 'gpt56_terra_thinking',
+    userSelectedModelIdentifier: 'gpt56_terra_thinking',
     isIncognito: true,
     attachments: [{
       url: 'https://uploads.example.test/report.txt',
@@ -691,6 +816,13 @@ test('builds safe and private Perplexity provider state without leaking continua
   });
 
   assert.deepEqual(states.providerState, {
+    transport: 'browser-network-sse',
+    network_only: true,
+    dom_processing: false,
+    requested_model_identifier: 'gpt56_terra_thinking',
+    response_model_identifier: 'gpt56_terra_thinking',
+    user_selected_model_identifier: 'gpt56_terra_thinking',
+    model_selection_verified: true,
     backend_uuid: 'uuid-2',
     has_read_write_token: true,
     is_incognito: true,
@@ -713,6 +845,13 @@ test('builds safe and private Perplexity provider state without leaking continua
   assert.equal(JSON.stringify(states.providerState).includes(rawToken), false);
   assert.equal(JSON.stringify(states.providerState).includes('https://uploads.example.test'), false);
   assert.deepEqual(states.privateProviderState, {
+    transport: 'browser-network-sse',
+    network_only: true,
+    dom_processing: false,
+    requested_model_identifier: 'gpt56_terra_thinking',
+    response_model_identifier: 'gpt56_terra_thinking',
+    user_selected_model_identifier: 'gpt56_terra_thinking',
+    model_selection_verified: true,
     backend_uuid: 'uuid-2',
     read_write_token: rawToken,
     is_incognito: true,

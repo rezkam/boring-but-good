@@ -29,12 +29,14 @@ const MODEL_SELECTION_MATRIX = [
     resolveId: model => resolvePerplexityModel(model)?.id || null,
     aliases: [
       ['pplx_best', 'perplexity/best'],
-      ['reasoning', 'openai/gpt-5.4-thinking'],
+      ['reasoning', 'openai/gpt-5.6-terra-thinking'],
+      ['pplx_gpt56_terra', 'openai/gpt-5.6-terra'],
+      ['pplx_gpt56_terra_thinking', 'openai/gpt-5.6-terra-thinking'],
       ['pplx_deep_research', 'perplexity/deep-research'],
     ],
     taskDefaults: [
       ['deep_research', 'perplexity/deep-research'],
-      ['coding', 'anthropic/claude-sonnet-4.6'],
+      ['coding', 'openai/gpt-5.6-terra'],
     ],
     unknownModel: 'definitely-not-a-perplexity-model',
     outputCase: {
@@ -42,6 +44,9 @@ const MODEL_SELECTION_MATRIX = [
       selectedModel: 'perplexity/best',
       fallbackTrail: ['perplexity/best'],
       providerState: {
+        transport: 'browser-network-sse',
+        network_only: true,
+        dom_processing: false,
         backend_uuid: 'uuid-matrix',
         has_read_write_token: true,
         is_incognito: true,
@@ -50,7 +55,7 @@ const MODEL_SELECTION_MATRIX = [
     },
     liveCases: [
       { kind: 'fast', model: 'perplexity/best', timeoutSeconds: 120 },
-      { kind: 'reasoning', model: 'openai/gpt-5.4-thinking', timeoutSeconds: 180 },
+      { kind: 'reasoning', model: 'openai/gpt-5.6-terra-thinking', timeoutSeconds: 180 },
       { kind: 'deep_research', model: 'perplexity/deep-research', timeoutSeconds: 3600 },
       { kind: 'provider_specific', model: 'perplexity/sonar-2', timeoutSeconds: 180 },
     ],
