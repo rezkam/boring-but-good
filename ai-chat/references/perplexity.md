@@ -40,7 +40,7 @@ Private capture evidence belongs outside the repository. Do not commit HAR files
 | Capability | Command or behavior |
 | --- | --- |
 | New prompt | `scripts/ai-chat.mjs --provider perplexity --prompt "..." --json` |
-| Continue thread | Save with `--save-conversation`, then use `--conversation` |
+| Continue thread | Use the returned `conversation_url` directly with `--conversation`, or save with `--save-conversation` and use the local id |
 | Attach thread | `--attach-conversation <backend-uuid-or-url> --save-conversation <local-id>` |
 | Select model | `--model <id-or-alias>` |
 | Select captured Thinking variant | `--model openai/gpt-5.6-terra --thinking`, or select `openai/gpt-5.6-terra-thinking` directly |
@@ -67,6 +67,13 @@ scripts/ai-chat.mjs \
   --provider perplexity \
   --incognito \
   --prompt "Answer this private question" \
+  --json
+
+# Continue the provider thread from the `conversation_url` in a prior JSON response.
+scripts/ai-chat.mjs \
+  --provider perplexity \
+  --conversation https://www.perplexity.ai/search/123e4567-e89b-12d3-a456-426614174000 \
+  --prompt "What changes your conclusion?" \
   --json
 
 # Captured non-thinking model identifier.
@@ -192,7 +199,7 @@ A new request follows this shape. UUID values are generated for each request.
 }
 ```
 
-Recency, Space, file, and continuation fields are added only when needed. Follow-ups send only the new user turn plus `last_backend_uuid`, private `read_write_token`, and `query_source: "followup"`. Spaces add `target_collection_uuid`, `target_thread_access_level`, and non-incognito history behavior.
+Recency, Space, file, and continuation fields are added only when needed. Each created thread maps its returned `backend_uuid` to the canonical URL `https://www.perplexity.ai/search/<backend_uuid>`, which AI Chat returns as both `final_url` and `conversation_url`. A direct `--conversation` URL extracts the UUID and sends only the new user turn plus `last_backend_uuid` and `query_source: "followup"`. A saved local conversation also retains the private `read_write_token` when supplied, which is the reliable continuation path across later agent turns. Spaces add `target_collection_uuid`, `target_thread_access_level`, and non-incognito history behavior.
 
 AI Chat persists ordinary requests to provider history by default. `--incognito` records that the user explicitly requested the captured private UI behavior and bypasses the local AI Chat response cache. `--save-to-library` remains an explicit persistence flag for compatibility. Explicit output files or local conversation records are still written when the user asks for them. `--incognito` conflicts with `--save-to-library` and `--space-uuid`; both conflicts fail before network use instead of silently changing history behavior.
 
@@ -241,6 +248,7 @@ Perplexity JSON output includes the common AI Chat metadata and safe provider st
     "model_selection_verified": true,
     "backend_uuid": "...",
     "has_read_write_token": true,
+    "thread_url": "https://www.perplexity.ai/search/...",
     "is_incognito": true,
     "incognito_explicit": true,
     "privacy_state": "INCOGNITO",
@@ -256,6 +264,8 @@ Perplexity JSON output includes the common AI Chat metadata and safe provider st
       "timeout": false
     }
   },
+  "final_url": "https://www.perplexity.ai/search/...",
+  "conversation_url": "https://www.perplexity.ai/search/...",
   "sources": [],
   "search_results": [],
   "response": "..."
@@ -279,12 +289,14 @@ Live checks create provider requests and may consume quota. Keep evidence under 
 
 1. Normal request without `--incognito` with `is_incognito: false` and provider-history persistence.
 2. Explicit `--incognito` request with `is_incognito: true`, `privacy_state: INCOGNITO`, expiry metadata, and no provider-history save.
-3. New request with `openai/gpt-5.6-terra`.
-4. The same base model with `--thinking`, with selected model reported as `openai/gpt-5.6-terra-thinking`.
-5. `--stream` emits incremental block-patch text and ends only on the completed event.
-6. First request saved with `--save-conversation`, followed by a second request using `--conversation`.
-7. Auth failure points to profile resync and does not expose browser credentials.
-8. Public JSON, sidecars, cache metadata, and stderr do not expose read-write tokens.
-9. Files and Spaces are tested only with user-approved private inputs.
+3. New request exposes the backend UUID and canonical `/search/<uuid>` URL in safe output.
+4. Direct `--conversation <perplexity-thread-url>` sends `last_backend_uuid` with `query_source: "followup"`; saved local conversations also retain their private continuation token.
+5. New request with `openai/gpt-5.6-terra`.
+6. The same base model with `--thinking`, with selected model reported as `openai/gpt-5.6-terra-thinking`.
+7. `--stream` emits incremental block-patch text and ends only on the completed event.
+8. First request saved with `--save-conversation`, followed by a second request using `--conversation`.
+9. Auth failure points to profile resync and does not expose browser credentials.
+10. Public JSON, sidecars, cache metadata, and stderr do not expose read-write tokens.
+11. Files and Spaces are tested only with user-approved private inputs.
 
 Do not claim Deep Research, file upload, Space routing, or an account model as live-working without a gated request for that exact feature.

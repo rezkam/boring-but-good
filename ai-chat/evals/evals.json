@@ -98,6 +98,19 @@
         "The response-side selected model is openai/gpt-5.6-terra-thinking and its identifier is verified against gpt56_terra_thinking.",
         "No rendered HTML, element interaction, DOM fallback, cookie value, owner token, or read-write token appears in the runtime path or public output."
       ]
+    },
+    {
+      "id": 9,
+      "prompt": "Ask Perplexity a new persistent question, then continue the exact provider thread with a follow-up. Use the returned Perplexity thread URL, not rendered page controls or an exported cookie. Return JSON for both turns.",
+      "expected_output": "The first response exposes its backend UUID, canonical https://www.perplexity.ai/search/<uuid> URL, and safe thread URL. The follow-up accepts that URL through --conversation and sends only the new user turn using query_source followup.",
+      "files": [],
+      "expectations": [
+        "A completed new Perplexity response includes provider_state.backend_uuid and provider_state.thread_url, plus matching final_url and conversation_url.",
+        "The returned canonical URL has the form https://www.perplexity.ai/search/<backend_uuid>.",
+        "A direct --conversation <perplexity-thread-url> follow-up extracts the backend UUID and sends last_backend_uuid with query_source followup.",
+        "A saved local conversation retains the private read-write token when the provider supplies it, but public JSON, sidecars, cache metadata, stderr, and URLs never expose the token.",
+        "Both turns use browser-network-sse without rendered HTML, element interaction, DOM fallback, or cookie extraction."
+      ]
     }
   ]
 }

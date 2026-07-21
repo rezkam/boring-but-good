@@ -771,7 +771,13 @@ export function resolveConversationReference(request, fs = defaultFs, provider =
   if (!target) return null;
   if (isHttpUrl(target)) {
     if (provider) validateConversationUrlForProvider(provider, target, { optionName: '--conversation' });
-    return { id: null, url: target, source: 'url' };
+    const attachment = provider ? resolveConversationAttachment(provider, target) : null;
+    return {
+      id: null,
+      url: attachment?.url || target,
+      providerState: attachment?.provider_state || null,
+      source: 'url',
+    };
   }
 
   const path = conversationRecordPath({ providerName: request.providerName, id: target, storeDir: request.conversationStoreDir });

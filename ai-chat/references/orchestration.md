@@ -79,7 +79,7 @@ In scope:
 - safe file attachments with path validation and metadata that avoids leaking file contents
 - Spaces selection by explicit user-provided Space identifier
 - streaming progress that still produces the same final structured output contract
-- multi-turn continuation using backend UUID plus private read-write token stored only in private local records
+- safe backend UUID and canonical provider thread URL in new-response output, plus multi-turn continuation using the UUID and a private read-write token stored only in private local records
 
 Out of scope for this unification pass:
 

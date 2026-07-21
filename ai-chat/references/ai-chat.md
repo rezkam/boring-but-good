@@ -107,7 +107,8 @@ Rules:
 - Use `--attach-conversation <provider-id-or-url> --save-conversation <id>` when the link or backend id should become a reusable local AI Chat session.
 - Use `--continue` only for short same-tab flows. Prefer saved conversation ids for reliable multi-turn work.
 - For ChatGPT long-running turns that time out, rerun `--conversation <id> --save-conversation <id>` without `--prompt` to recheck the same provider conversation and update the saved record.
-- Perplexity stores backend UUID and a private read-write token in the local record when available. Normal output only reports redacted presence, for example `has_read_write_token: true`.
+- Perplexity exposes a safe `backend_uuid`, `final_url`, and `conversation_url` for each created thread. The canonical thread URL is `https://www.perplexity.ai/search/<backend_uuid>` and can be passed directly to `--conversation` for UUID-based continuation.
+- Perplexity stores the backend UUID and a private read-write token in the local record when available. Use `--save-conversation` for reliable multi-turn continuation because the public thread URL intentionally does not expose that token. Normal output only reports redacted presence, for example `has_read_write_token: true`.
 - Gemini attempts native continuation first. If Gemini rejects stored ids, metadata shows `native_continuation_error` and `local_transcript_fallback`.
 - The final JSON metadata includes `conversation_id`, `conversation_url`, and `conversation_record_path` when applicable.
 
@@ -146,7 +147,7 @@ Rules:
 - Spaces use `--space-uuid` or `--space` with a user-provided UUID and persist the request in the selected collection.
 - `--stream` applies captured schematized SSE block patches, emits incremental answer deltas to stderr, and waits for the completed stream event before returning final JSON.
 - Deep research uses `perplexity/deep-research` through the WebUI API and gets a 3600 second timeout unless `--timeout` is explicit.
-- JSON output includes `requested_model`, `selected_model`, `complete`, `provider_state`, `sources`, `search_results`, `captured_at`, and `conversation_id` when applicable.
+- JSON output includes `requested_model`, `selected_model`, `complete`, `provider_state`, `sources`, `search_results`, `captured_at`, and `conversation_id` when applicable. New Perplexity threads also include `final_url` and `conversation_url`.
 
 ### ChatGPT
 
