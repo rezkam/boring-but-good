@@ -82,7 +82,7 @@ scripts/ai-chat.mjs --provider perplexity --prompt "Analyze this file" --file /t
 | `--file <path>` | Perplexity local attachment. Repeatable. Metadata is safe, file contents are not echoed into metadata |
 | `--space-uuid <uuid>` or `--space <uuid>` | Perplexity Space identifier supplied by the user |
 | `--incognito` | Explicit Perplexity Incognito request. It is not saved to history and the provider reports an expiry time |
-| `--save-to-library` | Save to provider history where supported. Perplexity rejects this together with `--incognito` |
+| `--save-to-library` | Explicit provider-history persistence where supported. Perplexity already persists normal requests and rejects this together with `--incognito` |
 | `--cookie-source <source>` | Gemini cookie source, `managed-browser` by default or `chrome-profile` for the direct fallback |
 | `--chrome-profile <name>` | Gemini direct profile fallback. Prefer Chrome profile `Default` or Browser Tools task profile `ai-chat` for normal AI Chat runs |
 | `--continue` | Continue the active provider conversation tab when the current URL is already a conversation |
@@ -139,11 +139,11 @@ Rules:
 - Perplexity has no rendered HTML parser, element interaction, UI transport, or DOM fallback.
 - `--list-models` exposes the network-contract registry with Thinking levels, tiers, modes, aliases, and direct tool aliases. Max-tier models are filtered.
 - `--verify-models` checks current-account acceptance through incognito WebUI API prompts.
-- Default chats remain incognito for privacy and backward compatibility. Use explicit `--incognito` when the user asks for that mode. Use `--save-to-library` for persistent history. These options conflict, and explicit Incognito also conflicts with Spaces because Space threads are saved to a collection.
+- Default chats persist to provider history. Use `--incognito` only when the user asks for a private, expiring request. `--save-to-library` remains an explicit persistence flag for compatibility. It conflicts with Incognito, and explicit Incognito also conflicts with Spaces because Space threads are saved to a collection.
 - Incognito network responses report `privacy_state: INCOGNITO`, an expiry time, and `reconnectable: false`. Provider state exposes these safe fields. Explicit `--incognito` bypasses the local response cache.
 - Research options are available with `--source-focus`, `--search-focus`, `--time-range`, `--citation-mode`, `--language`, and `--timezone`.
 - File analysis uses repeatable `--file` and uploads validated local files through the WebUI upload flow. Metadata includes filename, MIME type, size, image flag, status, and URL presence, not file contents.
-- Spaces use `--space-uuid` or `--space` with a user-provided UUID and make the request non-incognito.
+- Spaces use `--space-uuid` or `--space` with a user-provided UUID and persist the request in the selected collection.
 - `--stream` applies captured schematized SSE block patches, emits incremental answer deltas to stderr, and waits for the completed stream event before returning final JSON.
 - Deep research uses `perplexity/deep-research` through the WebUI API and gets a 3600 second timeout unless `--timeout` is explicit.
 - JSON output includes `requested_model`, `selected_model`, `complete`, `provider_state`, `sources`, `search_results`, `captured_at`, and `conversation_id` when applicable.

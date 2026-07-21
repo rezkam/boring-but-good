@@ -55,7 +55,7 @@ Private capture evidence belongs outside the repository. Do not commit HAR files
 | Spaces | `--space-uuid <uuid>` or `--space <uuid>` with a user-provided Space id |
 | Streaming | `--stream` writes incremental answer deltas to stderr and still emits final structured output |
 | Incognito | `--incognito`; explicit private session, not saved to provider history, with provider expiry metadata |
-| Save to library | `--save-to-library`; persistent provider history. It conflicts with `--incognito` |
+| Save to library | Normal requests persist to provider history. `--save-to-library` remains an explicit persistence flag and conflicts with `--incognito` |
 | Language and timezone | `--language <tag>` and `--timezone <zone>` |
 | Auth check | `--verify-session`; normal requests also validate auth before submission |
 
@@ -165,7 +165,7 @@ A new request follows this shape. UUID values are generated for each request.
     "frontend_context_uuid": "<generated-uuid>",
     "prompt_source": "user",
     "query_source": "home",
-    "is_incognito": true,
+    "is_incognito": false,
     "time_from_first_type": 0,
     "local_search_enabled": false,
     "use_schematized_api": true,
@@ -194,7 +194,7 @@ A new request follows this shape. UUID values are generated for each request.
 
 Recency, Space, file, and continuation fields are added only when needed. Follow-ups send only the new user turn plus `last_backend_uuid`, private `read_write_token`, and `query_source: "followup"`. Spaces add `target_collection_uuid`, `target_thread_access_level`, and non-incognito history behavior.
 
-AI Chat keeps its existing privacy-first default, so requests are Incognito unless `--save-to-library` or a Space requires persistence. `--incognito` records that the user explicitly requested the captured UI behavior and bypasses the local AI Chat response cache. Explicit output files or local conversation records are still written when the user asks for them. `--incognito` conflicts with `--save-to-library` and `--space-uuid`; both conflicts fail before network use instead of silently changing history behavior.
+AI Chat persists ordinary requests to provider history by default. `--incognito` records that the user explicitly requested the captured private UI behavior and bypasses the local AI Chat response cache. `--save-to-library` remains an explicit persistence flag for compatibility. Explicit output files or local conversation records are still written when the user asks for them. `--incognito` conflicts with `--save-to-library` and `--space-uuid`; both conflicts fail before network use instead of silently changing history behavior.
 
 ## Streaming parser
 
@@ -277,13 +277,14 @@ node --test test/provider-model-selection-matrix.test.mjs
 
 Live checks create provider requests and may consume quota. Keep evidence under a private durable directory such as `~/.agents/ai-chat/verify/perplexity/<case>/`. Verify at least:
 
-1. Explicit `--incognito` request with `is_incognito: true`, `privacy_state: INCOGNITO`, expiry metadata, and no provider-history save.
-2. New request with `openai/gpt-5.6-terra`.
-3. The same base model with `--thinking`, with selected model reported as `openai/gpt-5.6-terra-thinking`.
-4. `--stream` emits incremental block-patch text and ends only on the completed event.
-5. First request saved with `--save-conversation`, followed by a second request using `--conversation`.
-6. Auth failure points to profile resync and does not expose browser credentials.
-7. Public JSON, sidecars, cache metadata, and stderr do not expose read-write tokens.
-8. Files and Spaces are tested only with user-approved private inputs.
+1. Normal request without `--incognito` with `is_incognito: false` and provider-history persistence.
+2. Explicit `--incognito` request with `is_incognito: true`, `privacy_state: INCOGNITO`, expiry metadata, and no provider-history save.
+3. New request with `openai/gpt-5.6-terra`.
+4. The same base model with `--thinking`, with selected model reported as `openai/gpt-5.6-terra-thinking`.
+5. `--stream` emits incremental block-patch text and ends only on the completed event.
+6. First request saved with `--save-conversation`, followed by a second request using `--conversation`.
+7. Auth failure points to profile resync and does not expose browser credentials.
+8. Public JSON, sidecars, cache metadata, and stderr do not expose read-write tokens.
+9. Files and Spaces are tested only with user-approved private inputs.
 
 Do not claim Deep Research, file upload, Space routing, or an account model as live-working without a gated request for that exact feature.
