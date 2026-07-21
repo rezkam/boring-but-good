@@ -352,6 +352,59 @@ test('builds Perplexity payload with continuation and research options', () => {
   assert.equal(payload.params.query_source, 'followup');
 });
 
+test('builds captured Incognito payloads and rejects persistent-history conflicts', () => {
+  const model = resolvePerplexityModel('perplexity/sonar-2');
+  const explicit = buildPerplexityPayload({
+    query: 'private question',
+    model,
+    options: { incognito: true },
+  });
+  const defaultPrivate = buildPerplexityPayload({ query: 'default private question', model });
+
+  assert.equal(explicit.params.is_incognito, true);
+  assert.equal(explicit.params.query_source, 'home');
+  assert.equal(explicit.requestMetadata.incognito_explicit, true);
+  assert.equal(defaultPrivate.params.is_incognito, true);
+  assert.equal(defaultPrivate.requestMetadata.incognito_explicit, false);
+  assert.throws(
+    () => buildPerplexityPayload({ query: 'conflict', model, options: { incognito: true, saveToLibrary: true } }),
+    /either --incognito or --save-to-library/,
+  );
+  assert.throws(
+    () => buildPerplexityPayload({
+      query: 'space conflict',
+      model,
+      options: { incognito: true, spaceUuid: '123e4567-e89b-12d3-a456-426614174000' },
+    }),
+    /--incognito cannot be combined with --space-uuid/,
+  );
+});
+
+test('Perplexity rejects Incognito conflicts before opening a browser network context', async () => {
+  let browserCalls = 0;
+  const browser = {
+    async pages() {
+      browserCalls += 1;
+      return [];
+    },
+  };
+
+  await assert.rejects(
+    () => perplexityProvider.run({
+      browser,
+      request: {
+        prompt: 'private question',
+        modelName: 'perplexity/best',
+        providerOptions: { incognito: true, saveToLibrary: true },
+      },
+      selectedModel: 'perplexity/best',
+      conversation: null,
+    }),
+    /either --incognito or --save-to-library/,
+  );
+  assert.equal(browserCalls, 0);
+});
+
 test('builds Perplexity payload with uploaded attachments, Space selection, and new-turn continuation only', () => {
   const spaceUuid = '123e4567-e89b-12d3-a456-426614174000';
   const payload = buildPerplexityPayload({
@@ -709,6 +762,10 @@ test('Perplexity streaming applies captured block diffs and waits for the comple
       read_write_token: 'rw-private',
       display_model: 'gpt56_terra_thinking',
       user_selected_model: 'gpt56_terra_thinking',
+      privacy_state: 'INCOGNITO',
+      expiry_time: '2026-07-22T00:00:00.000Z',
+      reconnectable: false,
+      thread_access: 1,
       text: JSON.stringify([
         { step_type: 'INITIAL_QUERY', content: { query: 'hello' } },
         { step_type: 'FINAL', content: { answer: 'Hello world' } },
@@ -747,6 +804,10 @@ test('Perplexity streaming applies captured block diffs and waits for the comple
   assert.equal(state.backendUuid, 'uuid-captured-schema');
   assert.equal(state.readWriteToken, 'rw-private');
   assert.equal(state.displayModel, 'gpt56_terra_thinking');
+  assert.equal(state.privacyState, 'INCOGNITO');
+  assert.equal(state.expiresAt, '2026-07-22T00:00:00.000Z');
+  assert.equal(state.reconnectable, false);
+  assert.equal(state.threadAccess, 1);
   assert.deepEqual(progress.map(event => event.delta), ['Hello', ' world', '']);
   assert.equal(progress.at(-1).done, true);
 });
@@ -799,6 +860,11 @@ test('builds safe and private Perplexity provider state without leaking continua
     responseModelIdentifier: 'gpt56_terra_thinking',
     userSelectedModelIdentifier: 'gpt56_terra_thinking',
     isIncognito: true,
+    incognitoExplicit: true,
+    privacyState: 'INCOGNITO',
+    expiresAt: '2026-07-22T00:00:00.000Z',
+    reconnectable: false,
+    threadAccess: 1,
     attachments: [{
       url: 'https://uploads.example.test/report.txt',
       metadata: {
@@ -826,6 +892,12 @@ test('builds safe and private Perplexity provider state without leaking continua
     backend_uuid: 'uuid-2',
     has_read_write_token: true,
     is_incognito: true,
+    incognito_explicit: true,
+    privacy_state: 'INCOGNITO',
+    ephemeral: true,
+    expires_at: '2026-07-22T00:00:00.000Z',
+    reconnectable: false,
+    thread_access: 1,
     saved_to_library: false,
     attachment_count: 1,
     attachments: [{
@@ -855,6 +927,12 @@ test('builds safe and private Perplexity provider state without leaking continua
     backend_uuid: 'uuid-2',
     read_write_token: rawToken,
     is_incognito: true,
+    incognito_explicit: true,
+    privacy_state: 'INCOGNITO',
+    ephemeral: true,
+    expires_at: '2026-07-22T00:00:00.000Z',
+    reconnectable: false,
+    thread_access: 1,
     saved_to_library: false,
     attachment_count: 1,
     attachments: states.providerState.attachments,

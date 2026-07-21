@@ -151,6 +151,17 @@ test('parseAiChatArgs keeps repeated Perplexity source focus values in order', (
   assert.deepEqual(request.providerOptions.sourceFocus, ['academic', 'finance']);
 });
 
+test('parseAiChatArgs exposes explicit Perplexity incognito mode', () => {
+  const request = buildAiChatRequest(parseAiChatArgs([
+    '--provider', 'perplexity',
+    '--prompt', 'private question',
+    '--incognito',
+  ]));
+
+  assert.equal(request.providerOptions.incognito, true);
+  assert.equal(request.providerOptions.saveToLibrary, false);
+});
+
 test('AI Chat browser state writes enforce private file permissions and fail closed', () => {
   const dir = mkdtempSync(join(tmpdir(), 'ai-chat-browser-state-permissions-'));
   const stateFile = join(dir, 'browser.json');
@@ -739,6 +750,42 @@ test('runAiChat can skip Browser Tools connection for direct providers', async (
 
   assert.equal(result.result.text, 'no browser answer');
   assert.equal(JSON.parse(stdout[0]).response, 'no browser answer');
+});
+
+test('explicit Incognito requests bypass the local AI Chat response cache', async () => {
+  const stdout = [];
+  const request = buildAiChatRequest({
+    providerName: 'perplexity',
+    modelName: 'perplexity/best',
+    prompt: 'private question',
+    jsonOutput: true,
+    providerOptions: { incognito: true },
+  });
+
+  const result = await runAiChat(request, {
+    provider: {
+      name: 'perplexity',
+      runRequiresBrowser: () => false,
+      async run() {
+        return {
+          text: 'private answer',
+          rawText: 'private answer',
+          done: true,
+          modelUsed: 'perplexity/best',
+          providerState: { is_incognito: true, incognito_explicit: true },
+        };
+      },
+    },
+    cache: {
+      read: () => assert.fail('explicit Incognito must not read the response cache'),
+      write: () => assert.fail('explicit Incognito must not write the response cache'),
+    },
+    io: { stdout: text => stdout.push(text), writeFile: () => assert.fail('no file expected') },
+  });
+
+  assert.equal(result.source, 'live');
+  assert.equal(result.metadata.cache_hit, false);
+  assert.equal(JSON.parse(stdout[0]).provider_state.incognito_explicit, true);
 });
 
 test('ai-chat query cache rejects invalid TTL values', async () => {
