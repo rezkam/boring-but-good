@@ -72,6 +72,19 @@
         "The stream completes from SSE state and does not use rendered HTML, selectors, element clicks, typing, or DOM fallback.",
         "No Perplexity cookie, owner token, or read-write token appears in public output."
       ]
+    },
+    {
+      "id": 7,
+      "prompt": "Ask Perplexity this question in Incognito so it is not saved to my provider history. Return JSON that proves the private mode was accepted, and do not use the page UI at runtime.",
+      "expected_output": "Uses --provider perplexity --incognito --json through browser-network-sse. Safe provider state reports explicit Incognito, provider privacy state, expiry, and no history save.",
+      "files": [],
+      "expectations": [
+        "The run uses scripts/ai-chat.mjs --provider perplexity --incognito --json.",
+        "The request sends params.is_incognito true and does not send a separate Incognito mode API call.",
+        "Provider state reports is_incognito true, incognito_explicit true, privacy_state INCOGNITO, ephemeral true, saved_to_library false, and provider expiry metadata; the local response cache is bypassed.",
+        "The run rejects --incognito together with --save-to-library or --space-uuid before network use.",
+        "No rendered HTML, element interaction, DOM fallback, cookie value, owner token, or read-write token appears in the runtime path or public output."
+      ]
     }
   ]
 }

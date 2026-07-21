@@ -32,7 +32,7 @@ Minimum unit coverage before claiming a changed provider behavior:
 
 - argument parsing for any new flag
 - model alias, task default, unknown model rejection, and selected model metadata
-- provider request shape, including research options, file attachments, Spaces, or stream flags when relevant
+- provider request shape, including Perplexity `--incognito` and history conflicts, research options, file attachments, Spaces, or stream flags when relevant
 - conversation save, provider-scoped lookup, attach by URL or id, continuation state round trip, and missing session errors
 - secret redaction from stdout JSON, sidecars, cache metadata, stderr, and public provider state
 - auth failure messages with practical Browser Tools profile-sync recovery
@@ -150,7 +150,7 @@ A claim like "Perplexity deep research works" or "ChatGPT extra-high continuatio
 
 ### Perplexity
 
-Use `references/perplexity.md` for the full normal research and deep research plan. Required evidence includes headless-preferred owned browser startup, same-origin network auth, captured request model identifier, selected model, Thinking state when used, schematized SSE completion, sources or search results, citation mode, saved conversation id, safe provider state, and redaction of read-write token. Static tests must reject Perplexity UI lifecycle methods and DOM access patterns. For file or Space claims, include safe attachment metadata and Space selection metadata. Do not commit uploaded files or Space ids.
+Use `references/perplexity.md` for the full normal research and deep research plan. Required evidence includes headless-preferred owned browser startup, same-origin network auth, explicit Incognito mapping when requested, captured request model identifier, selected model, Thinking state when used, schematized SSE completion, sources or search results, citation mode, saved conversation id, safe provider state, and redaction of read-write token. Incognito evidence must show `is_incognito: true`, `privacy_state: INCOGNITO`, expiry metadata, and no conflict with provider-history flags. Static tests must reject Perplexity UI lifecycle methods and DOM access patterns. For file or Space claims, include safe attachment metadata and Space selection metadata. Do not commit uploaded files or Space ids.
 
 ### ChatGPT
 

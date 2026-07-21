@@ -81,7 +81,8 @@ scripts/ai-chat.mjs --provider perplexity --prompt "Analyze this file" --file /t
 | `--timezone <zone>` | Perplexity timezone passed to the WebUI API |
 | `--file <path>` | Perplexity local attachment. Repeatable. Metadata is safe, file contents are not echoed into metadata |
 | `--space-uuid <uuid>` or `--space <uuid>` | Perplexity Space identifier supplied by the user |
-| `--save-to-library` | Save to provider history where supported. Default is incognito or temporary for Perplexity and Gemini |
+| `--incognito` | Explicit Perplexity Incognito request. It is not saved to history and the provider reports an expiry time |
+| `--save-to-library` | Save to provider history where supported. Perplexity rejects this together with `--incognito` |
 | `--cookie-source <source>` | Gemini cookie source, `managed-browser` by default or `chrome-profile` for the direct fallback |
 | `--chrome-profile <name>` | Gemini direct profile fallback. Prefer Chrome profile `Default` or Browser Tools task profile `ai-chat` for normal AI Chat runs |
 | `--continue` | Continue the active provider conversation tab when the current URL is already a conversation |
@@ -138,7 +139,8 @@ Rules:
 - Perplexity has no rendered HTML parser, element interaction, UI transport, or DOM fallback.
 - `--list-models` exposes the network-contract registry with Thinking levels, tiers, modes, aliases, and direct tool aliases. Max-tier models are filtered.
 - `--verify-models` checks current-account acceptance through incognito WebUI API prompts.
-- Default chats are incognito. Use `--save-to-library` when the user wants Perplexity library history or when a Space requires non-incognito behavior.
+- Default chats remain incognito for privacy and backward compatibility. Use explicit `--incognito` when the user asks for that mode. Use `--save-to-library` for persistent history. These options conflict, and explicit Incognito also conflicts with Spaces because Space threads are saved to a collection.
+- Incognito network responses report `privacy_state: INCOGNITO`, an expiry time, and `reconnectable: false`. Provider state exposes these safe fields. Explicit `--incognito` bypasses the local response cache.
 - Research options are available with `--source-focus`, `--search-focus`, `--time-range`, `--citation-mode`, `--language`, and `--timezone`.
 - File analysis uses repeatable `--file` and uploads validated local files through the WebUI upload flow. Metadata includes filename, MIME type, size, image flag, status, and URL presence, not file contents.
 - Spaces use `--space-uuid` or `--space` with a user-provided UUID and make the request non-incognito.
