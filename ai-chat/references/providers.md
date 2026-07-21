@@ -76,7 +76,8 @@ Perplexity in AI Chat has one browser-authenticated network path:
 - Rendered HTML parsing, element interaction, and DOM fallback are not supported.
 - Model ids, direct tool aliases, task defaults, captured Thinking variants, tiers, and provider families come from the network-contract registry. Max-tier models are filtered.
 - `--verify-models` sends tiny incognito WebUI API checks and reports accepted and rejected model ids for the current account.
-- Normal ask, deep research, source focus, search focus, recency, citation mode, language, timezone, file attachments, Spaces, streaming, save-to-library, and multi-turn continuation use one output contract and one network transport.
+- Normal ask, explicit Incognito, deep research, source focus, search focus, recency, citation mode, language, timezone, file attachments, Spaces, streaming, save-to-library, and multi-turn continuation use one output contract and one network transport.
+- The captured Incognito control maps to `params.is_incognito=true`; the terminal SSE reports `privacy_state`, expiry, reconnectability, and thread access. `--incognito` conflicts with `--save-to-library` and Spaces.
 - Continuation secrets stay in the private local conversation record. Public output exposes redacted state only.
 
 Known limits:

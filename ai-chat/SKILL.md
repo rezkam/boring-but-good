@@ -34,7 +34,7 @@ By default, AI Chat copies and uses Chrome profile `Default`, so normal logged-i
 | Deep research | Perplexity | Uses `perplexity/deep-research` and a 3600 second timeout unless `--timeout` is explicit |
 | Research filters | Perplexity | `--source-focus`, `--search-focus`, `--time-range`, `--citation-mode`, `--language`, `--timezone` |
 | Files, Spaces, streaming | Perplexity | `--file`, `--space-uuid` or `--space`, `--stream` |
-| Save to provider history | Gemini, Perplexity, provider-dependent others | Perplexity defaults to incognito. Gemini defaults to temporary. Use `--save-to-library` where supported |
+| Incognito or provider history | Perplexity, Gemini where applicable | Perplexity defaults to incognito and also accepts explicit `--incognito`; use `--save-to-library` for persistent history. The two flags conflict |
 | JSON output with metadata | All | Use `--json` |
 | Evidence screenshots | Browser UI providers with a final URL | Perplexity and Gemini API transports usually provide JSON and stderr evidence, not screenshots |
 
@@ -76,6 +76,9 @@ scripts/ai-chat.mjs \
   --save-conversation policy-research \
   --json
 
+# Explicit Perplexity Incognito session. The request is not saved to history and expires after 24 hours.
+scripts/ai-chat.mjs --provider perplexity --incognito --prompt "Answer this privately" --json
+
 # Perplexity deep research. Uses a long timeout by default.
 scripts/ai-chat.mjs --provider perplexity --task deep_research --prompt-file /tmp/question.md --json
 
@@ -92,7 +95,7 @@ scripts/ai-chat.mjs \
 
 ## Provider notes
 
-- Perplexity has one transport, `browser-network-sse`. It runs authenticated same-origin requests in a headless-preferred managed browser, parses captured schematized SSE block patches, supports model and Thinking variants, research filters, deep research, files, Spaces, streaming, and backend UUID continuation. It never extracts browser cookies and has no rendered HTML, element, or DOM fallback path.
+- Perplexity has one transport, `browser-network-sse`. It runs authenticated same-origin requests in a headless-preferred managed browser, parses captured schematized SSE block patches, supports model and Thinking variants, explicit Incognito, research filters, deep research, files, Spaces, streaming, and backend UUID continuation. It never extracts browser cookies and has no rendered HTML, element, or DOM fallback path.
 - ChatGPT long-running requests use network SSE and WebSocket state first. Metadata reports stream handoff, timeout, partial or empty response, resumed stream, assistant turn completion, and DOM fallback when fallback is used.
 - Gemini uses WebUI API cookies from the AI Chat owned browser by default. It can fall back to an explicit Chrome profile cookie source. Native continuation can fail with backend error `1097`; metadata must show that and the local transcript fallback.
 - Grok uses browser UI labels and preflights the X/Grok composer before typing. It can verify visible labels, but not a backend model slug. In the current X/Grok app `Fast` is the reliable default; check `--list-models --verify-models` before selecting `Auto` or `Expert`.

@@ -74,7 +74,8 @@ In scope:
 - auth recovery guidance aligned with Browser Tools copied-profile behavior
 - captured model ids, direct tool aliases, task defaults, Thinking variants, account-tier metadata, and live account acceptance verification
 - normal ask and deep research through `/rest/sse/perplexity_ask`, with schematized block-patch streaming and no DOM path
-- source focus, search focus, time range, citation mode, language, timezone, and save-to-library behavior
+- explicit Incognito and save-to-library behavior, including conflict checks and SSE privacy metadata
+- source focus, search focus, time range, citation mode, language, and timezone
 - safe file attachments with path validation and metadata that avoids leaking file contents
 - Spaces selection by explicit user-provided Space identifier
 - streaming progress that still produces the same final structured output contract
