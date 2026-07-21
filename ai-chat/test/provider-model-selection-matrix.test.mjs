@@ -49,8 +49,8 @@ const MODEL_SELECTION_MATRIX = [
         dom_processing: false,
         backend_uuid: 'uuid-matrix',
         has_read_write_token: true,
-        is_incognito: true,
-        saved_to_library: false,
+        is_incognito: false,
+        saved_to_library: true,
       },
     },
     liveCases: [

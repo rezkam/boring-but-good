@@ -237,7 +237,7 @@ export function normalizePerplexityOptions(options = {}) {
     citationMode: normalizePerplexityCitationMode(options.citationMode || 'clean'),
     language: String(options.language || 'en-US').trim() || 'en-US',
     timezone: options.timezone ? String(options.timezone).trim() : null,
-    incognito: !saveToLibrary,
+    incognito: incognitoExplicit,
     incognitoExplicit,
     saveToLibrary,
     spaceUuid,
@@ -555,7 +555,7 @@ export function formatCitations(text, citationMode = 'clean', searchResults = []
   });
 }
 
-export function buildPerplexityProviderStates({ backendUuid = null, readWriteToken = null, previousBackendUuid = null, previousReadWriteToken = null, requestedModelIdentifier = null, responseModelIdentifier = null, userSelectedModelIdentifier = null, isIncognito = true, incognitoExplicit = false, privacyState = null, expiresAt = null, reconnectable = null, threadAccess = null, attachments = [], spaceUuid = null, streamState = null } = {}) {
+export function buildPerplexityProviderStates({ backendUuid = null, readWriteToken = null, previousBackendUuid = null, previousReadWriteToken = null, requestedModelIdentifier = null, responseModelIdentifier = null, userSelectedModelIdentifier = null, isIncognito = false, incognitoExplicit = false, privacyState = null, expiresAt = null, reconnectable = null, threadAccess = null, attachments = [], spaceUuid = null, streamState = null } = {}) {
   const backend_uuid = backendUuid || previousBackendUuid || null;
   const privateReadWriteToken = readWriteToken || previousReadWriteToken || null;
   const hasReadWriteToken = !!privateReadWriteToken;
@@ -1150,7 +1150,7 @@ export async function verifyPerplexityModels({ models, timeoutMs, streamFn = str
     const payload = buildPerplexityPayload({
       query: `Reply exactly: ${prompt}`,
       model,
-      options: { saveToLibrary: false, sourceFocus: 'web', searchFocus: 'web' },
+      options: { incognito: true, sourceFocus: 'web', searchFocus: 'web' },
     });
     try {
       const state = await streamFn({ payload, timeoutMs, citationMode: 'clean', model, authPrevalidated: true });
@@ -1233,7 +1233,7 @@ export const perplexityProvider = {
     coding: 'openai/gpt-5.6-terra',
   },
   historyPolicy: {
-    default: 'incognito',
+    default: 'persistent',
     incognitoFlag: '--incognito',
     saveFlag: '--save-to-library',
     transportField: 'params.is_incognito',

@@ -62,6 +62,7 @@ test('lists Perplexity models with capability and account-tier metadata', async 
   assert.equal(thinking.source, 'browser-tools-network-capture');
   assert.equal(thinking.account_specific, false);
   assert.deepEqual(thinking.account_tier, { required: 'pro', verified: null });
+  assert.equal(perplexityProvider.historyPolicy.default, 'persistent');
   assert.equal(list.verification.enabled, false);
 });
 
@@ -264,12 +265,14 @@ test('Perplexity auth failures include recovery guidance without token values', 
   );
 });
 
-test('Perplexity live model verification reports accepted and rejected shape safely', async () => {
+test('Perplexity live model verification uses private requests and reports accepted and rejected shape safely', async () => {
   const models = [resolvePerplexityModel('perplexity/best'), resolvePerplexityModel('openai/gpt-5.6-terra')];
+  const payloads = [];
   const result = await verifyPerplexityModels({
     models,
     timeoutMs: 1000,
-    streamFn: async ({ model }) => {
+    streamFn: async ({ model, payload }) => {
+      payloads.push(payload);
       if (model.id === 'perplexity/best') {
         return { answer: 'AI_CHAT_MODEL_CHECK', chunks: [], backendUuid: 'uuid-accepted' };
       }
@@ -286,6 +289,7 @@ test('Perplexity live model verification reports accepted and rejected shape saf
   assert.equal(result.models[1].verification.status, 'rejected');
   assert.equal(result.models[1].verification.accepted, false);
   assert.equal(JSON.stringify(result).includes('rw-verification-secret'), false);
+  assert.equal(payloads.every(payload => payload.params.is_incognito === true), true);
 });
 
 test('Perplexity provider rejects unknown explicit model requests', async () => {
@@ -323,7 +327,6 @@ test('builds Perplexity payload with continuation and research options', () => {
       timeRange: 'week',
       language: 'sv-SE',
       timezone: 'Europe/Stockholm',
-      saveToLibrary: true,
     },
     conversation: { record: { provider_state: { backend_uuid: 'uuid-1', read_write_token: 'rw-1' } } },
   });
@@ -352,20 +355,20 @@ test('builds Perplexity payload with continuation and research options', () => {
   assert.equal(payload.params.query_source, 'followup');
 });
 
-test('builds captured Incognito payloads and rejects persistent-history conflicts', () => {
+test('builds explicit Incognito payloads and defaults ordinary requests to persistent history', () => {
   const model = resolvePerplexityModel('perplexity/sonar-2');
   const explicit = buildPerplexityPayload({
     query: 'private question',
     model,
     options: { incognito: true },
   });
-  const defaultPrivate = buildPerplexityPayload({ query: 'default private question', model });
+  const defaultPersistent = buildPerplexityPayload({ query: 'ordinary question', model });
 
   assert.equal(explicit.params.is_incognito, true);
   assert.equal(explicit.params.query_source, 'home');
   assert.equal(explicit.requestMetadata.incognito_explicit, true);
-  assert.equal(defaultPrivate.params.is_incognito, true);
-  assert.equal(defaultPrivate.requestMetadata.incognito_explicit, false);
+  assert.equal(defaultPersistent.params.is_incognito, false);
+  assert.equal(defaultPersistent.requestMetadata.incognito_explicit, false);
   assert.throws(
     () => buildPerplexityPayload({ query: 'conflict', model, options: { incognito: true, saveToLibrary: true } }),
     /either --incognito or --save-to-library/,
@@ -940,6 +943,16 @@ test('builds safe and private Perplexity provider state without leaking continua
     space_selected: true,
     stream_state: { enabled: true, status: 'completed', progress_events: 2, streamed_chars: 11 },
   });
+});
+
+test('defaults Perplexity provider state to persistent history', () => {
+  const states = buildPerplexityProviderStates();
+
+  assert.equal(states.providerState.is_incognito, false);
+  assert.equal(states.providerState.incognito_explicit, false);
+  assert.equal(states.providerState.privacy_state, 'PERSISTENT');
+  assert.equal(states.providerState.ephemeral, false);
+  assert.equal(states.providerState.saved_to_library, true);
 });
 
 test('preserves previous Perplexity continuation state when a follow-up response omits rotated state', () => {
