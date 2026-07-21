@@ -220,7 +220,16 @@ function normalizeUploadedPerplexityAttachments(values = []) {
     }));
 }
 
-function normalizePerplexityOptions(options = {}) {
+export function normalizePerplexityOptions(options = {}) {
+  const incognitoExplicit = options.incognito === true;
+  const saveToLibrary = !!options.saveToLibrary;
+  const spaceUuid = normalizePerplexitySpaceUuid(options.spaceUuid || options.space || null);
+  if (incognitoExplicit && saveToLibrary) {
+    throw new Error('[perplexity] Use either --incognito or --save-to-library, not both. Incognito sessions are not saved to provider history.');
+  }
+  if (incognitoExplicit && spaceUuid) {
+    throw new Error('[perplexity] --incognito cannot be combined with --space-uuid because Space threads are saved to the selected collection.');
+  }
   return {
     sourceFocus: normalizePerplexitySourceFocus(options.sourceFocus || 'web'),
     searchFocus: normalizeChoice({ value: options.searchFocus, defaultValue: 'web', choices: new Set(Object.keys(SEARCH_MAP)), flagName: '--search-focus' }),
@@ -228,8 +237,10 @@ function normalizePerplexityOptions(options = {}) {
     citationMode: normalizePerplexityCitationMode(options.citationMode || 'clean'),
     language: String(options.language || 'en-US').trim() || 'en-US',
     timezone: options.timezone ? String(options.timezone).trim() : null,
-    saveToLibrary: !!options.saveToLibrary,
-    spaceUuid: normalizePerplexitySpaceUuid(options.spaceUuid || options.space || null),
+    incognito: !saveToLibrary,
+    incognitoExplicit,
+    saveToLibrary,
+    spaceUuid,
   };
 }
 
@@ -339,7 +350,7 @@ export function buildPerplexityPayload({ query, model, options = {}, conversatio
     frontend_context_uuid: randomUUID(),
     prompt_source: 'user',
     query_source: 'home',
-    is_incognito: !normalizedOptions.saveToLibrary,
+    is_incognito: normalizedOptions.incognito,
     time_from_first_type: 0,
     local_search_enabled: false,
     use_schematized_api: true,
@@ -387,6 +398,7 @@ export function buildPerplexityPayload({ query, model, options = {}, conversatio
       space_uuid: normalizedOptions.spaceUuid,
       space_selected: !!normalizedOptions.spaceUuid,
       continuation: providerState?.backend_uuid ? { backend_uuid: providerState.backend_uuid, has_read_write_token: !!providerState.read_write_token } : null,
+      incognito_explicit: normalizedOptions.incognitoExplicit,
     },
     enumerable: false,
     configurable: true,
@@ -477,6 +489,10 @@ export function extractPerplexityState(data, state = { chunks: [], searchResults
   if (data.display_model) state.displayModel = data.display_model;
   if (data.user_selected_model) state.userSelectedModel = data.user_selected_model;
   if (data.cursor) state.cursor = data.cursor;
+  if (data.privacy_state) state.privacyState = data.privacy_state;
+  if (data.expiry_time) state.expiresAt = data.expiry_time;
+  if (Object.prototype.hasOwnProperty.call(data, 'reconnectable')) state.reconnectable = !!data.reconnectable;
+  if (Object.prototype.hasOwnProperty.call(data, 'thread_access')) state.threadAccess = data.thread_access;
   const topLevelResults = normalizePerplexitySearchResults(data.web_results || data.search_results || data.sources);
   if (topLevelResults.length) state.searchResults = topLevelResults;
   if (data.status === 'FAILED') throw new Error(`Perplexity query failed: ${data.text || 'unknown error'}`);
@@ -539,7 +555,7 @@ export function formatCitations(text, citationMode = 'clean', searchResults = []
   });
 }
 
-export function buildPerplexityProviderStates({ backendUuid = null, readWriteToken = null, previousBackendUuid = null, previousReadWriteToken = null, requestedModelIdentifier = null, responseModelIdentifier = null, userSelectedModelIdentifier = null, isIncognito = true, attachments = [], spaceUuid = null, streamState = null } = {}) {
+export function buildPerplexityProviderStates({ backendUuid = null, readWriteToken = null, previousBackendUuid = null, previousReadWriteToken = null, requestedModelIdentifier = null, responseModelIdentifier = null, userSelectedModelIdentifier = null, isIncognito = true, incognitoExplicit = false, privacyState = null, expiresAt = null, reconnectable = null, threadAccess = null, attachments = [], spaceUuid = null, streamState = null } = {}) {
   const backend_uuid = backendUuid || previousBackendUuid || null;
   const privateReadWriteToken = readWriteToken || previousReadWriteToken || null;
   const hasReadWriteToken = !!privateReadWriteToken;
@@ -555,6 +571,12 @@ export function buildPerplexityProviderStates({ backendUuid = null, readWriteTok
     ...(requestedModelIdentifier ? { model_selection_verified: observedModelIdentifier ? observedModelIdentifier === requestedModelIdentifier : null } : {}),
     backend_uuid,
     is_incognito: !!isIncognito,
+    incognito_explicit: !!incognitoExplicit,
+    privacy_state: privacyState || (isIncognito ? 'INCOGNITO' : 'PERSISTENT'),
+    ephemeral: !!isIncognito,
+    ...(expiresAt ? { expires_at: expiresAt } : {}),
+    ...(typeof reconnectable === 'boolean' ? { reconnectable } : {}),
+    ...(threadAccess !== null && threadAccess !== undefined ? { thread_access: threadAccess } : {}),
     saved_to_library: !isIncognito,
     ...(safeAttachments.length ? { attachment_count: safeAttachments.length, attachments: safeAttachments } : {}),
     ...(spaceUuid ? { space_uuid: spaceUuid, space_selected: true } : {}),
@@ -1104,9 +1126,10 @@ export async function streamPerplexity({ payload, timeoutMs, citationMode, fetch
 }
 
 function normalizePerplexityProviderRequestOptions(providerOptions = {}) {
+  const normalized = normalizePerplexityOptions(providerOptions);
   return {
     attachments: normalizePerplexityFileAttachments(fileInputsFromOptions(providerOptions)),
-    spaceUuid: normalizePerplexitySpaceUuid(providerOptions.spaceUuid || providerOptions.space || null),
+    spaceUuid: normalized.spaceUuid,
   };
 }
 
@@ -1211,6 +1234,7 @@ export const perplexityProvider = {
   },
   historyPolicy: {
     default: 'incognito',
+    incognitoFlag: '--incognito',
     saveFlag: '--save-to-library',
     transportField: 'params.is_incognito',
   },
@@ -1283,6 +1307,11 @@ export const perplexityProvider = {
       responseModelIdentifier: state.displayModel,
       userSelectedModelIdentifier: state.userSelectedModel,
       isIncognito: payload.params.is_incognito,
+      incognitoExplicit: payload.requestMetadata.incognito_explicit,
+      privacyState: state.privacyState,
+      expiresAt: state.expiresAt,
+      reconnectable: state.reconnectable,
+      threadAccess: state.threadAccess,
       attachments: effectiveOptions.uploadedAttachments,
       spaceUuid: effectiveOptions.spaceUuid,
       streamState,

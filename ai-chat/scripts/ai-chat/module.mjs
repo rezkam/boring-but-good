@@ -110,6 +110,7 @@ export function parseAiChatArgs(args = process.argv.slice(2)) {
       citationMode: citationMode === true ? null : citationMode,
       language: language === true ? null : language,
       timezone: timezone === true ? null : timezone,
+      incognito: hasFlag(args, '--incognito'),
       saveToLibrary: hasFlag(args, '--save-to-library'),
       verifySession: hasFlag(args, '--verify-session') || hasFlag(args, '--auth-check'),
       chromeProfile: chromeProfile === true ? null : chromeProfile,
@@ -1158,7 +1159,7 @@ function requestHasFileAttachments(request = {}) {
 }
 
 function requestBypassesCache(request = {}) {
-  return !!request.stream || requestHasFileAttachments(request);
+  return !!request.stream || !!request.providerOptions?.incognito || requestHasFileAttachments(request);
 }
 
 function browserRequestForProvider(request, provider) {
