@@ -348,6 +348,7 @@ export async function ensureAiChatBrowserSession(request, deps = {}) {
     defaultProfileName: AI_CHAT_DEFAULT_BROWSER_PROFILE_NAME,
     ownerId: AI_CHAT_BROWSER_OWNER_ID,
     autoAllocatePort: !request.explicitPort,
+    ...(request.browserHeadless ? { headless: true } : {}),
   });
   if (!started.ownerToken) {
     throw new Error('Browser Tools did not return an owner token for the AI Chat browser. Recovery: retry, or start Browser Tools manually with an owner token and configure AI Chat state.');
@@ -361,6 +362,7 @@ export async function ensureAiChatBrowserSession(request, deps = {}) {
     taskName: AI_CHAT_BROWSER_TASK_NAME,
     profileName: started.profileName || null,
     requestedProfileName: started.requestedProfileName || null,
+    headless: !!started.headless,
     status: started.status || 'started',
     startedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -387,6 +389,7 @@ export function buildAiChatRequest(options = {}) {
     port: normalizePort(options.port ?? DEFAULT_PORT),
     explicitPort: !!options.explicitPort,
     browserStateFile: options.browserStateFile || null,
+    browserHeadless: !!options.browserHeadless,
     timeoutSeconds: options.timeoutSeconds || DEFAULT_TIMEOUT_SECONDS,
     timeoutExplicit,
     jsonOutput: !!options.jsonOutput,
@@ -621,17 +624,23 @@ export function buildOutput({ request, metadata, text }) {
   return { extension: 'md', text };
 }
 
+function writePrivateArtifact(path, text, encoding = 'utf-8') {
+  if (existsSync(path)) chmodSync(path, PRIVATE_STATE_FILE_MODE);
+  writeFileSync(path, text, { encoding, mode: PRIVATE_STATE_FILE_MODE });
+  chmodSync(path, PRIVATE_STATE_FILE_MODE);
+}
+
 export function saveSidecarArtifacts(baseOutFile, metadata, rawText) {
   if (!baseOutFile) return;
   try {
-    writeFileSync(`${baseOutFile}.meta.json`, JSON.stringify(metadata, null, 2), 'utf-8');
+    writePrivateArtifact(`${baseOutFile}.meta.json`, JSON.stringify(metadata, null, 2));
   } catch (e) {
     console.error(`[artifact] Failed to write metadata sidecar: ${e.message}`);
   }
 
   if (typeof rawText === 'string' && rawText.trim()) {
     try {
-      writeFileSync(`${baseOutFile}.raw.txt`, rawText, 'utf-8');
+      writePrivateArtifact(`${baseOutFile}.raw.txt`, rawText);
     } catch (e) {
       console.error(`[artifact] Failed to write raw sidecar: ${e.message}`);
     }
@@ -1152,6 +1161,11 @@ function requestBypassesCache(request = {}) {
   return !!request.stream || requestHasFileAttachments(request);
 }
 
+function browserRequestForProvider(request, provider) {
+  if (!provider?.preferredBrowserHeadless) return request;
+  return { ...request, browserHeadless: true };
+}
+
 export async function runAiChat(request, deps = {}) {
   const provider = deps.provider || deps.providers?.[request.providerName] || getAiChatProvider(request.providerName);
   if (!provider) {
@@ -1171,7 +1185,7 @@ export async function runAiChat(request, deps = {}) {
         ? provider.listModelsRequiresBrowser({ request })
         : !!provider.listModelsRequiresBrowser;
       if (needsBrowser) {
-        browserSession = await ensureAiChatBrowserSession(request, deps);
+        browserSession = await ensureAiChatBrowserSession(browserRequestForProvider(request, provider), deps);
         browser = browserSession.browser;
         activeRequest = browserSession.request;
       }
@@ -1250,7 +1264,7 @@ export async function runAiChat(request, deps = {}) {
   let browser = null;
   let activeRequest = request;
   if (needsBrowser) {
-    browserSession = await ensureAiChatBrowserSession(request, deps);
+    browserSession = await ensureAiChatBrowserSession(browserRequestForProvider(request, provider), deps);
     browser = browserSession.browser;
     activeRequest = browserSession.request;
   }
@@ -1337,7 +1351,7 @@ export const defaultIo = {
     console.log(text);
   },
   writeFile(path, text, encoding = 'utf-8') {
-    writeFileSync(path, text, encoding);
+    writePrivateArtifact(path, text, encoding);
   },
 };
 

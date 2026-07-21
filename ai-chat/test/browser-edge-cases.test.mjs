@@ -12,7 +12,7 @@ import {
 } from '../scripts/ai-chat/module.mjs';
 import { assertGrokPageUsable, classifyGrokPageState } from '../scripts/ai-chat/providers/grok.mjs';
 import { classifyGeminiUiState } from '../scripts/ai-chat/providers/gemini-api.mjs';
-import { PERPLEXITY_SESSION_LOOKUP_ORDER, perplexityProvider } from '../scripts/ai-chat/providers/perplexity.mjs';
+import { validatePerplexitySession } from '../scripts/ai-chat/providers/perplexity.mjs';
 import { stopChrome } from '../../browser-tools/scripts/browser-control.mjs';
 
 const REPO_ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
@@ -233,26 +233,21 @@ test('profile auth diagnostics report logged-out or sync-required profiles witho
   assert.equal(geminiSignIn.reason, 'google_sign_in_required');
   assert.equal(geminiConsent.reason, 'google_consent_required');
 
-  let cookieReadCount = 0;
-  const perplexityPage = {
-    cookies: async () => {
-      cookieReadCount += 1;
-      return [];
-    },
-  };
+  let networkRequestCount = 0;
   await assert.rejects(
-    () => perplexityProvider.createAttemptContext({
-      page: perplexityPage,
-      request: { modelName: 'default' },
-      selectedModel: 'default',
+    () => validatePerplexitySession({
+      fetchImpl: async () => {
+        networkRequestCount += 1;
+        return { ok: true, json: async () => ({ user: null }) };
+      },
     }),
     (error) => {
-      assert.match(error.message, /session cookie not found/i);
+      assert.match(error.message, /did not return a logged-in user/i);
       assert.match(error.message, /--sync/);
       return true;
     },
   );
-  assert.equal(cookieReadCount, PERPLEXITY_SESSION_LOOKUP_ORDER.length);
+  assert.equal(networkRequestCount, 1);
 });
 
 test('evidence capture records browser screenshots only when the provider returns a final URL', async () => {

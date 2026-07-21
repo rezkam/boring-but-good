@@ -438,7 +438,7 @@ test('runAiChat uses provider direct transport when available', async () => {
   assert.equal(JSON.parse(stdout[0]).provider_state.thread, 't1');
 });
 
-test('runAiChat starts an AI Chat owned Browser Tools browser when no usable state exists', async () => {
+test('runAiChat starts a preferred headless AI Chat owned browser from the Default profile', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ai-chat-browser-start-'));
   try {
     const stateFile = join(dir, 'browser.json');
@@ -452,6 +452,7 @@ test('runAiChat starts an AI Chat owned Browser Tools browser when no usable sta
     await runAiChat(request, {
       provider: {
         name: 'browser-provider',
+        preferredBrowserHeadless: true,
         runRequiresBrowser: () => true,
         async run({ browser: runBrowser, request: runRequest }) {
           assert.equal(runBrowser, browser);
@@ -461,7 +462,7 @@ test('runAiChat starts an AI Chat owned Browser Tools browser when no usable sta
       },
       async startChrome(args) {
         startArgs = args;
-        return { status: 'started', port: 4555, ownerToken: 'owned-token', profileName: 'Default', requestedProfileName: 'Default' };
+        return { status: 'started', port: 4555, ownerToken: 'owned-token', profileName: 'Default', requestedProfileName: 'Default', headless: true };
       },
       async connectBrowser(port, options) {
         connectCalls.push({ port, options });
@@ -471,7 +472,7 @@ test('runAiChat starts an AI Chat owned Browser Tools browser when no usable sta
       io: { stdout: text => stdout.push(text), writeFile: () => assert.fail('no file expected') },
     });
 
-    assert.deepEqual(startArgs, { port: 9222, taskName: 'ai-chat', defaultProfileName: 'Default', ownerId: 'ai-chat', autoAllocatePort: true });
+    assert.deepEqual(startArgs, { port: 9222, taskName: 'ai-chat', defaultProfileName: 'Default', ownerId: 'ai-chat', autoAllocatePort: true, headless: true });
     assert.deepEqual(connectCalls, [{ port: 4555, options: { ownerToken: 'owned-token', protocolTimeout: 60000 } }]);
     const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
     assert.equal(state.ownerId, 'ai-chat');
@@ -479,6 +480,7 @@ test('runAiChat starts an AI Chat owned Browser Tools browser when no usable sta
     assert.equal(state.port, 4555);
     assert.equal(state.profileName, 'Default');
     assert.equal(state.requestedProfileName, 'Default');
+    assert.equal(state.headless, true);
     assert.equal(statSync(stateFile).mode & 0o777, 0o600);
     assert.equal(disconnects, 1);
     assert.equal(JSON.parse(stdout[0]).response, 'owned answer');
@@ -749,75 +751,60 @@ test('ai-chat query cache rejects invalid TTL values', async () => {
 });
 
 test('runAiChat keeps partial Perplexity SSE responses incomplete and uncached', async () => {
-  const encoder = new TextEncoder();
   const partialEvent = `data: ${JSON.stringify({
     backend_uuid: 'uuid-partial',
     text: JSON.stringify({ answer: 'partial answer', chunks: ['partial answer'] }),
   })}\n`;
-  let readCount = 0;
-  const previousFetch = globalThis.fetch;
   const stdout = [];
   const cacheWrites = [];
-
-  globalThis.fetch = async (url) => {
-    const href = String(url);
-    if (href.includes('/search/new')) return { ok: true, text: async () => '' };
-    if (href.includes('/rest/sse/perplexity_ask')) {
-      return {
-        ok: true,
-        body: {
-          getReader: () => ({
-            read: async () => {
-              if (readCount > 0) return { done: true };
-              readCount += 1;
-              return { value: encoder.encode(partialEvent), done: false };
-            },
-          }),
-        },
-      };
-    }
-    throw new Error(`unexpected fetch URL: ${href}`);
+  const exposed = {};
+  const page = {
+    url: () => 'https://www.perplexity.ai/api/auth/session',
+    async exposeFunction(name, callback) { exposed[name] = callback; },
+    async removeExposedFunction(name) { delete exposed[name]; },
+    async evaluate(_fn, args) {
+      const callback = exposed[args.callbackName];
+      if (args.url.endsWith('/api/auth/session')) {
+        await callback({ type: 'response', status: 200, headers: [['content-type', 'application/json']] });
+        await callback({ type: 'chunk', chunk: '{"user":{"id":"present"}}' });
+        await callback({ type: 'done' });
+        return;
+      }
+      assert.equal(args.url, 'https://www.perplexity.ai/rest/sse/perplexity_ask');
+      await callback({ type: 'response', status: 200, headers: [['content-type', 'text/event-stream']] });
+      await callback({ type: 'chunk', chunk: partialEvent });
+      await callback({ type: 'done' });
+    },
   };
+  const request = buildAiChatRequest({
+    providerName: 'perplexity',
+    modelName: 'perplexity/best',
+    prompt: 'hello',
+    jsonOutput: true,
+  });
 
-  try {
-    const request = buildAiChatRequest({
-      providerName: 'perplexity',
-      modelName: 'perplexity/best',
-      prompt: 'hello',
-      jsonOutput: true,
-    });
-    const provider = {
-      ...perplexityProvider,
-      runRequiresBrowser: () => false,
-      findPage: async () => ({
-        cookies: async () => [{ name: '__Secure-next-auth.session-token', value: 'session-token' }],
-      }),
-    };
-
-    const result = await runAiChat(request, {
-      provider,
-      cache: {
-        read: () => null,
-        write(...args) {
-          cacheWrites.push(args);
-          return { key: 'cache-key' };
-        },
+  const result = await runAiChat(request, {
+    browser: { pages: async () => [page] },
+    provider: perplexityProvider,
+    cache: {
+      read: () => null,
+      write(...args) {
+        cacheWrites.push(args);
+        return { key: 'cache-key' };
       },
-      io: { stdout: text => stdout.push(text), writeFile: () => assert.fail('no file expected') },
-    });
+    },
+    io: { stdout: text => stdout.push(text), writeFile: () => assert.fail('no file expected') },
+  });
 
-    const emitted = JSON.parse(stdout[0]);
-    assert.equal(emitted.response, 'partial answer');
-    assert.equal(emitted.complete, false);
-    assert.equal(result.metadata.complete, false);
-    assert.equal(result.result.done, false);
-    assert.equal(emitted.provider_state.stream_state.status, 'partial');
-    assert.equal(emitted.provider_state.stream_state.partial, true);
-    assert.equal(emitted.provider_state.stream_state.timeout, true);
-    assert.equal(cacheWrites.length, 0);
-  } finally {
-    globalThis.fetch = previousFetch;
-  }
+  const emitted = JSON.parse(stdout[0]);
+  assert.equal(emitted.response, 'partial answer');
+  assert.equal(emitted.complete, false);
+  assert.equal(result.metadata.complete, false);
+  assert.equal(result.result.done, false);
+  assert.equal(emitted.provider_state.stream_state.status, 'partial');
+  assert.equal(emitted.provider_state.stream_state.partial, true);
+  assert.equal(emitted.provider_state.stream_state.timeout, true);
+  assert.equal(cacheWrites.length, 0);
 });
 
 test('runAiChat redacts Perplexity continuation tokens from public artifacts', async () => {
@@ -876,6 +863,9 @@ test('runAiChat redacts Perplexity continuation tokens from public artifacts', a
 
     const outputText = readFileSync(outFile, 'utf-8');
     const sidecarText = readFileSync(`${outFile}.meta.json`, 'utf-8');
+    assert.equal(fileMode(outFile), 0o600);
+    assert.equal(fileMode(`${outFile}.meta.json`), 0o600);
+    assert.equal(fileMode(`${outFile}.raw.txt`), 0o600);
     const publicTexts = [
       outputText,
       sidecarText,
