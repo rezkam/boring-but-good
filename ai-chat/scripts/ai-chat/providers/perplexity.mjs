@@ -468,6 +468,7 @@ function extractPerplexityBlockState(data, state, citationMode) {
   const text = markdownText(preferred);
   if (text) {
     state.chunks = Array.isArray(preferred.chunks) ? preferred.chunks.filter(Boolean).map(String) : [text];
+    state.streamText = text;
     state.answer = formatCitations(text, citationMode, state.searchResults);
   }
 }
@@ -531,6 +532,10 @@ export function extractPerplexityState(data, state = { chunks: [], searchResults
       state.searchResults = normalizePerplexitySearchResults(payload.web_results);
     }
     if (Array.isArray(payload.chunks)) state.chunks = payload.chunks.filter(Boolean).map(String);
+    const streamText = typeof payload.answer === 'string'
+      ? payload.answer
+      : (Array.isArray(payload.chunks) ? payload.chunks.filter(Boolean).map(String).join('') : '');
+    if (streamText) state.streamText = streamText;
     if (typeof payload.answer === 'string') state.answer = formatCitations(payload.answer, citationMode, state.searchResults);
     state.rawData = payload;
   }
@@ -1018,6 +1023,10 @@ function currentPerplexityText(state) {
   return state.answer || state.chunks.at(-1) || state.chunks.join('') || '';
 }
 
+function currentPerplexityStreamText(state) {
+  return state.streamText || state.chunks.at(-1) || state.chunks.join('') || currentPerplexityText(state);
+}
+
 function buildPerplexityStreamState(state = {}, { stream = false } = {}) {
   const text = currentPerplexityText(state);
   const progress = state.streamProgress || {};
@@ -1046,7 +1055,7 @@ function perplexityProgressCallback(request = {}) {
 }
 
 function emitPerplexityProgress({ state, previousText, onProgress }) {
-  const currentText = currentPerplexityText(state);
+  const currentText = currentPerplexityStreamText(state);
   let delta = '';
   if (currentText && currentText !== previousText) {
     delta = currentText.startsWith(previousText) ? currentText.slice(previousText.length) : currentText;

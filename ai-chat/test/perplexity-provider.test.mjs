@@ -815,6 +815,51 @@ test('Perplexity streaming applies captured block diffs and waits for the comple
   assert.equal(progress.at(-1).done, true);
 });
 
+test('Perplexity streaming does not replay an answer when final citation links are resolved', async () => {
+  const encoder = new TextEncoder();
+  const lines = [
+    `data: ${JSON.stringify({
+      status: 'PENDING',
+      blocks: [{
+        intended_usage: 'ask_text',
+        markdown_block: { progress: 'IN_PROGRESS', answer: 'Hello [1]' },
+      }],
+    })}\n`,
+    `data: ${JSON.stringify({
+      status: 'COMPLETED',
+      final_sse_message: true,
+      web_results: [{ name: 'Source', url: 'https://example.test/source' }],
+      blocks: [{
+        intended_usage: 'ask_text',
+        markdown_block: { progress: 'DONE', answer: 'Hello [1]' },
+      }],
+    })}\n`,
+  ];
+  let readIndex = 0;
+  const progress = [];
+
+  const state = await streamPerplexity({
+    payload: buildPerplexityPayload({ query: 'hello', model: resolvePerplexityModel('perplexity/best') }),
+    timeoutMs: 1000,
+    citationMode: 'markdown',
+    fetchImpl: async () => ({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: async () => readIndex < lines.length
+            ? { value: encoder.encode(lines[readIndex++]), done: false }
+            : { done: true },
+        }),
+      },
+    }),
+    onProgress: event => progress.push(event),
+  });
+
+  assert.equal(state.answer, 'Hello [1](https://example.test/source)');
+  assert.deepEqual(progress.map(event => event.delta), ['Hello [1]', '']);
+  assert.equal(progress.at(-1).done, true);
+});
+
 test('Perplexity streaming consumes final SSE data without trailing newline', async () => {
   const encoder = new TextEncoder();
   const lines = [
