@@ -90,8 +90,8 @@ scripts/ai-chat.mjs --provider perplexity --prompt "Analyze this file" --file /t
 | `--conversation <id-or-url>` | Open a provider conversation. ChatGPT accepts only a provider ID or trusted clean `/c/<id>` URL; no prompt is read-only and never submits |
 | `--list-conversations` | Read-only provider listing where supported. ChatGPT returns a safe structured JSON object |
 | `--conversation-limit <1..100>` | Bounded ChatGPT listing size, default 20 |
-| `--save-conversation <id>` | Save the final provider continuation state under a provider-scoped id in `~/.cache/pi-browser-tools/ai-chat-conversations` |
-| `--attach-conversation <provider-id-or-url>` | Attach an existing provider conversation id or link to `--save-conversation <id>` without replaying transcript history |
+| `--save-conversation <id>` | Supported non-ChatGPT providers: save final continuation state under a provider-scoped id in `~/.cache/pi-browser-tools/ai-chat-conversations` |
+| `--attach-conversation <provider-id-or-url>` | Supported non-ChatGPT providers: attach a conversation id or link to `--save-conversation <id>` without replaying transcript history. ChatGPT rejects this option. |
 | `--include-conversation` | Include `conversation_messages` in JSON output. Use only when downstream code needs full local transcript context |
 | `--evidence` or `--capture-evidence` | Capture screenshot evidence for the final provider URL and include `evidence_path` in metadata |
 | `--evidence-path <file>` | Write screenshot evidence to a specific file, also enables evidence capture |
@@ -99,17 +99,17 @@ scripts/ai-chat.mjs --provider perplexity --prompt "Analyze this file" --file /t
 
 ## Conversation continuity
 
-Use `--save-conversation <id>` when a task is expected to need follow-ups across agent turns. The helper stores a JSON record with the provider, requested model, final URL or backend provider state, local messages, capture time, and response size. Use `--conversation <id>` later to continue that thread and send only the new user prompt when the provider supports backend continuation.
+Supported non-ChatGPT providers can use `--save-conversation <id>` for follow-ups across agent turns. The helper stores a JSON record with the provider, requested model, final URL or backend provider state, local messages, capture time, and response size. Use `--conversation <id>` later to continue that thread and send only the new user prompt when the provider supports backend continuation.
 
-Records live in `~/.cache/pi-browser-tools/ai-chat-conversations/<provider>/<id>.json` with local-user permissions. Provider-scoped ids are separate, so `grok:research` and `chatgpt:research` are different records.
+Those local records live in `~/.cache/pi-browser-tools/ai-chat-conversations/<provider>/<id>.json` with local-user permissions. Provider-scoped ids are separate, for example `grok:research` and `perplexity:research`.
 
-Rules:
+Rules for supported non-ChatGPT providers:
 
 - Use stable ids such as `market-research`, `project-plan`, or a task id.
 - Use a direct URL with `--conversation https://...` when the user gives a provider conversation link for one run.
 - Use `--attach-conversation <provider-id-or-url> --save-conversation <id>` when the link or backend id should become a reusable local AI Chat session.
 - Use `--continue` only for short same-tab flows. Prefer saved conversation ids for reliable multi-turn work.
-- For ChatGPT long-running turns, `--conversation <provider-id> --final --json` reads the current provider turn without creating local state or submitting a prompt.
+- ChatGPT has no local records and rejects `--save-conversation` and `--attach-conversation`. Continue ChatGPT only with its provider ID or a trusted clean `/c/<id>` URL. For long-running turns, `--conversation <provider-id> --final --json` reads the current provider turn without creating local state or submitting a prompt.
 - Perplexity exposes a safe `backend_uuid`, `final_url`, and `conversation_url` for each created thread. The canonical thread URL is `https://www.perplexity.ai/search/<backend_uuid>` and can be passed directly to `--conversation` for UUID-based continuation.
 - Perplexity stores the backend UUID and a private read-write token in the local record when available. Use `--save-conversation` for reliable multi-turn continuation because the public thread URL intentionally does not expose that token. Normal output only reports redacted presence, for example `has_read_write_token: true`.
 - Gemini attempts native continuation first. If Gemini rejects stored ids, metadata shows `native_continuation_error` and `local_transcript_fallback`.

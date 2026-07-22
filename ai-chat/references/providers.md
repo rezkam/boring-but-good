@@ -39,7 +39,7 @@ Saved conversation ids are provider scoped:
 
 - `perplexity:research-x` stores Perplexity backend UUID and private read-write token when available.
 - `grok:research-x` stores a Grok conversation URL.
-- `chatgpt:research-x` stores a ChatGPT conversation URL and stream continuation identifiers.
+- ChatGPT accepts provider conversation IDs or trusted ChatGPT conversation URLs directly and never creates local conversation records.
 - `gemini:research-x` stores Gemini provider metadata and a local transcript fallback.
 
 Records live in `~/.cache/pi-browser-tools/ai-chat-conversations/<provider>/<id>.json`. Records can contain private provider continuation tokens. Normal JSON output redacts secrets and reports presence fields such as `has_read_write_token`.
