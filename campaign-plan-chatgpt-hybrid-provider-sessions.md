@@ -353,24 +353,22 @@ npm test
 
 A fresh isolated worktree preserves the stopped prototype unchanged:
 
-- Worktree: `/Users/rez/.agents/coordinator/worktrees/chatgpt-hybrid-provider-sessions`
 - Branch: `feat/ai-chat-chatgpt-hybrid-sessions`
 - PR title: `feat(ai-chat): add resumable ChatGPT provider sessions`
-- Implementation notes: `implementation-notes-chatgpt-hybrid-provider-sessions.md`, untracked
+- Implementation notes are untracked.
 
 PR #15 currently owns overlapping AI Chat core changes and is still open at `1b7b6cdb62a4f14a92efdbe3bd65308c437a035d`. The new branch will start from that verified head and the PR will initially target `feat/ai-chat-perplexity-network`. After PR #15 merges, the coordinator will rebase or retarget the ChatGPT PR to `main`. This plan does not authorize merging PR #15.
 
 This approved plan is the committed decision record for the campaign.
 
-## Implementer lane
+## Implementation lane
 
 - Four serial implementation slices
-- Implementer: Codex `gpt-5.6-terra`
 - Effort: medium, pinned for every slice
 - One slice in flight at a time
 - Implementers commit locally with Conventional Commits
 - Coordinator verifies, pushes, owns the PR, and updates living docs
-- Final adversarial review: top-tier reviewer at high effort, up to three rounds
+- Final adversarial review: high effort, up to three rounds
 
 ## Living documentation
 
@@ -387,8 +385,7 @@ Update in the same changes that alter behavior:
 
 Private campaign memory remains outside commits:
 
-- `implementation-notes-chatgpt-hybrid-provider-sessions.md`
-- `/Users/rez/.agents/coordinator/worktrees/chatgpt-network-gpt56-sol/chatgpt-network-discovery-log.md`
+- untracked implementation notes
 - private redacted browser artifacts
 
 ## Stop conditions

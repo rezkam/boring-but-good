@@ -76,6 +76,21 @@ test('listing status redacts nested secret values', async () => {
   try { const value = await listChatGptConversations({ browser: { pages: async () => [{ url: () => 'https://chatgpt.com/', evaluate: async (fn, arg) => fn(arg) }] } }); assert.doesNotMatch(JSON.stringify(value), /SENTINEL|AUTH_SECRET|ACCOUNT_SECRET/); } finally { globalThis.fetch = previous; }
 });
 
+test('listing status recursively redacts camel-case token families', async () => {
+  const markers = ['SESSION_TOKEN_MARKER', 'AUTH_TOKEN_MARKER', 'REFRESH_TOKEN_MARKER', 'READ_WRITE_TOKEN_MARKER', 'RESUME_TOKEN_MARKER'];
+  const previous = globalThis.fetch;
+  globalThis.fetch = async url => url === '/api/auth/session'
+    ? { ok: true, json: async () => ({ accessToken: 'AUTH_SECRET', account: { id: 'ACCOUNT_SECRET' } }) }
+    : { ok: true, json: async () => ({ items: [{ id: 'provider_1', async_status: {
+      sessionToken: markers[0], nested: { authToken: markers[1], values: [{ refreshToken: markers[2] }, { readWriteToken: markers[3], resumeToken: markers[4] }] },
+    } }] }) };
+  try {
+    const value = await listChatGptConversations({ browser: { pages: async () => [{ url: () => 'https://chatgpt.com/', evaluate: async (fn, arg) => fn(arg) }] } });
+    const serialized = JSON.stringify(value);
+    for (const marker of [...markers, 'AUTH_SECRET', 'ACCOUNT_SECRET']) assert.equal(serialized.includes(marker), false, marker);
+  } finally { globalThis.fetch = previous; }
+});
+
 class FakeCdpSession extends EventEmitter {
   constructor() { super(); this.calls = []; this.responses = new Map(); }
   async send(method, params = {}) { this.calls.push({ method, params }); return this.responses.get(method) || {}; }
@@ -319,6 +334,36 @@ test('does not duplicate incremental and fallback response bodies', async () => 
   } finally { await tracker.dispose(); }
 });
 
+test('loadingFinished waits for delayed stream setup before falling back to the full body', async () => {
+  const client = new FakeCdpSession();
+  let releaseStream;
+  let streamStarted;
+  const streamStartedPromise = new Promise(resolve => { streamStarted = resolve; });
+  const streamReady = new Promise(resolve => { releaseStream = resolve; });
+  const originalSend = client.send.bind(client);
+  client.send = async (method, params) => {
+    if (method === 'Network.streamResourceContent') {
+      client.calls.push({ method, params });
+      streamStarted();
+      await streamReady;
+      return { bufferedData: Buffer.from('data: {"p":"/message/content/parts/0","o":"append","v":"one"}\n\n').toString('base64') };
+    }
+    return originalSend(method, params);
+  };
+  client.responses.set('Network.getResponseBody', { body: 'data: {"p":"/message/content/parts/0","o":"append","v":"one"}\n\n' });
+  const tracker = await createChatGptNetworkTracker({ page: pageFor(client), selectedModel: 'instant' });
+  try {
+    client.emit('Network.requestWillBeSent', { requestId: 'request', request: { method: 'POST', url: 'https://chatgpt.com/backend-api/f/conversation' } });
+    client.emit('Network.responseReceived', { requestId: 'request', response: { url: 'https://chatgpt.com/backend-api/f/conversation', status: 200, mimeType: 'text/event-stream' } });
+    await streamStartedPromise;
+    client.emit('Network.loadingFinished', { requestId: 'request' });
+    releaseStream();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(tracker.snapshot().text, 'one');
+    assert.equal(client.calls.filter(call => call.method === 'Network.getResponseBody').length, 0);
+  } finally { await tracker.dispose(); }
+});
+
 test('DONE after a handoff is not terminal, while a plain DONE closes its transport', () => {
   const handedOff = extractChatGptStreamStateFromEncodedItem('data: {"type":"stream_handoff","conversation_id":"c"}\n\ndata: [DONE]\n\n');
   assert.equal(handedOff.done, false);
@@ -358,6 +403,7 @@ test('SSE and WebSocket resume events retain no private event payloads', async (
     const result = await chatgptProvider.waitForResponse({
       page: { url: () => 'https://chatgpt.com/c/conv' }, timeoutMs: 0, selectedModel: 'high',
       networkTracker: { snapshot: () => tracker.snapshot() },
+      readConversation: async () => null,
     });
     assert.equal(result.rawText.includes(secret), false);
     assert.equal(JSON.stringify(result.providerState).includes(secret), false);
@@ -467,6 +513,26 @@ test('network tracker emits safe live session, delta, and handoff progress witho
   } finally { await tracker.dispose(); }
 });
 
+test('network tracker redacts credential-bearing query values in raw delta callbacks', async () => {
+  const client = new FakeCdpSession(); const events = [];
+  const secrets = ['AUTH_SECRET', 'SESSION_SECRET', 'AWS_SECRET', 'GOOGLE_SECRET', 'X_GOOG_SECRET'];
+  const delta = 'ordinary prose survives https://storage.example/path?auth=AUTH_SECRET&session=SESSION_SECRET&AWSAccessKeyId=AWS_SECRET&GoogleAccessId=GOOGLE_SECRET&X-Goog-Credential=X_GOOG_SECRET&safe=preserved#fragment';
+  const frame = `data: ${JSON.stringify({ p: '/message/content/parts/0', o: 'append', v: delta })}\n\n`;
+  client.responses.set('Network.streamResourceContent', { bufferedData: Buffer.from(frame).toString('base64') });
+  const tracker = await createChatGptNetworkTracker({ page: pageFor(client), selectedModel: 'instant', onStreamEvent: event => events.push(event) });
+  try {
+    client.emit('Network.requestWillBeSent', { requestId: 'request', request: { method: 'POST', url: 'https://chatgpt.com/backend-api/f/conversation' } });
+    client.emit('Network.responseReceived', { requestId: 'request', response: { status: 200, mimeType: 'text/event-stream' } });
+    await new Promise(resolve => setImmediate(resolve));
+    const payload = events.find(event => event.event === 'delta');
+    assert.ok(payload);
+    const captured = JSON.stringify(payload);
+    for (const secret of secrets) assert.equal(captured.includes(secret), false);
+    assert.match(payload.text, /ordinary prose survives/);
+    assert.match(payload.text, /\?auth=\[redacted\]&session=\[redacted\]&AWSAccessKeyId=\[redacted\]&GoogleAccessId=\[redacted\]&X-Goog-Credential=\[redacted\]&safe=preserved#fragment/);
+  } finally { await tracker.dispose(); }
+});
+
 test('strict terminal quorum requires both persistent completion and a finished final assistant', () => {
   assert.equal(hasChatGptTerminalQuorum(completeDetail({ status: 'COMPLETE', final: false })), false);
   assert.equal(hasChatGptTerminalQuorum(completeDetail({ status: 'IN_PROGRESS', final: true })), false);
@@ -480,6 +546,32 @@ test('structured turn contains only the current user branch and excludes token-l
   assert.equal(turn.text, 'answer');
   assert.equal(JSON.stringify(turn), JSON.stringify(turn).includes('secret') ? 'unexpected' : JSON.stringify(turn));
   assert.equal(JSON.stringify(turn).includes('hidden'), false);
+});
+
+test('structured turn and live deltas redact signature and cloud credential fields without altering prose', async () => {
+  const markers = ['SIGNATURE_MARKER', 'SIG_MARKER', 'AWS_MARKER', 'GOOGLE_MARKER', 'AMZ_MARKER', 'GOOG_MARKER'];
+  const secretJson = JSON.stringify({ signature: markers[0], sig: markers[1], awsAccessKeyId: markers[2], googleAccessId: markers[3], xAmzCredential: markers[4], xGoogCredential: markers[5] });
+  const detail = completeDetail();
+  detail.conversation.mapping.assistant.message.content.parts = [`signature verification matters; tokenization; key=music; ${secretJson}`];
+  detail.conversation.mapping.assistant.message.metadata = { ...detail.conversation.mapping.assistant.message.metadata, signature: markers[0], sig: markers[1], awsAccessKeyId: markers[2], googleAccessId: markers[3], xAmzCredential: markers[4], xGoogCredential: markers[5], design: 'ordinary' };
+  const turn = selectChatGptStructuredTurn(detail);
+  const structured = JSON.stringify(turn);
+  for (const marker of markers) assert.equal(structured.includes(marker), false, marker);
+  assert.match(turn.text, /signature verification matters; tokenization; key=music/);
+  assert.equal(turn.final.metadata.design, 'ordinary');
+
+  const client = new FakeCdpSession(); const events = [];
+  const frame = `data: ${JSON.stringify({ p: '/message/content/parts/0', o: 'append', v: `signature verification matters; tokenization; key=music; ${secretJson}` })}\n\n`;
+  client.responses.set('Network.streamResourceContent', { bufferedData: Buffer.from(frame).toString('base64') });
+  const tracker = await createChatGptNetworkTracker({ page: pageFor(client), selectedModel: 'instant', onStreamEvent: event => events.push(event) });
+  try {
+    client.emit('Network.requestWillBeSent', { requestId: 'request', request: { method: 'POST', url: 'https://chatgpt.com/backend-api/f/conversation' } });
+    client.emit('Network.responseReceived', { requestId: 'request', response: { status: 200, mimeType: 'text/event-stream' } });
+    await new Promise(resolve => setImmediate(resolve));
+    const eventText = JSON.stringify(events);
+    for (const marker of markers) assert.equal(eventText.includes(marker), false, marker);
+    assert.match(events.find(event => event.event === 'delta').text, /signature verification matters; tokenization; key=music/);
+  } finally { await tracker.dispose(); }
 });
 
 test('structured turn removes editable contexts while retaining visible reasoning, tool, and assistant messages', () => {
@@ -630,6 +722,28 @@ test('attached polling emits deduplicated structured message snapshots before st
   assert.equal(messages.every(event => event.source === 'live-cdp'), true);
 });
 
+test('waitForResponse rejects a fatal tracker progress failure raised during a deferred detail read', async () => {
+  const client = new FakeCdpSession();
+  const initial = `data: ${JSON.stringify({ conversation_id: 'provider_1' })}\n\n`;
+  client.responses.set('Network.streamResourceContent', { bufferedData: Buffer.from(initial).toString('base64') });
+  let throwOnProgress = false;
+  const tracker = await createChatGptNetworkTracker({ page: pageFor(client), selectedModel: 'instant', onStreamEvent: () => { if (throwOnProgress) throw new Error('transcript append failed'); } });
+  let releaseDetail;
+  const detailPending = new Promise(resolve => { releaseDetail = resolve; });
+  try {
+    client.emit('Network.requestWillBeSent', { requestId: 'request', request: { method: 'POST', url: 'https://chatgpt.com/backend-api/f/conversation' } });
+    client.emit('Network.responseReceived', { requestId: 'request', response: { status: 200, mimeType: 'text/event-stream' } });
+    await new Promise(resolve => setImmediate(resolve));
+    const response = chatgptProvider.waitForResponse({ page: { url: () => 'https://chatgpt.com/c/provider_1' }, timeoutMs: 1_000, selectedModel: 'instant', request: {}, networkTracker: tracker, readConversation: async () => detailPending, sleepFn: async () => {} });
+    await new Promise(resolve => setImmediate(resolve));
+    throwOnProgress = true;
+    const delta = `data: ${JSON.stringify({ p: '/message/content/parts/0', o: 'append', v: 'delta' })}\n\n`;
+    client.emit('Network.dataReceived', { requestId: 'request', data: Buffer.from(delta).toString('base64') });
+    releaseDetail(completeDetail());
+    await assert.rejects(() => response, /Failed to emit ChatGPT stream progress/);
+  } finally { await tracker.dispose(); }
+});
+
 test('continuation ignores the old complete node and completes only after the branch changes', async () => {
   const oldDetail = completeDetail();
   const continued = structuredClone(oldDetail);
@@ -660,6 +774,27 @@ test('continuation ignores the old complete node and completes only after the br
   assert.equal(result.providerState.structured_turn.search_result_groups[0].type, 'search');
   assert.equal(result.providerState.structured_turn.story_events[0].type, 'tool');
   assert.doesNotMatch(JSON.stringify(result), /secret|hidden/);
+});
+
+test('continuation polls its preflighted provider id when the stream omits it', async () => {
+  const updated = completeDetail();
+  updated.conversation.mapping['new-assistant'] = structuredClone(updated.conversation.mapping.assistant);
+  updated.conversation.mapping['new-assistant'].parent = updated.conversation.mapping.assistant.parent;
+  updated.conversation.current_node = 'new-assistant';
+  const result = await chatgptProvider.waitForResponse({
+    page: { url: () => 'https://chatgpt.com/c/provider_1' }, timeoutMs: 1_000, selectedModel: 'default', request: {},
+    attemptContext: { expectedConversationId: 'provider_1', baselineCurrentNode: 'assistant' },
+    networkTracker: { snapshot: () => ({ requestConversationId: 'provider_1', observedPayloadModel: 'gpt-observed', transport: 'network-incremental-sse' }) },
+    readConversation: async (_page, id) => { assert.equal(id, 'provider_1'); return updated; }, sleepFn: async () => {},
+  });
+  assert.equal(result.done, true);
+  assert.equal(result.providerConversationId, 'provider_1');
+});
+
+test('continuation propagates authentication errors and exhausted transient detail errors', async () => {
+  const common = { page: { url: () => 'https://chatgpt.com/c/provider_1' }, timeoutMs: 1_000, selectedModel: 'default', request: {}, attemptContext: { expectedConversationId: 'provider_1', baselineCurrentNode: 'assistant' }, networkTracker: { snapshot: () => ({ requestConversationId: 'provider_1', transport: 'network-incremental-sse' }) }, sleepFn: async () => {} };
+  await assert.rejects(() => chatgptProvider.waitForResponse({ ...common, readConversation: async () => { throw new Error('[chatgpt] Authentication is unavailable or expired.'); } }), /Authentication is unavailable/);
+  await assert.rejects(() => chatgptProvider.waitForResponse({ ...common, readConversation: async () => { throw new Error('[chatgpt] Conversation status read failed with HTTP 503.'); } }), /status read failed with HTTP 503/);
 });
 
 test('continuation does not accept unchanged old terminal detail', async () => {

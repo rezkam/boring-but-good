@@ -3,7 +3,8 @@ import { sleep, urlHasAllowedHostname } from './shared.mjs';
 const CHATGPT_ORIGIN = 'https://chatgpt.com';
 const CHATGPT_HOSTNAMES = ['chatgpt.com', 'www.chatgpt.com'];
 const CHATGPT_CONVERSATION_ENDPOINT = '/backend-api/f/conversation';
-const PRIVATE_KEYS = /(?:authorization|cookie|token|sentinel|conduit|turnstile|proof|resume|secret|credential|password|api[_-]?key)/i;
+const PRIVATE_KEYS = /(?:authorization|cookie|token|sentinel|conduit|turnstile|proof|resume|secret|credential|password|api[_-]?key|signature|(?:^|[_-])sig(?:$|[_-])|(?:aws|google)[_-]?access[_-]?(?:key[_-]?)?id|x[-_]?(?:amz|goog)[-_]?(?:credential|security[-_]?token|signature))/i;
+const SENSITIVE_STRING_KEY = '(?:[a-z0-9_-]*(?:auth(?:orization)?|session|cookie|token|secret|credential|password|signature)[a-z0-9_-]*|(?:[a-z0-9_-]*(?:api|access)[_-]?key[a-z0-9_-]*)|sig|(?:aws|google)[_-]?access[_-]?(?:key[_-]?)?id|x[-_]?(?:amz|goog)[-_]?(?:credential|security[-_]?token|signature))';
 const UI_WAIT_TIMEOUT_MS = 5_000;
 export const CHATGPT_PROVIDER_ID_OBSERVATION_TIMEOUT_MS = 30_000;
 
@@ -281,16 +282,33 @@ export async function createChatGptNetworkTracker({ page, selectedModel, expecte
   let disposed = false;
   let finalRequestId = null;
   let decoder = null;
+  let streamSetup = null;
+  let fatalProgressError = null;
   const streamed = new Set();
   const emitted = { session: false, statuses: new Set(), deltas: new Set() };
 
+  function recordFatalProgressError(error) {
+    if (fatalProgressError) return;
+    fatalProgressError = new Error('Failed to emit ChatGPT stream progress.');
+    fatalProgressError.code = error?.code === 'stream_file_error' ? 'stream_file_error' : 'chatgpt_stream_progress_error';
+  }
+
+  function throwIfFatalProgressError() {
+    if (fatalProgressError) throw fatalProgressError;
+  }
+
   function update(next) {
+    if (fatalProgressError) return;
     const previous = state;
     if (expectedConversationId && next.requestConversationId && next.requestConversationId !== expectedConversationId) next.error = '[chatgpt] Submission request conversation id did not match the requested provider conversation id.';
     if (expectedConversationId && next.conversationId && next.conversationId !== expectedConversationId) next.error = '[chatgpt] Submission stream conversation id did not match the requested provider conversation id.';
     state = next;
     if (state.error) return;
-    emitTrackerChanges(previous, state, onStreamEvent, emitted);
+    try {
+      emitTrackerChanges(previous, state, onStreamEvent, emitted);
+    } catch (error) {
+      recordFatalProgressError(error);
+    }
   }
 
   function recordObservedPayload(postData) {
@@ -331,22 +349,33 @@ export async function createChatGptNetworkTracker({ page, selectedModel, expecte
     try { responsePath = new URL(response.url || CHATGPT_ORIGIN).pathname; } catch {}
     state.responseStatuses.push({ url: responsePath, status: response.status, mimeType: response.mimeType || null });
     state.acceptedResponse = response.status >= 200 && response.status < 300 && /event-stream/i.test(response.mimeType || '');
-    emitTrackerChanges({ ...state, acceptedResponse: false }, state, onStreamEvent, emitted);
+    try {
+      emitTrackerChanges({ ...state, acceptedResponse: false }, state, onStreamEvent, emitted);
+    } catch (error) {
+      recordFatalProgressError(error);
+      return;
+    }
     if (!state.acceptedResponse) return;
     decoder = createChatGptSseDecoder();
-    try {
-      const result = await client.send('Network.streamResourceContent', { requestId: event.requestId });
-      streamed.add(event.requestId);
-      consume(result.bufferedData);
-    } catch (error) {
-      state.incrementalUnsupported = error.message;
-    }
+    streamSetup = (async () => {
+      try {
+        const result = await client.send('Network.streamResourceContent', { requestId: event.requestId });
+        streamed.add(event.requestId);
+        consume(result.bufferedData);
+      } catch (error) {
+        state.incrementalUnsupported = error.message;
+      }
+    })();
+    await streamSetup;
   };
   const onData = event => {
     if (event.requestId === finalRequestId && streamed.has(event.requestId)) consume(event.data);
   };
   const onFinished = async event => {
     if (event.requestId !== finalRequestId) return;
+    // Loading can finish before CDP finishes enabling incremental content.
+    // Wait for setup before deciding whether the full-body fallback is needed.
+    if (streamSetup) await streamSetup;
     if (decoder) update(applySseEvents(decoder.flush(), state));
     if (streamed.has(event.requestId) && state.incrementalBytes) return;
     try {
@@ -369,9 +398,11 @@ export async function createChatGptNetworkTracker({ page, selectedModel, expecte
   return {
     modelConfig,
     snapshot: () => ({ ...state }),
+    throwIfFatalProgressError,
     async waitForSubmission(timeoutMs) {
       const deadline = now() + timeoutMs;
       while (now() <= deadline) {
+        throwIfFatalProgressError();
         const snapshot = { ...state };
         const rejected = snapshot.responseStatuses.find(item => item.status >= 400);
         if (rejected) throw new Error(`[chatgpt] Submission failed with HTTP ${rejected.status}.`);
@@ -384,6 +415,7 @@ export async function createChatGptNetworkTracker({ page, selectedModel, expecte
         if (snapshot.acceptedResponse && snapshot.conversationId) return snapshot;
         await sleepFn(100);
       }
+      throwIfFatalProgressError();
       const rejected = state.responseStatuses.find(item => item.status >= 400);
       if (rejected) throw new Error(`[chatgpt] Submission failed with HTTP ${rejected.status}.`);
       if (state.acceptedResponse) throw new Error('[chatgpt] Submission may have occurred, but no provider conversation id was observed before timeout.');
@@ -393,6 +425,8 @@ export async function createChatGptNetworkTracker({ page, selectedModel, expecte
       state = initialState(modelConfig, preserveSelection);
       finalRequestId = null;
       decoder = null;
+      streamSetup = null;
+      fatalProgressError = null;
       streamed.clear();
       emitted.session = false;
       emitted.statuses.clear();
@@ -527,10 +561,21 @@ export async function selectChatGptModelInUi(page, selectedModel) {
   return { ...model, verification: 'visible-ui-label' };
 }
 
+function redactString(value) {
+  const sensitiveKey = new RegExp(`((?:["']${SENSITIVE_STRING_KEY}["'])\\s*:\\s*["'])([^"']*)(["'])`, 'gi');
+  const assignment = new RegExp(`((?:${SENSITIVE_STRING_KEY})\\s*[=:]\\s*)([^\\s,;?&#}\\]]+)`, 'gi');
+  const query = new RegExp(`([?&]${SENSITIVE_STRING_KEY}=)[^&#\\s"']+`, 'gi');
+  return String(value)
+    .replace(/(Bearer\s+)[^\s,;]+/gi, '$1[redacted]')
+    .replace(sensitiveKey, '$1[redacted]$3')
+    .replace(assignment, '$1[redacted]')
+    .replace(query, '$1[redacted]');
+}
+
 function redact(value, key = '') {
   if (PRIVATE_KEYS.test(key)) return '[redacted]';
   if (Array.isArray(value)) return value.map(item => redact(item));
-  if (!value || typeof value !== 'object') return value;
+  if (!value || typeof value !== 'object') return typeof value === 'string' ? redactString(value) : value;
   return Object.fromEntries(Object.entries(value).map(([itemKey, item]) => [itemKey, redact(item, itemKey)]));
 }
 
@@ -619,11 +664,14 @@ export async function listChatGptConversations({ browser, limit = 20, now = () =
   const page = pages.find(candidate => isChatGptUrl(candidate.url())) || await browser.newPage({ background: true });
   if (!isChatGptUrl(page.url())) await page.goto(CHATGPT_ORIGIN, { waitUntil: 'domcontentloaded', timeout: 30000 });
   const result = await page.evaluate(async requestedLimit => {
+    const sensitiveKey = '(?:[a-z0-9_-]*(?:auth(?:orization)?|session|cookie|token|secret|credential|password|signature)[a-z0-9_-]*|(?:[a-z0-9_-]*(?:api|access)[_-]?key[a-z0-9_-]*)|sig|(?:aws|google)[_-]?access[_-]?(?:key[_-]?)?id|x[-_]?(?:amz|goog)[-_]?(?:credential|security[-_]?token|signature))';
+    const isSensitiveKey = key => /(?:authorization|cookie|token|sentinel|conduit|turnstile|proof|resume|secret|credential|password|api[_-]?key|signature|(?:^|[_-])sig(?:$|[_-])|(?:aws|google)[_-]?access[_-]?(?:key[_-]?)?id|x[-_]?(?:amz|goog)[-_]?(?:credential|security[-_]?token|signature))/i.test(String(key || ''));
     const clean = value => String(value ?? '')
       .replace(/(Bearer\s+)[^\s,;]+/gi, '$1[redacted]')
-      .replace(/((?:token|secret|password|api[_-]?key|credential)\s*[=:]\s*)[^\s,;]+/gi, '$1[redacted]');
+      .replace(new RegExp(`((?:["']${sensitiveKey}["'])\\s*:\\s*["'])([^"']*)(["'])`, 'gi'), '$1[redacted]$3')
+      .replace(new RegExp(`((?:${sensitiveKey})\\s*[=:]\\s*)([^\\s,;?&#}\\]]+)`, 'gi'), '$1[redacted]');
     const safeStatus = (value, depth = 0, key = '') => {
-      if (/(?:token|secret|password|api[_-]?key|credential|authorization|cookie)/i.test(key)) return '[redacted]';
+      if (isSensitiveKey(key)) return '[redacted]';
       if (typeof value === 'string') return clean(value);
       if (typeof value === 'number' || typeof value === 'boolean' || value === null) return value;
       if (depth >= 4) return null;
@@ -696,7 +744,7 @@ export function selectChatGptStructuredTurn(detail) {
     && message.channel === 'final'
     && message.status === 'finished_successfully'
     && message.end_turn === true);
-  const text = final?.content?.parts?.filter(part => typeof part === 'string').join('\n') || '';
+  const text = redactString(final?.content?.parts?.filter(part => typeof part === 'string').join('\n') || '');
   const metadata = final?.metadata || {};
   const user = messages.find(message => message.author?.role === 'user') || null;
   const startedAt = user?.create_time ?? final?.create_time ?? null;
@@ -722,6 +770,10 @@ export function selectChatGptStructuredTurn(detail) {
 export function hasChatGptTerminalQuorum(detail) {
   const status = detail?.streamStatus?.status || detail?.stream_status?.status || detail?.conversation?.stream_status?.status;
   return status === 'COMPLETE' && !!selectChatGptStructuredTurn(detail).final;
+}
+
+function isTransientChatGptDetailError(error) {
+  return /\[chatgpt\] Conversation (?:detail|status) read failed with HTTP (?:408|429|5\d\d)\./.test(String(error?.message || ''));
 }
 
 function buildProviderState(snapshot, detail, extra = {}) {
@@ -946,8 +998,10 @@ export const chatgptProvider = {
     if (!submitted) throw new Error('[chatgpt] Send button is unavailable. The prompt was not submitted.');
   },
   async waitForResponse({ page, timeoutMs, networkTracker, selectedModel, request, attemptContext = null, onStreamEvent = null, readConversation = readChatGptConversation, sleepFn = sleep }) {
+    networkTracker?.throwIfFatalProgressError?.();
     if (request?.submitOnly) {
       const snapshot = await networkTracker.waitForSubmission(chatGptSubmissionObservationTimeoutMs(timeoutMs));
+      networkTracker?.throwIfFatalProgressError?.();
       const id = normalizeChatGptConversationId(snapshot.conversationId);
       return { text: '', rawText: '', done: false, status: 'submitted', providerConversationId: id, modelUsed: snapshot.modelSlug || snapshot.observedPayloadModel || (selectedModel === 'default' ? null : resolveChatGptModel(selectedModel)?.model), finalUrl: chatGptConversationUrl(id), providerState: buildProviderState(snapshot, null, { submitted: true }) };
     }
@@ -956,25 +1010,56 @@ export const chatgptProvider = {
     const baselineCurrentNode = attemptContext?.baselineCurrentNode || null;
     if (expectedConversationId && !baselineCurrentNode) throw new Error('[chatgpt] Continuation baseline current node is unavailable; refusing response reconciliation.');
     let last = networkTracker?.snapshot?.() || initialState(resolveChatGptModel(selectedModel) || resolveChatGptModel());
+    let lastDetailError = null;
     const fingerprints = new Map();
     for (let attempt = 0; attempt < maxPolls; attempt++) {
+      networkTracker?.throwIfFatalProgressError?.();
       last = networkTracker?.snapshot?.() || last;
       if (last.error) throw new Error(last.error);
       if (expectedConversationId && last.requestConversationId && last.requestConversationId !== expectedConversationId) throw new Error('[chatgpt] Submission request conversation id did not match the requested provider conversation id.');
       if (expectedConversationId && last.conversationId && last.conversationId !== expectedConversationId) throw new Error('[chatgpt] Submission stream conversation id did not match the requested provider conversation id.');
-      const detail = last.conversationId ? await readConversation(page, last.conversationId).catch(() => null) : null;
-      if (detail) emitSnapshotMessages(onStreamEvent, last.conversationId, detail, fingerprints, 'live-cdp');
+      const detailId = last.conversationId || expectedConversationId || null;
+      let detail = null;
+      if (detailId) {
+        try {
+          detail = await readConversation(page, detailId);
+          networkTracker?.throwIfFatalProgressError?.();
+        } catch (error) {
+          networkTracker?.throwIfFatalProgressError?.();
+          if (!isTransientChatGptDetailError(error)) throw error;
+          lastDetailError = error;
+        }
+      }
+      if (detail) emitSnapshotMessages(onStreamEvent, detailId, detail, fingerprints, 'live-cdp');
+      networkTracker?.throwIfFatalProgressError?.();
       const changedBranch = !baselineCurrentNode || detail?.conversation?.current_node !== baselineCurrentNode;
       if (detail && changedBranch && hasChatGptTerminalQuorum(detail)) {
         const turn = selectChatGptStructuredTurn(detail);
+        networkTracker?.throwIfFatalProgressError?.();
         return { text: turn.text.trim(), rawText: turn.text.trim(), done: true, providerConversationId: expectedConversationId || last.conversationId, modelUsed: turn.modelSlug || last.modelSlug || last.observedPayloadModel || (expectedConversationId && selectedModel === 'default' ? null : resolveChatGptModel(selectedModel)?.model), finalUrl: chatGptConversationUrl(expectedConversationId || last.conversationId) || page.url(), providerState: buildProviderState(last, detail), searchResults: turn.searchResultGroups };
       }
       await sleepFn(1000);
     }
-    const detail = last.conversationId ? await readConversation(page, last.conversationId).catch(() => null) : null;
-    if (detail) emitSnapshotMessages(onStreamEvent, last.conversationId, detail, fingerprints, 'live-cdp');
+    networkTracker?.throwIfFatalProgressError?.();
+    const detailId = last.conversationId || expectedConversationId || null;
+    let detail = null;
+    if (detailId) {
+      try {
+        detail = await readConversation(page, detailId);
+        networkTracker?.throwIfFatalProgressError?.();
+      } catch (error) {
+        networkTracker?.throwIfFatalProgressError?.();
+        if (!isTransientChatGptDetailError(error)) throw error;
+        lastDetailError = error;
+      }
+    }
+    networkTracker?.throwIfFatalProgressError?.();
+    if (lastDetailError && !detail) throw lastDetailError;
+    if (detail) emitSnapshotMessages(onStreamEvent, detailId, detail, fingerprints, 'live-cdp');
+    networkTracker?.throwIfFatalProgressError?.();
     const turn = detail ? selectChatGptStructuredTurn(detail) : null;
     const text = (turn?.text || last.text || '').trim();
+    networkTracker?.throwIfFatalProgressError?.();
     return { text, rawText: text, done: false, providerConversationId: expectedConversationId || last.conversationId || null, modelUsed: turn?.modelSlug || last.modelSlug || last.observedPayloadModel || (expectedConversationId && selectedModel === 'default' ? null : resolveChatGptModel(selectedModel)?.model), finalUrl: chatGptConversationUrl(expectedConversationId || last.conversationId) || page.url(), providerState: buildProviderState(last, detail, { timeout: true }), searchResults: turn?.searchResultGroups || [] };
   },
 };

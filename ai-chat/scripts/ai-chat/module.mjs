@@ -458,13 +458,23 @@ const SECRET_PROVIDER_STATE_KEYS = new Set([
   'apikey',
   'auth_token',
   'authorization',
+  'aws_access_key_id',
   'cookie',
+  'google_access_id',
   'id_token',
   'password',
   'read_write_token',
   'refresh_token',
   'secret',
   'session_token',
+  'sig',
+  'signature',
+  'x_amz_credential',
+  'x_amz_security_token',
+  'x_amz_signature',
+  'x_goog_credential',
+  'x_goog_security_token',
+  'x_goog_signature',
 ]);
 
 function normalizedProviderStateKey(key) {
@@ -479,22 +489,35 @@ function isSecretProviderStateKey(key) {
   const normalized = normalizedProviderStateKey(key);
   if (normalized.startsWith('has_')) return false;
   return SECRET_PROVIDER_STATE_KEYS.has(normalized)
-    || /(?:authorization|cookie|token|sentinel|conduit|turnstile|proof|resume|secret|credential|password|api_?key)/i.test(String(key || ''));
+    || /(?:authorization|cookie|token|sentinel|conduit|turnstile|proof|resume|secret|credential|password|api_?key|signature|(?:aws|google)_?access_?key?_?id|(?:aws|google)_?access_?id|x_?(?:amz|goog)_?(?:credential|security_?token|signature))/i.test(String(key || ''));
 }
 
 function secretPresenceKey(key) {
   return `has_${normalizedProviderStateKey(key) || 'secret'}`;
 }
 
-function sanitizeProviderStateValue(value) {
-  if (!value || typeof value !== 'object') return value;
-  if (Array.isArray(value)) return value.map(item => sanitizeProviderStateValue(item));
+const SENSITIVE_STRING_KEY = '(?:[a-z0-9_-]*(?:auth(?:orization)?|session|cookie|token|secret|credential|password|signature)[a-z0-9_-]*|(?:[a-z0-9_-]*(?:api|access)[_-]?key[a-z0-9_-]*)|sig|(?:aws|google)[_-]?access[_-]?(?:key[_-]?)?id|x[-_]?(?:amz|goog)[-_]?(?:credential|security[-_]?token|signature))';
+
+function sanitizeProviderString(value) {
+  const sensitiveKey = new RegExp(`((?:["']${SENSITIVE_STRING_KEY}["'])\\s*:\\s*["'])([^"']*)(["'])`, 'gi');
+  const assignment = new RegExp(`((?:${SENSITIVE_STRING_KEY})\\s*[=:]\\s*)([^\\s,;?&#}\\]]+)`, 'gi');
+  const query = new RegExp(`([?&]${SENSITIVE_STRING_KEY}=)[^&#\\s"']+`, 'gi');
+  return String(value)
+    .replace(/(Bearer\s+)[^\s,;]+/gi, '$1[redacted]')
+    .replace(sensitiveKey, '$1[redacted]$3')
+    .replace(assignment, '$1[redacted]')
+    .replace(query, '$1[redacted]');
+}
+
+function sanitizeProviderStateValue(value, sanitizeStrings = false) {
+  if (!value || typeof value !== 'object') return sanitizeStrings && typeof value === 'string' ? sanitizeProviderString(value) : value;
+  if (Array.isArray(value)) return value.map(item => sanitizeProviderStateValue(item, sanitizeStrings));
   const safe = {};
   for (const [key, item] of Object.entries(value)) {
     if (isSecretProviderStateKey(key)) {
       safe[secretPresenceKey(key)] = Boolean(item);
     } else {
-      safe[key] = sanitizeProviderStateValue(item);
+      safe[key] = sanitizeProviderStateValue(item, sanitizeStrings);
     }
   }
   return safe;
@@ -502,7 +525,7 @@ function sanitizeProviderStateValue(value) {
 
 export function sanitizeProviderStateForOutput(provider, providerState) {
   if (!providerState || typeof providerState !== 'object' || Array.isArray(providerState)) return providerState || null;
-  const safeState = sanitizeProviderStateValue(providerState);
+  const safeState = sanitizeProviderStateValue(providerState, provider === 'chatgpt');
   if (isPerplexityProvider(provider) && Object.prototype.hasOwnProperty.call(providerState, 'read_write_token')) {
     safeState.has_read_write_token = Boolean(providerState.read_write_token || safeState.has_read_write_token);
   }
@@ -522,9 +545,7 @@ export function sanitizeChatGptStreamValue(value, key = '') {
     ]));
   }
   if (typeof value !== 'string') return value;
-  return value
-    .replace(/(Bearer\s+)[^\s,;]+/gi, '$1[redacted]')
-    .replace(/((?:token|secret|password|api[_-]?key)\s*[=:]\s*)[^\s,;]+/gi, '$1[redacted]');
+  return sanitizeProviderString(value);
 }
 
 function sanitizeChatGptStreamErrorMessage(value) {
@@ -658,7 +679,7 @@ function privateProviderStateForConversation(provider, result) {
 }
 
 function isSecretUrlParam(name) {
-  return /(token|secret|session|auth|password|api[_-]?key|apikey)/i.test(String(name || ''));
+  return isSecretProviderStateKey(name);
 }
 
 export function sanitizeConversationUrlForOutput(url) {
@@ -684,12 +705,15 @@ function attachPrivateProviderState(result, privateProviderState) {
   return result;
 }
 
-function publicProviderResult(result) {
-  return { ...result };
+function publicProviderResult(provider, result) {
+  if (provider?.name !== 'chatgpt') return { ...result };
+  return sanitizeChatGptStreamValue({ ...result });
 }
 
 export function buildMetadata({ request, provider, result, fallbackFrom, fallbackTrail, conversation }) {
-  const text = result.text || '';
+  const isChatGpt = provider.name === 'chatgpt';
+  const publicValue = value => isChatGpt ? sanitizeChatGptStreamValue(value) : value;
+  const text = publicValue(result.text || '');
   const safeFinalUrl = sanitizeConversationUrlForOutput(result.finalUrl || null);
   const safeConversationUrl = sanitizeConversationUrlForOutput(result.finalUrl || conversation?.url || null);
   const previousMessages = Array.isArray(conversation?.record?.messages) ? conversation.record.messages : [];
@@ -701,10 +725,10 @@ export function buildMetadata({ request, provider, result, fallbackFrom, fallbac
   const modelFallbackReason = result.modelFallbackReason || providerState?.model_fallback_reason || (fallbackFrom ? 'rate_limited' : null);
   const conversationMessages = [
     ...previousMessages,
-    ...(request.prompt ? [{ role: 'user', content: request.prompt }] : []),
+    ...(request.prompt ? [{ role: 'user', content: publicValue(request.prompt) }] : []),
     { role: 'assistant', content: text },
   ];
-  return {
+  const metadata = {
     provider: provider.name,
     model: result.modelUsed,
     selected_model: result.modelUsed,
@@ -729,26 +753,29 @@ export function buildMetadata({ request, provider, result, fallbackFrom, fallbac
     ...(attachments.length ? { attachments } : {}),
     evidence_path: result.evidencePath || null,
     evidence_url: result.evidenceUrl || null,
-    conversation_messages: request.includeConversation ? conversationMessages : undefined,
+    conversation_messages: request.includeConversation ? publicValue(conversationMessages) : undefined,
     conversation_message_count: conversationMessages.length,
     captured_at: new Date().toISOString(),
     continue_chat: request.continueChat,
-    prompt: request.prompt,
+    prompt: publicValue(request.prompt),
     cache_hit: false,
   };
+  return publicValue(metadata);
 }
 
 export function buildOutput({ request, metadata, text }) {
-  const submitOnlyText = request.submitOnly ? (metadata.provider_conversation_id || text) : text;
+  const isChatGpt = metadata.provider === 'chatgpt';
+  const publicValue = value => isChatGpt ? sanitizeChatGptStreamValue(value) : value;
+  const submitOnlyText = publicValue(request.submitOnly ? (metadata.provider_conversation_id || text) : text);
+  const safeMetadata = publicValue(metadata);
   if (request.jsonOutput) {
-    const isChatGpt = metadata.provider === 'chatgpt';
     return {
       extension: 'json',
       text: JSON.stringify({
-        ...metadata,
+        ...safeMetadata,
         ...(isChatGpt ? {
-          thinking_effort: metadata.provider_state?.thinking_effort || null,
-          turn: metadata.provider_state?.structured_turn || null,
+          thinking_effort: safeMetadata.provider_state?.thinking_effort || null,
+          turn: safeMetadata.provider_state?.structured_turn || null,
         } : {}),
         response: submitOnlyText,
       }, null, 2),
@@ -1327,6 +1354,9 @@ function validateProviderRequest(provider, request) {
       throw new Error('--list-conversations conflicts with prompt, conversation, submit, final, stream, models, save, and attach options.');
     }
   }
+  if (request.listModels && (request.hasPromptInput || request.conversationTarget || request.submitOnly || request.final || request.stream || request.listConversations || request.saveConversation || request.attachConversation)) {
+    throw new Error('--list-models conflicts with prompt, conversation, submit, final, stream, list-conversations, save, and attach options.');
+  }
   if (request.submitOnly && !request.prompt) throw new Error('--submit-only requires --prompt');
   if (request.submitOnly && (request.final || request.stream)) throw new Error('--submit-only conflicts with --final and --stream');
   if (request.final && request.prompt) throw new Error('--final cannot be used with --prompt');
@@ -1548,7 +1578,7 @@ export async function runAiChat(request, deps = {}) {
         streamEmitter.emitTerminal(terminal.event, terminal.payload);
       } else emitOutput({ request: activeRequest, outputText: finalOutput.text, metadata, rawText: result.rawText, io });
       if (activeRequest.outFile) console.error(`[${provider.name}] Saved to ${activeRequest.outFile}`);
-      return { source: 'recheck', provider, result: publicProviderResult(result), metadata, output: finalOutput.text };
+      return { source: 'recheck', provider, result: publicProviderResult(provider, result), metadata, output: finalOutput.text };
     }
 
     const { result, fallbackFrom, fallbackTrail } = await runWithFallbacks({ browser, provider, request: activeRequest, conversation });
@@ -1590,7 +1620,7 @@ export async function runAiChat(request, deps = {}) {
     } else emitOutput({ request: activeRequest, outputText: finalOutput.text, metadata, rawText: result.rawText, io });
     if (activeRequest.outFile) console.error(`[${provider.name}] Saved to ${activeRequest.outFile}`);
 
-    return { source: 'live', provider, result: publicProviderResult(result), metadata, output: finalOutput.text };
+    return { source: 'live', provider, result: publicProviderResult(provider, result), metadata, output: finalOutput.text };
   } catch (error) {
     throw emitStreamError(error, activeRequest.prompt ? 'live-cdp' : 'provider-snapshot');
   } finally {

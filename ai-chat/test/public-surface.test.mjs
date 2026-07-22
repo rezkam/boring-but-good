@@ -46,11 +46,27 @@ test('public skill surface does not include local account or machine details', (
   assert.deepEqual(leaks, []);
 });
 
+test('tracked campaign plan and public AI Chat files exclude machine paths and agent attribution', () => {
+  const plan = join(ROOT, '..', 'campaign-plan-chatgpt-hybrid-provider-sessions.md');
+  const pathLeaks = [...publicFiles(), plan].flatMap(file => {
+    const text = readFileSync(file, 'utf8');
+    return [/\/Users\//, /\/home\//].filter(pattern => pattern.test(text)).map(pattern => `${relative(join(ROOT, '..'), file)} matches ${pattern}`);
+  });
+  const attributionPattern = /\b(?:Generated with|Co-authored-By|Implementer:\s*(?:Codex|Claude)|(?:Codex|Claude)\s+(?:Code|agent))\b/i;
+  const attributionLeaks = [...publicFiles(), plan]
+    .filter(file => relative(ROOT, file) !== 'test/public-surface.test.mjs')
+    .filter(file => attributionPattern.test(readFileSync(file, 'utf8')))
+    .map(file => relative(join(ROOT, '..'), file));
+  assert.deepEqual(pathLeaks, []);
+  assert.deepEqual(attributionLeaks, []);
+});
+
 test('public ChatGPT contract has no stale local or rewrite claims', () => {
   const docs = ['SKILL.md', 'references/ai-chat.md', 'references/providers.md', 'references/transport.md', 'references/orchestration.md', 'references/evaluation.md']
     .map(file => readFileSync(join(ROOT, file), 'utf8')).join('\n');
-  for (const stale of [/pro-extended/i, /gpt-5\.5/i, /chatgpt[^\n]*save-conversation/i, /chatgpt[^\n]*attach-conversation/i, /The adapter rewrites the backend request payload/i, /DOM text is only a fallback/i, /old [^\n]*medium[^\n]*high[^\n]*HTTP 422/i, /Sentinel flow/i, /imported-chatgpt/i, /launch-risks/i]) assert.doesNotMatch(docs, stale);
+  for (const stale of [/pro-extended/i, /gpt-5\.5/i, /The adapter rewrites the backend request payload/i, /DOM text is only a fallback/i, /old [^\n]*medium[^\n]*high[^\n]*HTTP 422/i, /Sentinel flow/i, /imported-chatgpt/i, /launch-risks/i]) assert.doesNotMatch(docs, stale);
   assert.match(docs, /--list-conversations/); assert.match(docs, /provider conversation ID/i); assert.match(docs, /extra-high/);
+  assert.match(docs, /ChatGPT has no local records/i); assert.match(docs, /ChatGPT has no local records and rejects `--save-conversation` and `--attach-conversation`/i);
   const source = readFileSync(join(ROOT, 'scripts/ai-chat/providers/chatgpt.mjs'), 'utf8');
   assert.doesNotMatch(source, /Fetch\.enable|Network\.setRequestInterception|continueRequest|fulfillRequest/);
   assert.doesNotMatch(source, /document\.body\.innerText|text stability|localConversationState:\s*true/);

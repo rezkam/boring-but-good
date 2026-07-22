@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -18,11 +19,12 @@ import {
   runPromptAttempt,
   runAiChat,
   sanitizeChatGptStreamValue,
+  sanitizeProviderStateForOutput,
   saveConversationReference,
   validateConversationUrlForProvider,
   writeAiChatBrowserState,
 } from '../scripts/ai-chat/module.mjs';
-import { chatgptProvider } from '../scripts/ai-chat/providers/chatgpt.mjs';
+import { chatgptProvider, createChatGptNetworkTracker } from '../scripts/ai-chat/providers/chatgpt.mjs';
 import { geminiProvider } from '../scripts/ai-chat/providers/gemini.mjs';
 import { grokProvider } from '../scripts/ai-chat/providers/grok.mjs';
 import { buildPerplexityPayload, perplexityProvider, resolvePerplexityModel } from '../scripts/ai-chat/providers/perplexity.mjs';
@@ -1543,6 +1545,61 @@ test('provider-ID reattachment streams snapshot messages then one provider-snaps
   assert.deepEqual(calls, { cache: 0, fs: 0 });
 });
 
+test('ChatGPT public output redacts credential query families in state, responses, and NDJSON', () => {
+  const queryFamilies = [
+    'auth', 'authorization', 'session', 'session_id', 'cookie', 'AWSAccessKeyId', 'GoogleAccessId',
+    'X-Goog-Credential', 'X-Goog-Signature',
+  ];
+  for (const parameter of queryFamilies) {
+    const secret = `LEAK_${parameter}`;
+    const url = `https://example.test/citation?${parameter}=${secret}&safe=ok#fragment`;
+    const state = { structured_turn: { citations: [{ url }] } };
+    const safeState = sanitizeProviderStateForOutput('chatgpt', state);
+    assert.doesNotMatch(JSON.stringify(safeState), new RegExp(secret), `${parameter} provider state`);
+    assert.match(JSON.stringify(safeState), /safe=ok#fragment/, `${parameter} provider state preserves safe URL content`);
+
+    const normalJson = buildOutput({ request: { jsonOutput: true, submitOnly: false }, metadata: { provider: 'chatgpt', provider_state: state }, text: `answer ${url}` }).text;
+    const normalPlain = buildOutput({ request: { jsonOutput: false, submitOnly: false }, metadata: { provider: 'chatgpt' }, text: `answer ${url}` }).text;
+    assert.doesNotMatch(normalJson, new RegExp(secret), `${parameter} JSON response`);
+    assert.doesNotMatch(normalPlain, new RegExp(secret), `${parameter} plain response`);
+    assert.match(normalJson, /safe=ok#fragment/, `${parameter} JSON response preserves safe URL content`);
+    assert.match(normalPlain, /safe=ok#fragment/, `${parameter} plain response preserves safe URL content`);
+
+    const lines = [];
+    const emitter = createChatGptStreamEmitter({ io: { stdout: line => lines.push(line) } });
+    emitter.emit('message', { source: 'live-cdp', message: { content: { parts: [`source ${url}`] } } });
+    assert.doesNotMatch(lines[0], new RegExp(secret), `${parameter} NDJSON`);
+    assert.match(lines[0], /safe=ok#fragment/, `${parameter} NDJSON preserves safe URL content`);
+  }
+  assert.equal(sanitizeChatGptStreamValue('API key and passwordless tokenization are prose.'), 'API key and passwordless tokenization are prose.');
+  assert.equal(sanitizeChatGptStreamValue('https://example.test/?key=harmless&safe=ok#fragment'), 'https://example.test/?key=harmless&safe=ok#fragment');
+});
+
+test('ChatGPT public surfaces redact structured and JSON-shaped signature credentials', () => {
+  const markers = ['SIGNATURE_MARKER', 'SIG_MARKER', 'AWS_MARKER', 'GOOGLE_MARKER', 'AMZ_MARKER', 'GOOG_MARKER'];
+  const secrets = { signature: markers[0], sig: markers[1], awsAccessKeyId: markers[2], googleAccessId: markers[3], xAmzCredential: markers[4], xGoogCredential: markers[5] };
+  const prose = `signature verification matters; tokenization; key=music; ${JSON.stringify(secrets)}`;
+  const state = { ...secrets, design: 'ordinary', nested: { note: prose } };
+  const safeState = sanitizeProviderStateForOutput('chatgpt', state);
+  const assertSafe = value => {
+    const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+    for (const marker of markers) assert.equal(serialized.includes(marker), false, marker);
+    assert.match(serialized, /signature verification matters; tokenization; key=music/);
+  };
+  assertSafe(safeState);
+  assert.equal(safeState.design, 'ordinary');
+
+  const metadata = { provider: 'chatgpt', provider_state: { structured_turn: { messages: [{ content: { parts: [prose] } }] }, ...state } };
+  assertSafe(buildOutput({ request: { jsonOutput: true, submitOnly: false }, metadata, text: prose }).text);
+  assertSafe(buildOutput({ request: { jsonOutput: false, submitOnly: false }, metadata, text: prose }).text);
+
+  const lines = [];
+  const emitter = createChatGptStreamEmitter({ io: { stdout: line => lines.push(line) } });
+  emitter.emit('message', { source: 'live-cdp', message: { ...secrets, content: { parts: [prose] } } });
+  emitter.emitTerminal('complete', { source: 'live-cdp', response: prose, turn: { ...secrets, messages: [{ content: { parts: [prose] } }] } });
+  for (const line of lines) assertSafe(line);
+});
+
 test('ChatGPT stream emitter keeps its envelope core-owned and preserves prose while redacting credentials', () => {
   const lines = [];
   const emitter = createChatGptStreamEmitter({ io: { stdout: line => lines.push(line) }, now: () => '2026-07-22T00:00:00.000Z' });
@@ -1590,6 +1647,45 @@ test('terminal reconciliation carries a provider id even without an earlier sess
   await runAiChat(buildAiChatRequest({ providerName: 'chatgpt', prompt: 'hello', stream: true }), { provider, cache: noCache(), io: { stdout: line => lines.push(line) } });
   const terminal = JSON.parse(lines[0]);
   assert.equal(terminal.event, 'complete'); assert.equal(terminal.provider_conversation_id, 'provider_123');
+});
+
+test('ChatGPT stream tracker turns an asynchronous private transcript append failure into one error terminal', async () => {
+  class FakeCdpSession extends EventEmitter {
+    async send(method) {
+      if (method === 'Network.streamResourceContent') return { bufferedData: Buffer.from('data: {"conversation_id":"provider_123"}\\n\\n').toString('base64') };
+      return {};
+    }
+    async detach() {}
+  }
+  const lines = []; const unhandled = [];
+  const onUnhandled = reason => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  const provider = {
+    name: 'chatgpt', defaultModel: 'instant', capabilities: { localConversationState: false, cachePolicy: 'none', streamFormat: 'ndjson' }, runRequiresBrowser: () => false,
+    async run({ onStreamEvent }) {
+      const client = new FakeCdpSession();
+      const tracker = await createChatGptNetworkTracker({ page: { target: () => ({ createCDPSession: async () => client }) }, selectedModel: 'instant', onStreamEvent });
+      client.emit('Network.requestWillBeSent', { requestId: 'request', request: { method: 'POST', url: 'https://chatgpt.com/backend-api/f/conversation' } });
+      client.emit('Network.responseReceived', { requestId: 'request', response: { status: 200, mimeType: 'text/event-stream' } });
+      await new Promise(resolve => setImmediate(resolve));
+      try {
+        return await chatgptProvider.waitForResponse({ page: { url: () => 'https://chatgpt.com/' }, timeoutMs: 100, networkTracker: tracker, selectedModel: 'instant', request: {}, sleepFn: async () => {} });
+      } finally {
+        await tracker.dispose();
+      }
+    },
+  };
+  const request = buildAiChatRequest({ providerName: 'chatgpt', prompt: 'hello', stream: true, outFile: 'private.ndjson' });
+  try {
+    await assert.rejects(() => runAiChat(request, { provider, cache: noCache(), io: { initializePrivateStreamFile() {}, appendPrivateStreamFile() { throw new Error('disk failure'); }, stdout: line => lines.push(line) } }), /Failed to emit ChatGPT stream progress/);
+    await new Promise(resolve => setImmediate(resolve));
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+  const events = lines.map(line => JSON.parse(line));
+  assert.deepEqual(events.map(event => event.event), ['error']);
+  assert.equal(events[0].code, 'stream_file_error'); assert.equal(events[0].complete, false);
+  assert.equal(unhandled.length, 0);
 });
 
 test('ChatGPT stream transcript appends before stdout and turns an append failure into one error terminal', () => {
@@ -1701,6 +1797,23 @@ test('default ChatGPT stream file IO creates private output without sidecars', (
     assert.equal(existsSync(`${output}.meta.json`), false);
     assert.equal(existsSync(`${output}.raw.txt`), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('ChatGPT list-models conflicts reject before browser, cache, or conversation storage', async () => {
+  const provider = { name: 'chatgpt', capabilities: { streamFormat: 'ndjson', localConversationState: false, supportsConversationListing: true }, listModels: () => assert.fail('list models must not run') };
+  for (const conflict of [{ inlinePrompt: 'x' }, { conversationTarget: 'provider_1' }, { submitOnly: true }, { final: true }, { stream: true }, { listConversations: true }, { saveConversation: 'local' }, { attachConversation: 'provider_1' }]) {
+    const lines = [];
+    const request = buildAiChatRequest({ providerName: 'chatgpt', listModels: true, ...conflict });
+    await assert.rejects(() => runAiChat(request, {
+      provider, startChrome: () => assert.fail('browser must not start'), connectBrowser: () => assert.fail('browser must not connect'),
+      cache: { read: () => assert.fail('cache read'), write: () => assert.fail('cache write') },
+      fs: new Proxy({}, { get: () => () => assert.fail('conversation storage used') }), io: { stdout: line => lines.push(line) },
+    }), conflict.listConversations ? /list-conversations conflicts/ : /list-models conflicts/);
+    if (conflict.stream) assert.deepEqual(lines.map(line => JSON.parse(line).event), ['error']);
+    else assert.deepEqual(lines, []);
+  }
+  const result = await runAiChat(buildAiChatRequest({ providerName: 'chatgpt', listModels: true, verifyModels: true, verifyModelTimeoutSeconds: 7, jsonOutput: true }), { provider: { ...provider, listModels: () => [] }, io: { stdout: () => {} } });
+  assert.equal(result.source, 'models');
 });
 
 test('ChatGPT listing conflicts reject before browser, cache, or conversation storage', async () => {
