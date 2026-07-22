@@ -3,62 +3,171 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "Use my logged-in browser to ask Perplexity Deep Research for a sourced answer about the latest AI model evaluation trends, save the conversation as eval-research, and return JSON metadata.",
-      "expected_output": "Uses the ai-chat skill with provider perplexity, model perplexity/deep-research, long timeout, save-conversation eval-research, JSON output, and metadata including provider state.",
+      "prompt": "Without executing a provider request, evaluate the safe command contract: Use my logged-in browser to ask Perplexity Deep Research for a sourced answer about the latest AI model evaluation trends, save the conversation as eval-research, and return JSON metadata.",
+      "expected_output": "Validates the ai-chat skill with provider perplexity, model perplexity/deep-research, long timeout, save-conversation eval-research, JSON output, and metadata including provider state.",
       "files": [],
       "expectations": [
-        "The run uses scripts/ai-chat.mjs --provider perplexity --model perplexity/deep-research.",
-        "The run uses --save-conversation eval-research and --json.",
-        "The output includes provider_state.backend_uuid or a clear provider error.",
-        "The output includes model, requested_model, complete, captured_at, and response."
+        "Deterministic or authenticated read-only evaluation: The command shape uses scripts/ai-chat.mjs --provider perplexity --model perplexity/deep-research.",
+        "Deterministic or authenticated read-only evaluation: The command shape uses --save-conversation eval-research and --json.",
+        "Deterministic or authenticated read-only evaluation: The output includes provider_state.backend_uuid or a clear provider error.",
+        "Deterministic or authenticated read-only evaluation: The output includes model, requested_model, complete, captured_at, and response."
       ]
     },
     {
       "id": 2,
-      "prompt": "Continue the Perplexity conversation eval-research and ask a follow-up without resending the full previous answer. Return JSON.",
-      "expected_output": "Uses --conversation eval-research so the saved provider thread is continued by backend uuid and read-write token.",
+      "prompt": "Without executing a provider request, evaluate the safe command contract: Continue the Perplexity conversation eval-research and ask a follow-up without resending the full previous answer. Return JSON.",
+      "expected_output": "Validates --conversation eval-research so the saved provider thread is continued by backend uuid and read-write token.",
       "files": [],
       "expectations": [
-        "The run uses scripts/ai-chat.mjs --provider perplexity --conversation eval-research.",
-        "The output uses the same saved conversation id.",
-        "The provider state is preserved or updated.",
-        "The run does not replay full chat history manually."
+        "Deterministic or authenticated read-only evaluation: The command shape uses scripts/ai-chat.mjs --provider perplexity --conversation eval-research.",
+        "Deterministic or authenticated read-only evaluation: The output uses the same saved conversation id.",
+        "Deterministic or authenticated read-only evaluation: The provider state is preserved or updated.",
+        "Deterministic or authenticated read-only evaluation: The run does not replay full chat history manually."
       ]
     },
     {
       "id": 3,
-      "prompt": "List and live-verify the available Perplexity models for my current account, including thinking levels, Pro or Max tier, default model, task defaults, and whether chats save to library by default. Return JSON.",
-      "expected_output": "Uses --list-models --verify-models for provider perplexity and returns the WebUI model registry with model ids, display names, mode, tier, thinking metadata, history policy, task defaults, and account availability.",
+      "prompt": "Without executing a provider request, evaluate the safe command contract: List and inspect deterministically the available Perplexity models for my current account, including thinking levels, Pro or Max tier, default model, task defaults, and whether chats save to library by default. Return JSON.",
+      "expected_output": "Validates --list-models for provider perplexity and returns the network-contract registry with model ids, display names, mode, tier, Thinking metadata, history policy, task defaults, and account availability.",
       "files": [],
       "expectations": [
-        "The run uses scripts/ai-chat.mjs --provider perplexity --list-models --verify-models --json.",
-        "The output includes perplexity/deep-research.",
-        "The output includes OpenAI, Gemini, Anthropic, Moonshot, and NVIDIA model ids.",
-        "The output includes min_tier, mode, thinking, thinking_level, available, default_model, task_models, and history_policy."
+        "Deterministic or authenticated read-only evaluation: The command shape uses scripts/ai-chat.mjs --provider perplexity --list-models --json.",
+        "Deterministic or authenticated read-only evaluation: The output includes perplexity/deep-research and the captured openai/gpt-5.6-terra Thinking pair.",
+        "Deterministic or authenticated read-only evaluation: The output includes only captured or live-verified network identifiers and includes OpenAI GPT-5.6 Terra, Perplexity Sonar 2, and NVIDIA Nemotron 3 Ultra Thinking.",
+        "Deterministic or authenticated read-only evaluation: The output includes min_tier, mode, thinking, thinking_level, available, default_model, task_models, and history_policy."
       ]
     },
     {
       "id": 4,
-      "prompt": "Use Grok Fast to start a thread about oil-market scenarios, save it as oil-scenarios, then continue the same Grok thread with a follow-up. Return JSON and screenshot evidence.",
-      "expected_output": "Uses Grok browser UI, verifies Fast model, saves and reopens the conversation URL, and captures a screenshot showing the continued thread.",
+      "prompt": "Without executing a provider request, evaluate the safe command contract: Use Grok Fast to start a thread about oil-market scenarios, save it as oil-scenarios, then continue the same Grok thread with a follow-up. Return JSON and private evidence handling.",
+      "expected_output": "Validates Grok browser UI, verifies Fast model, saves and reopens the conversation URL, and captures a private evidence artifact showing the continued thread.",
       "files": [],
       "expectations": [
-        "The first run uses --provider grok --model fast --save-conversation oil-scenarios.",
-        "The follow-up uses --conversation oil-scenarios.",
-        "The output includes a stable conversation_url.",
-        "A screenshot path is included or saved under /tmp."
+        "Deterministic or authenticated read-only evaluation: The command shape uses --provider grok --model fast --save-conversation oil-scenarios.",
+        "Deterministic or authenticated read-only evaluation: The follow-up command shape uses --conversation oil-scenarios.",
+        "Deterministic or authenticated read-only evaluation: The output includes a stable conversation_url.",
+        "Deterministic or authenticated read-only evaluation: A private evidence artifact path is included or saved under <private-output-dir>."
       ]
     },
     {
       "id": 5,
-      "prompt": "For Gemini, use the Browser Tools managed browser started with the Gemini-capable profile to discover and live-verify account model choices, then run a reasoning task using the task default. Report JSON and do not save to Gemini history unless explicitly requested.",
-      "expected_output": "Uses --provider gemini --list-models --verify-models with managed-browser cookies, reports account-specific models from the Gemini RPC, then uses --task reasoning for a temporary chat.",
+      "prompt": "Without executing a provider request, evaluate the read-only Gemini model-listing contract through the Browser Tools managed browser. Report JSON metadata without sending a prompt.",
+      "expected_output": "Validates --provider gemini --list-models --json, reports account-specific models from the same-origin RPC when available, and otherwise reports a safe discovery error.",
       "files": [],
       "expectations": [
-        "The model list run uses scripts/ai-chat.mjs --provider gemini --list-models --verify-models --json with Browser Tools managed-browser cookies.",
-        "The output includes account_specific true or a clear discovery error.",
-        "The output includes default_model, task_models, history_policy, available, and verification.status.",
-        "The reasoning task output has model_task reasoning, is_temporary true, saved_to_library false, and a non-empty chrome_profile value."
+        "Deterministic or authenticated read-only evaluation: The command shape uses scripts/ai-chat.mjs --provider gemini --list-models --json.",
+        "Deterministic or authenticated read-only evaluation: The output uses auth_source managed-browser-same-origin and contains no profile or cookie fields.",
+        "Deterministic or authenticated read-only evaluation: The output includes account_specific true or a clear discovery error.",
+        "Deterministic or authenticated read-only evaluation: The output includes default_model, task_models, history_policy, available, and verification.status."
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Without executing a provider request, evaluate the safe command contract: Ask Perplexity with GPT-5.6 Terra Thinking enabled, stream the answer, and prove from metadata that it used the network-only path. Do not parse or automate the Perplexity page UI.",
+      "expected_output": "Validates --provider perplexity --model openai/gpt-5.6-terra --thinking --stream --json. The selected model is the captured Thinking variant and provider state proves browser-network-sse with no DOM processing.",
+      "files": [],
+      "expectations": [
+        "Deterministic or authenticated read-only evaluation: The run selects openai/gpt-5.6-terra with --thinking and reports selected_model openai/gpt-5.6-terra-thinking.",
+        "Deterministic or authenticated read-only evaluation: The output reports provider_state.transport browser-network-sse, network_only true, and dom_processing false.",
+        "Deterministic or authenticated read-only evaluation: The stream completes from SSE state and does not use rendered HTML, selectors, element clicks, typing, or DOM fallback.",
+        "Deterministic or authenticated read-only evaluation: No Perplexity cookie, owner token, or read-write token appears in public output."
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "Without executing a provider request, evaluate the safe command contract: Ask Perplexity this question in Incognito so it is not saved to my provider history. Return JSON that proves the private mode was accepted, and do not use the page UI at runtime.",
+      "expected_output": "Validates --provider perplexity --incognito --json through browser-network-sse. Safe provider state reports explicit Incognito, provider privacy state, expiry, and no history save.",
+      "files": [],
+      "expectations": [
+        "Deterministic or authenticated read-only evaluation: The command shape uses scripts/ai-chat.mjs --provider perplexity --incognito --json.",
+        "Deterministic or authenticated read-only evaluation: The request sends params.is_incognito true and does not send a separate Incognito mode API call.",
+        "Deterministic or authenticated read-only evaluation: Provider state reports is_incognito true, incognito_explicit true, privacy_state INCOGNITO, ephemeral true, saved_to_library false, and provider expiry metadata; the local response cache is bypassed.",
+        "Deterministic or authenticated read-only evaluation: The run rejects --incognito together with --save-to-library or --space-uuid before network use.",
+        "Deterministic or authenticated read-only evaluation: No rendered HTML, element interaction, DOM fallback, cookie value, owner token, or read-write token appears in the runtime path or public output."
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "Without executing a provider request, evaluate the safe command contract: Use Perplexity's GPT-5.6 Terra Thinking model to research a current company development. Do not request Incognito or save-to-library. Return JSON that proves the ordinary request persists to provider history without using the Perplexity page UI at runtime.",
+      "expected_output": "Validates --provider perplexity --model openai/gpt-5.6-terra --thinking --json through browser-network-sse. The selected model is the captured Thinking variant and safe provider state proves the request was persistent by default.",
+      "files": [],
+      "expectations": [
+        "Deterministic or authenticated read-only evaluation: The run omits both --incognito and --save-to-library.",
+        "Deterministic or authenticated read-only evaluation: The request sends params.is_incognito false.",
+        "Deterministic or authenticated read-only evaluation: Provider state reports is_incognito false, incognito_explicit false, ephemeral false, and saved_to_library true.",
+        "Deterministic or authenticated read-only evaluation: The response-side selected model is openai/gpt-5.6-terra-thinking and its identifier is verified against gpt56_terra_thinking.",
+        "Deterministic or authenticated read-only evaluation: No rendered HTML, element interaction, DOM fallback, cookie value, owner token, or read-write token appears in the runtime path or public output."
+      ]
+    },
+    {
+      "id": 9,
+      "prompt": "Without executing a provider request, evaluate the safe command contract: Ask Perplexity a new persistent question, then continue the exact provider thread with a follow-up. Use the returned Perplexity thread URL, not rendered page controls or an exported cookie. Return JSON for both turns.",
+      "expected_output": "The first response exposes its backend UUID, canonical https://www.perplexity.ai/search/<uuid> URL, and safe thread URL. The follow-up accepts that URL through --conversation and sends only the new user turn using query_source followup.",
+      "files": [],
+      "expectations": [
+        "Deterministic or authenticated read-only evaluation: A completed new Perplexity response includes provider_state.backend_uuid and provider_state.thread_url, plus matching final_url and conversation_url.",
+        "Deterministic or authenticated read-only evaluation: The returned canonical URL has the form https://www.perplexity.ai/search/<backend_uuid>.",
+        "Deterministic or authenticated read-only evaluation: A direct --conversation <perplexity-thread-url> follow-up extracts the backend UUID and sends last_backend_uuid with query_source followup.",
+        "Deterministic or authenticated read-only evaluation: A saved local conversation retains the private read-write token when the provider supplies it, but public JSON, sidecars, cache metadata, stderr, and URLs never expose the token.",
+        "Deterministic or authenticated read-only evaluation: Both turns use browser-network-sse without rendered HTML, element interaction, DOM fallback, or cookie extraction."
+      ]
+    },
+    {
+      "id": 10,
+      "prompt": "Without executing a provider request, evaluate the safe command contract: Draft, but do not execute, the ChatGPT command to continue provider conversation ID example-provider-id with a follow-up, preserving its current model selection and returning JSON.",
+      "expected_output": "Provides a provider-ID-only command and explains that the visible UI performs the single write while network reads verify the changed branch and strict quorum.",
+      "files": [],
+      "expectations": [
+        "Deterministic or authenticated read-only evaluation: Uses --provider chatgpt --conversation example-provider-id --prompt and --json.",
+        "Deterministic or authenticated read-only evaluation: Does not use --save-conversation, --attach-conversation, a local alias, or a provider write.",
+        "Deterministic or authenticated read-only evaluation: States that omitting --model preserves the existing UI selection and reports observed model verification."
+      ]
+    },
+    {
+      "id": 11,
+      "prompt": "Without executing a provider request, evaluate the safe command contract: List my ChatGPT conversations read-only, with at most 20 results, and return the safe structured JSON contract.",
+      "expected_output": "Validates the bounded read-only listing command and returns only safe provider conversation fields.",
+      "files": [],
+      "expectations": [
+        "Deterministic or authenticated read-only evaluation: Uses --provider chatgpt --list-conversations --conversation-limit 20 --json.",
+        "Deterministic or authenticated read-only evaluation: Does not include credentials, headers, mapping, snippets, account data, or arbitrary provider fields.",
+        "Deterministic or authenticated read-only evaluation: Does not submit, archive, star, delete, or otherwise mutate a provider conversation."
+      ]
+    },
+    {
+      "id": 12,
+      "prompt": "Without executing a provider request, evaluate the safe command contract: Draft, do not execute, a ChatGPT Pro submit-only detach command for a new prompt.",
+      "expected_output": "Drafts --provider chatgpt --model pro --submit-only without execution.",
+      "files": [],
+      "expectations": [
+        "Deterministic or authenticated read-only evaluation: Explicitly says draft/do not execute."
+      ]
+    },
+    {
+      "id": 13,
+      "prompt": "Without executing a provider request, evaluate the safe command contract: Draft, do not execute, an explicit High ChatGPT provider-ID continuation command.",
+      "expected_output": "Validates --conversation <provider-id> --model high and --json without local save state.",
+      "files": [],
+      "expectations": [
+        "Deterministic or authenticated read-only evaluation: Explicitly says draft/do not execute."
+      ]
+    },
+    {
+      "id": 14,
+      "prompt": "Without executing a provider request, evaluate the safe command contract: Read-only: show the final JSON command for an existing ChatGPT provider conversation ID.",
+      "expected_output": "Validates --conversation <provider-id> --final --json and does not submit.",
+      "files": [],
+      "expectations": [
+        "Deterministic or authenticated read-only evaluation: No write is requested."
+      ]
+    },
+    {
+      "id": 15,
+      "prompt": "Without executing a provider request, evaluate the safe command contract: Read-only: show the NDJSON reattach/watch command for an existing ChatGPT provider conversation ID.",
+      "expected_output": "Validates --conversation <provider-id> --stream and describes one terminal event.",
+      "files": [],
+      "expectations": [
+        "Deterministic or authenticated read-only evaluation: No write is requested."
       ]
     }
   ]

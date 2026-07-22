@@ -10,7 +10,11 @@ function noCache() {
 function fakeGeminiBrowser() {
   const page = {
     url: () => 'https://gemini.google.com/app',
-    cookies: async () => [{ name: '__Secure-1PSID', value: 'psid' }],
+    evaluate: async (fn, args) => {
+      const previousLocation = globalThis.location;
+      globalThis.location = { hostname: 'gemini.google.com' };
+      try { return await fn(args); } finally { globalThis.location = previousLocation; }
+    },
   };
   return { pages: async () => [page] };
 }
@@ -131,6 +135,8 @@ test('Gemini native continuation error 1097 uses local transcript fallback and r
     assert.equal(emitted.response, 'fallback answer');
     assert.equal(result.metadata.provider_state.local_transcript_fallback, true);
     assert.equal(emitted.provider_state.local_transcript_fallback, true);
+    assert.equal(emitted.provider_state.auth_source, 'managed-browser-same-origin');
+    assert.doesNotMatch(JSON.stringify(emitted), /chrome_profile|cookie_source|cookie_extraction|psid/i);
     assert.deepEqual(emitted.provider_state.native_continuation_error, {
       message: 'Gemini Web returned error 1097',
       error_code: 1097,

@@ -1,46 +1,94 @@
-# Perplexity WebUI API
+# Perplexity browser network transport
 
-AI Chat uses the same durable path as `perplexity-webui-scraper` for Perplexity:
+Perplexity has one supported AI Chat transport: authenticated HTTP and SSE inside the AI Chat owned Browser Tools browser.
 
-- authenticate with the Browser Tools managed browser session cookie
-- send prompts to `/rest/sse/perplexity_ask`
-- parse Server-Sent Events instead of scraping rendered DOM
-- keep backend conversation UUID and private read-write token for follow-up turns
-- expose model ids, direct tool aliases, research options, files, Spaces, streaming, and deep research through the AI Chat command shape
+The adapter:
 
-Browser Tools uses a copied profile. AI Chat reads the Perplexity session cookie from the AI Chat owned managed browser only, first from `https://www.perplexity.ai`, then from `https://perplexity.ai`. It does not read `PERPLEXITY_SESSION_TOKEN` or `PPLX_SESSION_TOKEN`, and it keeps the cookie value out of JSON output, sidecars, cache metadata, and logs.
+1. Starts a new AI Chat browser headless when Perplexity is the provider that creates it. Browser Tools uses the configured `ai-chat` task profile, or Chrome profile `Default` as fallback.
+2. Opens a dedicated background tab at `https://www.perplexity.ai/api/auth/session`. This JSON endpoint gives the request code a same-origin execution context without loading or parsing the Perplexity application UI.
+3. Validates the logged-in account through the JSON response.
+4. Sends uploads and `/rest/sse/perplexity_ask` requests with browser `fetch`, `credentials: "include"`, and the managed profile's browser credentials.
+5. Parses the SSE protocol, including incremental `diff_block` patches and the final schematized response.
+6. Waits for `status: "COMPLETED"` or `final_sse_message: true`. A preliminary `final: true` event with `status: "PENDING"` is not completion.
 
-If normal Chrome profile `Default` is logged in to Perplexity but the AI Chat managed browser is logged out, stop the AI Chat owned browser with Browser Tools and `--clean`, then rerun AI Chat so Browser Tools creates a fresh copy. If another profile has the login, configure the Browser Tools task profile `ai-chat`. Do not attach to main Chrome or another agent's browser.
+There is no Perplexity UI transport, rendered HTML parser, element selector, typing path, click path, or DOM response fallback. The provider object does not expose the old UI lifecycle methods. `provider_state` reports `transport: "browser-network-sse"`, `network_only: true`, and `dom_processing: false`.
+
+AI Chat never reads or exports the Perplexity session cookie. It also ignores `PERPLEXITY_SESSION_TOKEN` and `PPLX_SESSION_TOKEN`. Browser credentials stay inside managed Chrome. Continuation read-write tokens still arrive through SSE and are stored only in private local conversation records.
+
+If Chrome profile `Default` is logged in to Perplexity but the managed browser is logged out, stop the AI Chat owned browser with Browser Tools and `--clean`, then rerun so Browser Tools copies current profile state. If another Chrome profile has the login, configure the Browser Tools task profile `ai-chat`. Do not attach to main Chrome or another agent's browser.
+
+## Runtime contract
+
+- endpoint: `POST https://www.perplexity.ai/rest/sse/perplexity_ask`
+- requests use `use_schematized_api: true`; stream text uses block patches
+- completion requires `status: "COMPLETED"` or `final_sse_message: true`; a `final: true` event while `status` is `PENDING` is not terminal
+- GPT-5.6 Terra identifiers are `gpt56_terra` and `gpt56_terra_thinking`; Sonar 2 uses `experimental`
+- explicit Incognito sends `is_incognito: true` with `query_source: "home"`; its final state can include `privacy_state`, expiry, reconnectability, and thread access
+
+Do not commit private provider data, including HAR files, SSE streams, screenshots, account availability, cookies, owner tokens, conversation text, backend UUIDs, or read-write tokens.
 
 ## Supported capabilities
 
-| Capability | How |
+| Capability | Command or behavior |
 | --- | --- |
 | New prompt | `scripts/ai-chat.mjs --provider perplexity --prompt "..." --json` |
-| Continue thread | Save with `--save-conversation`, continue with `--conversation` |
+| Continue thread | Use the returned `conversation_url` directly with `--conversation`, or save with `--save-conversation` and use the local id |
 | Attach thread | `--attach-conversation <backend-uuid-or-url> --save-conversation <local-id>` |
+| Select model | `--model <id-or-alias>` |
+| Select Thinking variant | `--model openai/gpt-5.6-terra --thinking`, or select `openai/gpt-5.6-terra-thinking` directly |
 | List models | `scripts/ai-chat.mjs --provider perplexity --list-models --json` |
-| Verify account-accepted models | `scripts/ai-chat.mjs --provider perplexity --list-models --verify-models --verify-model-timeout 180 --json` |
-| Deep research | `--model perplexity/deep-research` or `--task deep_research`; uses a 3600 second timeout unless `--timeout` is explicit |
-| Source focus | `--source-focus web|academic|social|finance|all`; repeat it or pass comma-separated values |
+| Verify account acceptance | Requires explicit user authorization: `--verify-models --verify-model-timeout 180` submits provider prompts and is excluded from automated tests and evals |
+| Deep research | `--model perplexity/deep-research` or `--task deep_research`; default timeout is 3600 seconds |
+| Source focus | `--source-focus web|academic|social|finance|all`; repeat it or use commas |
 | Search focus | `--search-focus web|writing` |
-| Recency filter | `--time-range all|day|week|month|year` |
-| Citation mode | `--citation-mode clean|markdown|default` |
-| File attachments | Repeat `--file <path>` for local files. Files are validated before network use |
-| Spaces | `--space-uuid <uuid>` or `--space <uuid>` with a user-provided Perplexity Space id |
-| Streaming | `--stream` writes progress deltas to stderr and still emits final JSON or markdown output |
-| Save to library | Default is incognito. Use `--save-to-library` to set `params.is_incognito=false` |
-| Language and timezone | `--language <tag>` and `--timezone <zone>` are passed into the WebUI API payload |
-| Auth check | `--verify-session` validates the Perplexity auth session without printing the cookie |
+| Recency | `--time-range all|day|week|month|year` |
+| Citations | `--citation-mode clean|markdown|default` |
+| Files | Repeat `--file <path>`; paths and size limits are validated before network use |
+| Spaces | `--space-uuid <uuid>` or `--space <uuid>` with a user-provided Space id |
+| Streaming | `--stream` writes incremental answer deltas to stderr and still emits final structured output |
+| Incognito | `--incognito`; explicit private session, not saved to provider history, with provider expiry metadata |
+| Save to library | Normal requests persist to provider history. `--save-to-library` remains an explicit persistence flag and conflicts with `--incognito` |
+| Language and timezone | `--language <tag>` and `--timezone <zone>` |
+| Auth check | `--verify-session`; normal requests also validate auth before submission |
 
 ## Examples
 
 ```bash
-# Current research with deterministic citation links and saved continuation state.
+# Explicit Incognito. The request is not saved to provider history.
 scripts/ai-chat.mjs \
   --provider perplexity \
-  --model openai/gpt-5.4-thinking \
-  --prompt-file /tmp/question.md \
+  --incognito \
+  --prompt "Answer this private question" \
+  --json
+
+# Continue the provider thread from the `conversation_url` in a prior JSON response.
+scripts/ai-chat.mjs \
+  --provider perplexity \
+  --conversation https://www.perplexity.ai/search/123e4567-e89b-12d3-a456-426614174000 \
+  --prompt "What changes your conclusion?" \
+  --json
+
+# Non-thinking model identifier.
+scripts/ai-chat.mjs \
+  --provider perplexity \
+  --model openai/gpt-5.6-terra \
+  --prompt "Give a concise current summary" \
+  --json
+
+# Same visible model with Thinking enabled.
+scripts/ai-chat.mjs \
+  --provider perplexity \
+  --model openai/gpt-5.6-terra \
+  --thinking \
+  --prompt "Compare the evidence and explain uncertainty" \
+  --stream \
+  --json
+
+# Research filters and private continuation state.
+scripts/ai-chat.mjs \
+  --provider perplexity \
+  --task reasoning \
+  --prompt-file ./policy.md \
   --source-focus all \
   --search-focus web \
   --time-range week \
@@ -50,7 +98,6 @@ scripts/ai-chat.mjs \
   --save-conversation policy-research \
   --json
 
-# Follow up using backend UUID plus private read-write token when available.
 scripts/ai-chat.mjs \
   --provider perplexity \
   --conversation policy-research \
@@ -58,34 +105,32 @@ scripts/ai-chat.mjs \
   --save-conversation policy-research \
   --json
 
-# Attach a known backend UUID to a reusable local session.
-scripts/ai-chat.mjs \
-  --provider perplexity \
-  --attach-conversation 123e4567-e89b-12d3-a456-426614174000 \
-  --save-conversation attached-policy-research \
-  --json
-
 # Deep research.
-scripts/ai-chat.mjs --provider perplexity --task deep_research --prompt-file /tmp/question.md --json
+scripts/ai-chat.mjs --provider perplexity --task deep_research --prompt-file ./deep.md --json
 
-# File analysis in a Space with streaming progress and provider history.
+# File, Space, streaming, and provider library history.
 scripts/ai-chat.mjs \
   --provider perplexity \
   --prompt "Summarize this report and list open questions" \
-  --file /tmp/report.pdf \
+  --file ./report.pdf \
   --space-uuid 123e4567-e89b-12d3-a456-426614174000 \
   --stream \
   --save-to-library \
   --json
 ```
 
-## Model registry
+## Model registry and Thinking
 
-`--list-models --json` returns the default model, suggested task models, history policy, and the exposed Pro-tier bundled model registry from `perplexity-webui-scraper`. Max-tier models are filtered out to match the standalone Perplexity skill.
+`--list-models --json` returns the network-contract model registry, default model, task suggestions, Thinking metadata, account tier requirements, history policy, and aliases.
 
-Each model includes `id`, `name`, `identifier`, `tool_name`, `min_tier`, `mode`, `provider_family`, `thinking`, `thinking_level`, `account_tier`, and `selected_by` aliases, including direct tool aliases like `pplx_gpt54_thinking`.
+The supported pair is:
 
-Add `--verify-models` to send a tiny incognito prompt to every exposed model and mark `available`, `verified_at`, `verification.status`, `verification.accepted`, and `verification.rejected` for the current account. The top-level `verification` object includes accepted and rejected counts and model ids for that live run.
+| AI Chat model | Perplexity request identifier | Thinking |
+| --- | --- | --- |
+| `openai/gpt-5.6-terra` | `gpt56_terra` | disabled |
+| `openai/gpt-5.6-terra-thinking` | `gpt56_terra_thinking` | enabled |
+
+`--thinking` resolves the base GPT-5.6 Terra model to its Thinking variant. It fails before network use when a selected model has no supported Thinking variant. This avoids guessing an identifier.
 
 Task defaults:
 
@@ -94,29 +139,14 @@ Task defaults:
 | `quick_web` | `perplexity/best` |
 | `deep_research` | `perplexity/deep-research` |
 | `sonar` | `perplexity/sonar-2` |
-| `reasoning` | `openai/gpt-5.4-thinking` |
-| `coding` | `anthropic/claude-sonnet-4.6` |
+| `reasoning` | `openai/gpt-5.6-terra-thinking` |
+| `coding` | `openai/gpt-5.6-terra` |
 
-Known model ids:
+Account acceptance changes by plan, region, and rollout. `--list-models --json` is read-only. `--verify-models` performs private Incognito provider prompts for the current account only after explicit user authorization, and it is never part of automated tests or evals. A rejected requested model remains visible as an error. Do not silently replace it with another model.
 
-- `perplexity/best`
-- `perplexity/deep-research`
-- `perplexity/sonar-2`
-- `openai/gpt-5.4`
-- `openai/gpt-5.4-thinking`
-- `google/gemini-3.1-pro-thinking-low`
-- `google/gemini-3.1-pro-thinking-high`
-- `anthropic/claude-sonnet-4.6`
-- `anthropic/claude-sonnet-4.6-thinking`
-- `moonshot/kimi-k2.6-instant`
-- `moonshot/kimi-k2.6-thinking`
-- `nvidia/nemotron-3-super-thinking`
+## Request payload
 
-Account tier matters. AI Chat exposes the same Pro-tier model set as the standalone Perplexity skill and preserves each model's `min_tier` in `account_tier.required`. Live `--verify-models` tells whether the current account accepts each exposed model and sets `account_tier.verified` to `accepted` or `rejected`. If a model fails, report the error and retry with `perplexity/best` only when the user wants a fallback.
-
-## Request payload model
-
-A normal Perplexity ask payload contains:
+A new request follows this shape. UUID values are generated for each request.
 
 ```json
 {
@@ -124,70 +154,101 @@ A normal Perplexity ask payload contains:
     "attachments": [],
     "language": "en-US",
     "timezone": null,
-    "client_coordinates": null,
-    "sources": ["web"],
-    "model_preference": "default",
-    "mode": "search",
     "search_focus": "internet",
-    "search_recency_filter": null,
-    "is_incognito": true,
-    "use_schematized_api": false,
-    "local_search_enabled": false,
+    "sources": ["web"],
+    "frontend_uuid": "<generated-uuid>",
+    "mode": "copilot",
+    "model_preference": "gpt56_terra_thinking",
+    "is_related_query": false,
+    "is_sponsored": false,
+    "frontend_context_uuid": "<generated-uuid>",
     "prompt_source": "user",
-    "send_back_text_in_streaming_api": true,
-    "version": "2.18"
+    "query_source": "home",
+    "is_incognito": false,
+    "time_from_first_type": 0,
+    "local_search_enabled": false,
+    "use_schematized_api": true,
+    "send_back_text_in_streaming_api": false,
+    "supported_block_use_cases": ["answer_modes", "diff_blocks", "workflow_steps"],
+    "client_coordinates": null,
+    "mentions": [],
+    "dsl_query": "question",
+    "skip_search_enabled": true,
+    "is_nav_suggestions_disabled": false,
+    "source": "default",
+    "always_search_override": false,
+    "override_no_search": false,
+    "should_ask_for_mcp_tool_confirmation": true,
+    "supports_tool_approval_modal": true,
+    "browser_agent_allow_once_from_toggle": false,
+    "force_enable_browser_agent": false,
+    "supported_features": ["browser_agent_permission_banner_v1.1"],
+    "extended_context": false,
+    "version": "2.18",
+    "rum_session_id": "<generated-uuid>"
   },
   "query_str": "question"
 }
 ```
 
-For follow-up turns, include only the new user prompt plus backend continuation state:
+Recency, Space, file, and continuation fields are added only when needed. Each created thread maps its returned `backend_uuid` to the canonical URL `https://www.perplexity.ai/search/<backend_uuid>`, which AI Chat returns as both `final_url` and `conversation_url`. A direct `--conversation` URL extracts the UUID and sends only the new user turn plus `last_backend_uuid` and `query_source: "followup"`. A saved local conversation also retains the private `read_write_token` when supplied, which is the reliable continuation path across later agent turns. Spaces add `target_collection_uuid`, `target_thread_access_level`, and non-incognito history behavior.
+
+AI Chat persists ordinary requests to provider history by default. `--incognito` records an explicit private request and bypasses the local AI Chat response cache. `--save-to-library` remains an explicit persistence flag for compatibility. Explicit output files or local conversation records are still written when the user asks for them. `--incognito` conflicts with `--save-to-library` and `--space-uuid`; both conflicts fail before network use instead of silently changing history behavior.
+
+## Streaming parser
+
+The current stream sends incremental answer text as JSON Patch operations under blocks such as:
 
 ```json
 {
-  "params": {
-    "last_backend_uuid": "...",
-    "read_write_token": "...",
-    "query_source": "followup"
-  },
-  "query_str": "new user question"
+  "blocks": [
+    {
+      "intended_usage": "ask_text",
+      "diff_block": {
+        "field": "markdown_block",
+        "patches": [
+          {"op": "replace", "path": "", "value": {"progress": "IN_PROGRESS", "chunks": ["partial"]}},
+          {"op": "add", "path": "/chunks/1", "value": " answer"}
+        ]
+      }
+    }
+  ],
+  "status": "PENDING"
 }
 ```
 
-For Spaces, the payload includes `target_collection_uuid`, `target_thread_access_level`, `query_source: "collection"`, and non-incognito history behavior. For files, `params.attachments` contains uploaded object URLs. Public metadata stores only safe attachment fields: filename, MIME type, size, image flag, source, status, and URL presence.
+The adapter applies `add`, `replace`, and `remove` patches, emits answer deltas for `--stream`, then reconciles the final `FINAL` step and `markdown_block` when the completed event arrives. It retains backend UUID and read-write token in private state and maps top-level source objects into `search_results`.
 
 ## Output contract
 
-Perplexity JSON output should include:
+Perplexity JSON output includes the common AI Chat metadata and safe provider state:
 
 ```json
 {
   "provider": "perplexity",
-  "model": "perplexity/best",
-  "selected_model": "perplexity/best",
-  "requested_model": "perplexity/best",
+  "model": "openai/gpt-5.6-terra-thinking",
+  "selected_model": "openai/gpt-5.6-terra-thinking",
+  "requested_model": "openai/gpt-5.6-terra",
   "complete": true,
-  "conversation_id": "research-x",
-  "conversation_url": null,
   "provider_state": {
+    "transport": "browser-network-sse",
+    "network_only": true,
+    "dom_processing": false,
+    "requested_model_identifier": "gpt56_terra_thinking",
+    "response_model_identifier": "gpt56_terra_thinking",
+    "user_selected_model_identifier": "gpt56_terra_thinking",
+    "model_selection_verified": true,
     "backend_uuid": "...",
     "has_read_write_token": true,
+    "thread_url": "https://www.perplexity.ai/search/...",
     "is_incognito": true,
+    "incognito_explicit": true,
+    "privacy_state": "INCOGNITO",
+    "ephemeral": true,
+    "expires_at": "...",
+    "reconnectable": false,
+    "thread_access": 1,
     "saved_to_library": false,
-    "attachment_count": 1,
-    "attachments": [
-      {
-        "filename": "report.pdf",
-        "mime_type": "application/pdf",
-        "size_bytes": 12345,
-        "is_image": false,
-        "source": "local-file",
-        "status": "uploaded",
-        "url_present": true
-      }
-    ],
-    "space_uuid": "123e4567-e89b-12d3-a456-426614174000",
-    "space_selected": true,
     "stream_state": {
       "enabled": true,
       "status": "completed",
@@ -195,75 +256,27 @@ Perplexity JSON output should include:
       "timeout": false
     }
   },
+  "final_url": "https://www.perplexity.ai/search/...",
+  "conversation_url": "https://www.perplexity.ai/search/...",
   "sources": [],
   "search_results": [],
-  "captured_at": "2026-06-23T00:00:00.000Z",
   "response": "..."
 }
 ```
 
-Continuation `read_write_token` values and session cookie values are secrets. Keep them only in private local conversation records or in memory during the request, not stdout JSON, metadata sidecars, query cache metadata, stderr, or logs.
+Session cookies never enter AI Chat process state. Continuation `read_write_token` values remain private. Public output may report `has_read_write_token: true`, but not the token itself.
 
-## Known limitations
+## Verification
 
-- Perplexity account acceptance is live-account specific. Do not commit accepted or rejected model lists.
-- Max-tier-only models are intentionally filtered out.
-- WebUI API requests usually do not return a final provider URL, so screenshot evidence can be skipped. Use saved JSON output, sidecar metadata, stderr, and notes as evidence.
-- Deep research is long-running. Keep live checks gated and use a long timeout.
-- File uploads are limited to validated local files, at most 30 files, and 50 MB per file.
-- Spaces require an explicit user-provided UUID. AI Chat does not discover private Space ids.
-
-## Verification artifacts
-
-Save live verification outputs under `/tmp/ai-chat-verify/perplexity/<case>/` or another private scratch directory outside the repo. Do not commit model acceptance lists, provider state, conversation text, screenshots, files, account-specific results, browser state, or local conversation records.
-
-Gated live research plan:
+Run deterministic checks first:
 
 ```bash
-# Run only when the user allows live Perplexity calls.
-if [ "${AI_CHAT_LIVE_PERPLEXITY_RESEARCH:-0}" = "1" ]; then
-  base="/tmp/ai-chat-verify/perplexity/research-options-$(date +%Y%m%d-%H%M%S)"
-  mkdir -p "$base/normal" "$base/deep" "$base/file-space"
-
-  scripts/ai-chat.mjs \
-    --provider perplexity \
-    --prompt "Give a cited summary of one current battery recycling policy development." \
-    --source-focus all \
-    --search-focus web \
-    --time-range month \
-    --citation-mode markdown \
-    --language en-US \
-    --timezone UTC \
-    --save-conversation pplx-normal-live-check \
-    --json \
-    --out "$base/normal/response.json" \
-    2>"$base/normal/stderr.log"
-
-  scripts/ai-chat.mjs \
-    --provider perplexity \
-    --conversation pplx-normal-live-check \
-    --prompt "Now list only unresolved questions." \
-    --save-conversation pplx-normal-live-check \
-    --json \
-    --out "$base/normal/followup.json" \
-    2>"$base/normal/followup.stderr.log"
-
-  scripts/ai-chat.mjs \
-    --provider perplexity \
-    --task deep_research \
-    --prompt "Deeply research one current battery recycling policy development and list key uncertainties." \
-    --source-focus all \
-    --time-range month \
-    --citation-mode markdown \
-    --language en-US \
-    --timezone UTC \
-    --save-conversation pplx-deep-live-check \
-    --json \
-    --out "$base/deep/response.json" \
-    2>"$base/deep/stderr.log"
-
-  printf 'Private live evidence: %s\n' "$base" > "$base/notes.md"
-fi
+cd ai-chat
+node --test test/perplexity-provider.test.mjs
+node --test test/ai-chat-module.test.mjs
+node --test test/provider-model-selection-matrix.test.mjs
 ```
 
-The normal case verifies research options, citation formatting, saved conversation metadata, continuation, and provider state redaction. The deep case verifies `perplexity/deep-research`, the long timeout profile, non-DOM SSE completion, sources, and completion state. If file or Space verification is needed, add a private file path and a user-approved Space UUID under the same `$base` tree and record the limits in `notes.md`.
+User-invoked provider usage can create provider requests and consume quota. Before writing user-requested private output, set `umask 077` and use `<private-output-dir>/<case>/`. Automated tests remain deterministic and read-only.
+
+For a user-invoked check, inspect normal and explicit Incognito privacy state, canonical `/search/<backend_uuid>` URLs, continuation with the private read-write token, Thinking selection, schematized stream completion, and redaction in public output. Do not claim an account model, Deep Research, file upload, or Space routing works without a user-requested check of that feature.

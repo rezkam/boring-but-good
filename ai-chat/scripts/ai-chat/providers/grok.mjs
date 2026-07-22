@@ -208,7 +208,7 @@ function isGrokUiFragmentLine(line = '') {
   if (/^\d+ (web pages?|posts?)$/i.test(t)) return true;
   if (/^[\w.-]+\.(com|org|net|gov|io|co|edu)\s*(\+\d+)?$/i.test(t)) return true;
   if (/^(Ask anything|Dive deeper|Think Harder|Make summaries|Agents?|Fast|Expert|Auto)$/i.test(t)) return true;
-  if (/^Explore\b/i.test(t) || /^1Password\b/i.test(t)) return true;
+  if (/^Explore\b/i.test(t)) return true;
   if (/^(Factors|Compare|Explain|Show|What|How|Why|List|Summarize|Discuss|Break down|Analyze|Impact on|Examine|Explore|Investigate)\b/i.test(t) && t.length < 120) return true;
   return false;
 }
@@ -224,7 +224,7 @@ function isGrokPlaceholderOnlyLine(line = '') {
   if (/^\d+ (web pages?|posts?)$/i.test(t)) return true;
   if (/^[\w.-]+\.(com|org|net|gov|io|co|edu)\s*(\+\d+)?$/i.test(t)) return true;
   if (/^(Ask anything|Dive deeper|Think Harder|Make summaries|Agents?|Fast|Expert|Auto)$/i.test(t)) return true;
-  if (/^Explore\b/i.test(t) || /^1Password\b/i.test(t)) return true;
+  if (/^Explore\b/i.test(t)) return true;
   return false;
 }
 
@@ -249,7 +249,7 @@ export function cleanRecoveredGrokText(text = '', prompt = '') {
     const t = line.trim();
     if (t.length === 0) return true;
     if (isGrokUiFragmentLine(t)) return false;
-    if (t.startsWith('Explore ') || t.startsWith('1Password')) return false;
+    if (t.startsWith('Explore ')) return false;
     if (/^Searching (the web|on X)$/i.test(t)) return false;
     if (/^\d+ results?$/i.test(t)) return false;
     if (/^See new posts$/i.test(t)) return false;
@@ -684,8 +684,7 @@ export const grokProvider = {
 
         // Trim trailing UI elements - use the FIRST occurrence after our text
         const endMarkers = ['Ask anything', 'Dive deeper', 'Think Harder', 'Make summaries',
-                           'Explain', 'Compare', 'Analyze', 'Agents\n', 'Agent\n',
-                           'Expert\n1Password'];
+                           'Explain', 'Compare', 'Analyze', 'Agents\n', 'Agent\n'];
         for (const em of endMarkers) {
           const idx = text.indexOf(em);
           if (idx > 50) text = text.substring(0, idx);
@@ -695,7 +694,7 @@ export const grokProvider = {
         const cleanLines = text.split('\n').filter(line => {
           const t = line.trim();
           if (t.length === 0) return true; // keep blank lines for formatting
-          if (t.startsWith('Explore ') || t.startsWith('1Password')) return false;
+          if (t.startsWith('Explore ')) return false;
           // Remove live activity/progress lines used by all Grok modes
           if (/^(Thinking about your request|Planning parallel calls|Using both keyword and semantic searches)\.?$/i.test(t)) return false;
           if (/^Searching (the web|on X)$/i.test(t)) return false;

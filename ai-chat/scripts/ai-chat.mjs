@@ -6,12 +6,13 @@
  * Provider Adapters under scripts/ai-chat/ own browser-specific behavior only.
  */
 
-import { buildAiChatRequest, parseAiChatArgs, runAiChat } from './ai-chat/module.mjs';
+import { aiChatResultExitCode, buildAiChatRequest, parseAiChatArgs, runAiChat } from './ai-chat/module.mjs';
 
 async function main() {
   const options = parseAiChatArgs(process.argv.slice(2));
   const request = buildAiChatRequest(options);
-  await runAiChat(request);
+  const result = await runAiChat(request);
+  process.exitCode = aiChatResultExitCode(request, result);
 }
 
 main().catch((error) => {

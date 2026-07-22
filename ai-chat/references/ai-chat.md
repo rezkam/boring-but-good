@@ -8,7 +8,7 @@ The AI Chat Module is the single prompt lifecycle for Grok, ChatGPT, Gemini, and
 
 Normal AI Chat commands do not require a manual Browser Tools start.
 
-1. If a provider needs browser access, AI Chat reads `~/.cache/pi-browser-tools/ai-chat-browser.json` or `AI_CHAT_BROWSER_STATE_FILE` when set.
+1. If a provider needs browser access, AI Chat reads its private browser state file or `AI_CHAT_BROWSER_STATE_FILE` when set.
 2. If the saved browser is healthy, Browser Tools managed, and owned by `ai-chat`, AI Chat reconnects with the saved owner token.
 3. If no usable owned browser exists, AI Chat starts Browser Tools with owner id `ai-chat`, task profile `ai-chat`, fallback Chrome profile `Default` when no task profile is configured, and auto port allocation unless `--port` is explicit.
 4. After a successful request, AI Chat disconnects from CDP but leaves Chrome running for reuse.
@@ -28,30 +28,31 @@ AI Chat uses Chrome profile `Default` by default. Configure the Browser Tools ta
 # New chat.
 scripts/ai-chat.mjs --provider grok --model fast --prompt "What is Brent crude today?" --json
 
-# Save a browser conversation under a stable id, then continue it later.
-scripts/ai-chat.mjs --provider chatgpt --model instant --prompt "Start researching X" --save-conversation research-x --json
-scripts/ai-chat.mjs --provider chatgpt --conversation research-x --prompt "Now compare it with Y" --save-conversation research-x --json
-
-# Attach an existing provider link or backend id to a local AI Chat session.
-scripts/ai-chat.mjs --provider chatgpt --attach-conversation https://chatgpt.com/c/example-id --save-conversation imported-chatgpt --json
+# ChatGPT uses only provider conversation IDs or clean trusted URLs.
+scripts/ai-chat.mjs --provider chatgpt --model instant --prompt "Start researching X" --json
+scripts/ai-chat.mjs --provider chatgpt --model pro --prompt-file ./question.md --submit-only --json
+scripts/ai-chat.mjs --provider chatgpt --conversation provider-id --prompt "Now compare it with Y" --json
+scripts/ai-chat.mjs --provider chatgpt --conversation provider-id --final --json
+scripts/ai-chat.mjs --provider chatgpt --conversation provider-id --stream --out <private-output-dir>/chatgpt.ndjson
+scripts/ai-chat.mjs --provider chatgpt --list-conversations --conversation-limit 20 --json
 scripts/ai-chat.mjs --provider perplexity --attach-conversation 123e4567-e89b-12d3-a456-426614174000 --save-conversation imported-pplx --json
 
-# Recheck a saved ChatGPT request after a timeout without sending a new prompt.
-scripts/ai-chat.mjs --provider chatgpt --conversation research-x --save-conversation research-x --json
+# A no-prompt provider-ID invocation is a read-only final/watch operation.
+scripts/ai-chat.mjs --provider chatgpt --conversation provider-id --final --json
 
 # Model discovery and selection.
 scripts/ai-chat.mjs --provider chatgpt --list-models --json
-scripts/ai-chat.mjs --provider gemini --list-models --verify-models --json
-scripts/ai-chat.mjs --provider perplexity --list-models --verify-models --verify-model-timeout 180 --json
-scripts/ai-chat.mjs --provider perplexity --model openai/gpt-5.4-thinking --prompt-file /tmp/q.txt --json
+scripts/ai-chat.mjs --provider gemini --list-models --json
+scripts/ai-chat.mjs --provider perplexity --list-models --json
+scripts/ai-chat.mjs --provider perplexity --model openai/gpt-5.6-terra --thinking --prompt-file ./prompt.txt --json
 scripts/ai-chat.mjs --provider gemini --task reasoning --prompt "Explain this" --verify-session --json
 
 # Perplexity research and deep research.
-scripts/ai-chat.mjs --provider perplexity --prompt-file /tmp/q.txt --source-focus all --time-range week --citation-mode markdown --language en-US --timezone UTC --json
-scripts/ai-chat.mjs --provider perplexity --task deep_research --prompt-file /tmp/q.txt --json
+scripts/ai-chat.mjs --provider perplexity --prompt-file ./question.md --source-focus all --time-range week --citation-mode markdown --language en-US --timezone UTC --json
+scripts/ai-chat.mjs --provider perplexity --task deep_research --prompt-file ./question.md --json
 
 # Perplexity files, Spaces, and streaming.
-scripts/ai-chat.mjs --provider perplexity --prompt "Analyze this file" --file /tmp/report.pdf --space-uuid 123e4567-e89b-12d3-a456-426614174000 --stream --json
+scripts/ai-chat.mjs --provider perplexity --prompt "Analyze this file" --file ./report.pdf --space-uuid 123e4567-e89b-12d3-a456-426614174000 --stream --json
 ```
 
 ## Options
@@ -70,7 +71,7 @@ scripts/ai-chat.mjs --provider perplexity --prompt "Analyze this file" --file /t
 | `--json` | Output JSON with metadata and `response` |
 | `--stream` | Enable provider streaming progress where supported. Perplexity writes deltas to stderr and still emits final structured output |
 | `--list-models` | List provider models, defaults, task mappings, and history policy |
-| `--verify-models` | With `--list-models`, run live account acceptance checks where supported |
+| `--verify-models` | With `--list-models`, submit small provider prompts for account acceptance checks. Perplexity and Gemini require explicit user authorization; never use this flag in automated tests or evals |
 | `--verify-model-timeout <seconds>` | Timeout per model verification, default `90` |
 | `--verify-session` or `--auth-check` | Ask supporting providers to validate the current browser-authenticated session |
 | `--source-focus <value>` | Perplexity source focus, `web`, `academic`, `social`, `finance`, or `all`; repeat it or use commas |
@@ -81,13 +82,14 @@ scripts/ai-chat.mjs --provider perplexity --prompt "Analyze this file" --file /t
 | `--timezone <zone>` | Perplexity timezone passed to the WebUI API |
 | `--file <path>` | Perplexity local attachment. Repeatable. Metadata is safe, file contents are not echoed into metadata |
 | `--space-uuid <uuid>` or `--space <uuid>` | Perplexity Space identifier supplied by the user |
-| `--save-to-library` | Save to provider history where supported. Default is incognito or temporary for Perplexity and Gemini |
-| `--cookie-source <source>` | Gemini cookie source, `managed-browser` by default or `chrome-profile` for the direct fallback |
-| `--chrome-profile <name>` | Gemini direct profile fallback. Prefer Chrome profile `Default` or Browser Tools task profile `ai-chat` for normal AI Chat runs |
+| `--incognito` | Explicit Perplexity Incognito request. It is not saved to history and the provider reports an expiry time |
+| `--save-to-library` | Explicit provider-history persistence where supported. Perplexity already persists normal requests and rejects this together with `--incognito` |
 | `--continue` | Continue the active provider conversation tab when the current URL is already a conversation |
-| `--conversation <id-or-url>` | Open a saved browser conversation id or direct conversation URL before sending the prompt. With ChatGPT, omit the prompt to recheck a saved timed-out turn |
-| `--save-conversation <id>` | Save the final provider continuation state under a provider-scoped id in `~/.cache/pi-browser-tools/ai-chat-conversations` |
-| `--attach-conversation <provider-id-or-url>` | Attach an existing provider conversation id or link to `--save-conversation <id>` without replaying transcript history |
+| `--conversation <id-or-url>` | Open a provider conversation. ChatGPT accepts only a provider ID or trusted clean `/c/<id>` URL; no prompt is read-only and never submits |
+| `--list-conversations` | Read-only provider listing where supported. ChatGPT returns a safe structured JSON object |
+| `--conversation-limit <1..100>` | Bounded ChatGPT listing size, default 20 |
+| `--save-conversation <id>` | Supported non-ChatGPT providers: save final continuation state under a provider-scoped id in private AI Chat conversation storage |
+| `--attach-conversation <provider-id-or-url>` | Supported non-ChatGPT providers: attach a conversation id or link to `--save-conversation <id>` without replaying transcript history. ChatGPT rejects this option. |
 | `--include-conversation` | Include `conversation_messages` in JSON output. Use only when downstream code needs full local transcript context |
 | `--evidence` or `--capture-evidence` | Capture screenshot evidence for the final provider URL and include `evidence_path` in metadata |
 | `--evidence-path <file>` | Write screenshot evidence to a specific file, also enables evidence capture |
@@ -95,27 +97,28 @@ scripts/ai-chat.mjs --provider perplexity --prompt "Analyze this file" --file /t
 
 ## Conversation continuity
 
-Use `--save-conversation <id>` when a task is expected to need follow-ups across agent turns. The helper stores a JSON record with the provider, requested model, final URL or backend provider state, local messages, capture time, and response size. Use `--conversation <id>` later to continue that thread and send only the new user prompt when the provider supports backend continuation.
+Supported non-ChatGPT providers can use `--save-conversation <id>` for follow-ups across agent turns. The helper stores a JSON record with the provider, requested model, final URL or backend provider state, local messages, capture time, and response size. Use `--conversation <id>` later to continue that thread and send only the new user prompt when the provider supports backend continuation.
 
-Records live in `~/.cache/pi-browser-tools/ai-chat-conversations/<provider>/<id>.json` with local-user permissions. Provider-scoped ids are separate, so `grok:research` and `chatgpt:research` are different records.
+Those local records use private AI Chat conversation storage with local-user permissions. Provider-scoped ids are separate, for example `grok:research` and `perplexity:research`.
 
-Rules:
+Rules for supported non-ChatGPT providers:
 
 - Use stable ids such as `market-research`, `project-plan`, or a task id.
 - Use a direct URL with `--conversation https://...` when the user gives a provider conversation link for one run.
 - Use `--attach-conversation <provider-id-or-url> --save-conversation <id>` when the link or backend id should become a reusable local AI Chat session.
 - Use `--continue` only for short same-tab flows. Prefer saved conversation ids for reliable multi-turn work.
-- For ChatGPT long-running turns that time out, rerun `--conversation <id> --save-conversation <id>` without `--prompt` to recheck the same provider conversation and update the saved record.
-- Perplexity stores backend UUID and a private read-write token in the local record when available. Normal output only reports redacted presence, for example `has_read_write_token: true`.
+- ChatGPT has no local records and rejects `--save-conversation` and `--attach-conversation`. Continue ChatGPT only with its provider ID or a trusted clean `/c/<id>` URL. For long-running turns, `--conversation <provider-id> --final --json` reads the current provider turn without creating local state or submitting a prompt. Conversation titles and full-turn messages appear only when the user explicitly requests listing, final, or stream output. Those outputs can contain private provider content: do not commit them or send them to public logs, and keep explicit output files owner-only.
+- Perplexity exposes a safe `backend_uuid`, `final_url`, and `conversation_url` for each created thread. The canonical thread URL is `https://www.perplexity.ai/search/<backend_uuid>` and can be passed directly to `--conversation` for UUID-based continuation.
+- Perplexity stores the backend UUID and a private read-write token in the local record when available. Use `--save-conversation` for reliable multi-turn continuation because the public thread URL intentionally does not expose that token. Normal output only reports redacted presence, for example `has_read_write_token: true`.
 - Gemini attempts native continuation first. If Gemini rejects stored ids, metadata shows `native_continuation_error` and `local_transcript_fallback`.
-- The final JSON metadata includes `conversation_id`, `conversation_url`, and `conversation_record_path` when applicable.
+- The final JSON metadata includes `conversation_id` and `conversation_url` when applicable. Local record paths remain private implementation detail.
 
 ## Provider notes
 
 ### Grok
 
 - URL: `x.com/i/grok`.
-- Models are UI labels. `fast` is the reliable default for the current X/Grok app. `auto` and `expert` stay account/UI dependent and must be checked with `--list-models --verify-models` before use.
+- Models are UI labels. `fast` is the reliable default for the current X/Grok app. `auto` and `expert` stay account/UI dependent and require explicit user-authorized visible-label verification before use.
 - Grok uses the AI Chat owned Browser Tools browser and preflights the Grok composer before typing. Fresh, wrong, or logged-out profiles fail with an auth/session error before prompt submission.
 - Model selection is verified through visible UI labels. Grok does not expose a backend model slug.
 - If quota or account gating is hit, fallback attempts are reported in metadata and must not hide the rejected requested model.
@@ -123,9 +126,8 @@ Rules:
 ### Gemini
 
 - URL: `gemini.google.com`.
-- Default cookie source is the Browser Tools managed browser that AI Chat owns.
-- Use `--cookie-source chrome-profile --chrome-profile <profile-folder>` only as an explicit direct profile fallback.
-- `--list-models` uses Gemini account RPC discovery when cookies work.
+- Gemini always sends authenticated requests from the Browser Tools managed page. Credentials and page tokens remain in that page context.
+- `--list-models` uses Gemini account RPC discovery through the managed same-origin page.
 - Verified account models from the managed Gemini-capable browser include `gemini-3-flash`, `gemini-3-flash-thinking`, and `gemini-3-pro`.
 - Default chats are temporary. Use `--save-to-library` when the user wants Gemini history.
 - Native Gemini continuation can return backend error `1097`; the helper reports `native_continuation_error` and uses local transcript fallback.
@@ -134,25 +136,29 @@ Rules:
 ### Perplexity
 
 - URL: `perplexity.ai`.
-- Uses the managed Browser Tools browser cookie only. Environment token variables are ignored by AI Chat.
-- `--list-models` exposes the bundled Pro-tier WebUI registry with thinking levels, tiers, modes, aliases, and direct tool aliases. Max-tier models are filtered.
-- `--verify-models` checks current-account acceptance through incognito WebUI API prompts.
-- Default chats are incognito. Use `--save-to-library` when the user wants Perplexity library history or when a Space requires non-incognito behavior.
+- Uses a headless-preferred managed browser and same-origin `fetch` with browser credentials. The adapter never reads the cookie, and environment token variables are ignored.
+- Perplexity has no rendered HTML parser, element interaction, UI transport, or DOM fallback.
+- `--list-models` exposes the network-contract registry with Thinking levels, tiers, modes, aliases, and direct tool aliases. Max-tier models are filtered.
+- `--verify-models` submits private Incognito WebUI API prompts for current-account acceptance. It requires explicit user authorization and is never part of automated tests or evals.
+- Default chats persist to provider history. Use `--incognito` only when the user asks for a private, expiring request. `--save-to-library` remains an explicit persistence flag for compatibility. It conflicts with Incognito, and explicit Incognito also conflicts with Spaces because Space threads are saved to a collection.
+- Incognito network responses report `privacy_state: INCOGNITO`, an expiry time, and `reconnectable: false`. Provider state exposes these safe fields. Explicit `--incognito` bypasses the local response cache.
 - Research options are available with `--source-focus`, `--search-focus`, `--time-range`, `--citation-mode`, `--language`, and `--timezone`.
 - File analysis uses repeatable `--file` and uploads validated local files through the WebUI upload flow. Metadata includes filename, MIME type, size, image flag, status, and URL presence, not file contents.
-- Spaces use `--space-uuid` or `--space` with a user-provided UUID and make the request non-incognito.
-- `--stream` emits useful incremental progress to stderr and still returns the same final JSON output contract.
+- Spaces use `--space-uuid` or `--space` with a user-provided UUID and persist the request in the selected collection.
+- `--stream` applies captured schematized SSE block patches, emits incremental answer deltas to stderr, and waits for the completed stream event before returning final JSON.
 - Deep research uses `perplexity/deep-research` through the WebUI API and gets a 3600 second timeout unless `--timeout` is explicit.
-- JSON output includes `requested_model`, `selected_model`, `complete`, `provider_state`, `sources`, `search_results`, `captured_at`, and `conversation_id` when applicable.
+- JSON output includes `requested_model`, `selected_model`, `complete`, `provider_state`, `sources`, `search_results`, `captured_at`, and `conversation_id` when applicable. New Perplexity threads also include `final_url` and `conversation_url`.
 
 ### ChatGPT
 
 - URL: `chatgpt.com`.
-- Models: `instant`, `extra-high`, `pro-extended`, and aliases such as `thinking` and `reasoning` for `extra-high`.
-- Long-running requests use network SSE and WebSocket state first. Provider metadata reports `stream_state.status`, `partial`, `timeout`, `empty_response`, `handed_off`, `resumed_stream`, `assistant_turn_complete`, and `dom_fallback`.
-- DOM text is only a fallback when network state is unavailable, and the fallback is marked with `provider_state.dom_fallback=true`.
-- Request profiles are applied by authenticated backend payload rewrite and verified through observed stream metadata where available. There is no public ChatGPT model list API in this adapter.
-- The old `medium` and `high` `thinking_effort` payloads are not exposed because the current ChatGPT web backend rejects them with HTTP 422.
+- Models: exactly `instant`, `medium`, `high`, `extra-high`, and `pro`. These are public UI profiles, not backend aliases.
+- Long-running requests use observed SSE/WebSocket state plus authenticated same-origin reads. Provider metadata reports strict stream quorum, partial/timeout state, handoff, and resumed stream state.
+- The visible UI applies explicit profiles and observed network model/effort verifies them. A continuation with no `--model` or `--task` preserves the UI selection and reports observed verification rather than claiming a requested profile matched.
+- `--submit-only` returns after an accepted response exposes a real provider conversation ID. It leaves the managed browser and provider page alive, and never creates a local alias or pending-turn record.
+- `--list-conversations` returns only provider IDs, titles, timestamps, current-node IDs, temporary/archive/star flags, and an allowlisted asynchronous status containing `state`, `status`, `progress`, and `done`. Arbitrary nested provider status fields are discarded.
+- `--conversation <provider-id> --stream` writes NDJSON to stdout. Each line has a sequence, timestamp, source, and provider ID. The final line is exactly one `complete`, `timeout`, or `error` event. `--out` mirrors the same lines to an explicit private `0600` file without sidecars.
+- Final output is derived from the safe visible current branch, never rendered answer text. Completion requires provider stream status `COMPLETE` and a finished final assistant on the current branch. `[DONE]` after handoff is not sufficient.
 
 ## Module shape
 
@@ -166,7 +172,7 @@ Rules:
 
 ## Completion detection
 
-The helper does not use only fixed sleeps. The AI Chat Module submits the prompt and delegates provider-specific completion to the adapter. Adapters can parse WebUI APIs, SSE, WebSocket messages, network CDP events, visible UI labels, and DOM text fallback. When DOM fallback is used, provider metadata must make that visible.
+The helper does not use only fixed sleeps. The AI Chat Module submits the prompt and delegates provider-specific completion to the adapter. Adapters can parse WebUI APIs, SSE, WebSocket messages, network CDP events, visible UI labels, and provider-specific DOM fallback. Perplexity is the strict exception: it completes only from SSE network state and has no DOM path. When another provider uses DOM fallback, provider metadata must make that visible.
 
 ## Output files and private state
 
@@ -176,10 +182,10 @@ When `--out` is used, the helper writes:
 - `<out>.meta.json` with metadata
 - `<out>.raw.txt` when raw visible text or raw stream text is available
 
-Use `--json` when downstream code needs metadata and response in one JSON document. When `--evidence` or `--evidence-path` is used, metadata includes `evidence_path` and `evidence_url` when a screenshot can be captured. If the provider transport has no final browser URL, metadata includes `evidence_skipped_reason`.
+AI Chat writes `--out` files and their metadata and raw-text sidecars with owner-only mode `0600`, including overwrites. Use `--json` when downstream code needs metadata and response in one JSON document. When `--evidence` or `--evidence-path` is used, metadata includes `evidence_path` and `evidence_url` when a screenshot can be captured. If the provider transport has no final browser URL, metadata includes `evidence_skipped_reason`.
 
 Private local state:
 
-- AI Chat browser state: `~/.cache/pi-browser-tools/ai-chat-browser.json`. Contains the Browser Tools owner token and must not be committed or printed.
-- Conversation records: `~/.cache/pi-browser-tools/ai-chat-conversations/<provider>/<id>.json`. May contain private provider continuation tokens.
+- AI Chat browser state: private runtime storage containing the Browser Tools owner token. It must not be committed or printed.
+- Conversation records: private AI Chat storage that may contain provider continuation tokens.
 - Query cache: only used when `BROWSER_QUERY_CACHE_DIR` is set. Keep it outside the repo because it can contain prompts, responses, and metadata.
