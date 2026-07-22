@@ -803,16 +803,47 @@ test('continuation propagates authentication errors and exhausted transient deta
   await assert.rejects(() => chatgptProvider.waitForResponse({ ...common, readConversation: async () => { throw new Error('[chatgpt] Conversation status read failed with HTTP 503.'); } }), /status read failed with HTTP 503/);
 });
 
-test('continuation does not accept unchanged old terminal detail', async () => {
+test('continuation timeout does not return or stream the unchanged prior turn', async () => {
+  const events = [];
   const result = await chatgptProvider.waitForResponse({
     page: { url: () => 'https://chatgpt.com/c/provider_1' }, timeoutMs: 1_000, selectedModel: 'default', request: {},
     attemptContext: { expectedConversationId: 'provider_1', baselineCurrentNode: 'assistant' },
-    networkTracker: { snapshot: () => ({ conversationId: 'provider_1', observedPayloadModel: 'gpt-observed', transport: 'network-incremental-sse' }) },
+    networkTracker: { snapshot: () => ({ conversationId: 'provider_1', observedPayloadModel: 'gpt-observed', text: 'untrusted stream progress', transport: 'network-incremental-sse' }) },
+    onStreamEvent: event => events.push(event),
     readConversation: async () => completeDetail(), sleepFn: async () => {},
   });
   assert.equal(result.done, false);
   assert.equal(result.providerConversationId, 'provider_1');
-  assert.equal(result.modelUsed, 'gpt-5-6-thinking');
+  assert.equal(result.modelUsed, 'gpt-observed');
+  assert.equal(result.text, '');
+  assert.equal(result.rawText, '');
+  assert.equal(result.searchResults.length, 0);
+  assert.equal(result.providerState.structured_turn, null);
+  assert.equal(result.providerState.partial, false);
+  assert.equal(result.providerState.empty_response, true);
+  assert.doesNotMatch(JSON.stringify(result), /answer|untrusted stream progress/);
+  assert.equal(events.some(event => event.event === 'message'), false);
+});
+
+test('normal ChatGPT submissions fail promptly on rejected responses but not after acceptance', async () => {
+  for (const status of [422, 429, 500]) {
+    await assert.rejects(
+      () => chatgptProvider.waitForResponse({
+        page: { url: () => 'https://chatgpt.com/' }, timeoutMs: 1_000, selectedModel: 'instant', request: {},
+        networkTracker: { snapshot: () => ({ responseStatuses: [{ status }], acceptedResponse: false, transport: 'network-incremental-sse' }) },
+        sleepFn: async () => assert.fail('rejected submission must not wait for timeout'),
+      }),
+      new RegExp(`Submission failed with HTTP ${status}`),
+    );
+  }
+
+  const accepted = await chatgptProvider.waitForResponse({
+    page: { url: () => 'https://chatgpt.com/c/provider_1' }, timeoutMs: 1_000, selectedModel: 'instant', request: {},
+    networkTracker: { snapshot: () => ({ conversationId: 'provider_1', responseStatuses: [{ status: 429 }], acceptedResponse: true, transport: 'network-incremental-sse' }) },
+    readConversation: async () => completeDetail(), sleepFn: async () => {},
+  });
+  assert.equal(accepted.done, true);
+  assert.equal(accepted.text, 'answer');
 });
 
 test('continuation request identity mismatch emits no accepted progress', async () => {

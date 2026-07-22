@@ -24,10 +24,15 @@ test('parseGeminiStreamResponse extracts model unavailable error code', () => {
   assert.equal(parseGeminiStreamResponse(raw).errorCode, 1052);
 });
 
-test('resolves Gemini model aliases', () => {
+test('resolves Gemini model aliases without escalating shared transport identifiers', () => {
   assert.equal(resolveGeminiModel('flash').id, 'gemini-3-flash');
   assert.equal(resolveGeminiModel('thinking').id, 'gemini-3-flash-thinking');
   assert.equal(resolveGeminiModel('pro').id, 'gemini-3-pro');
+  assert.equal(resolveGeminiModel('plus-pro').id, 'gemini-3-pro-plus');
+  assert.equal(resolveGeminiModel('advanced-pro').id, 'gemini-3-pro-advanced');
+  // This provider transport ID is shared by Basic, Plus, and Advanced. A raw
+  // ID is therefore ambiguous and must not silently select the Advanced tier.
+  assert.equal(resolveGeminiModel('9d8ca3786ebdfbea'), null);
 });
 
 test('buildGeminiInnerRequest defaults to temporary and can save to history', () => {

@@ -19,16 +19,28 @@ export const GEMINI_MODELS = [
   { id: 'gemini-3-pro-advanced', name: 'Gemini 3 Pro Advanced', model_id: '9d8ca3786ebdfbea', capacity_tail: 2, capacity_field: 12, min_tier: 'advanced', family: 'gemini-3', thinking: false, aliases: ['advanced-pro'], known: true },
 ];
 
-const GEMINI_MODEL_BY_ID = new Map(GEMINI_MODELS.flatMap(model => [
+const GEMINI_MODEL_BY_SELECTOR = new Map(GEMINI_MODELS.flatMap(model => [
   [model.id.toLowerCase(), model],
   [model.name.toLowerCase(), model],
-  [model.model_id.toLowerCase(), model],
   ...(model.aliases || []).map(alias => [alias.toLowerCase(), model]),
 ]));
 
+const GEMINI_MODELS_BY_TRANSPORT_ID = new Map();
+for (const model of GEMINI_MODELS) {
+  const key = model.model_id.toLowerCase();
+  const matches = GEMINI_MODELS_BY_TRANSPORT_ID.get(key) || [];
+  matches.push(model);
+  GEMINI_MODELS_BY_TRANSPORT_ID.set(key, matches);
+}
+
 export function resolveGeminiModel(modelName = 'flash') {
   const normalized = String(modelName || 'flash').toLowerCase();
-  return GEMINI_MODEL_BY_ID.get(normalized === 'default' ? 'flash' : normalized) || null;
+  const selector = normalized === 'default' ? 'flash' : normalized;
+  const transportMatches = GEMINI_MODELS_BY_TRANSPORT_ID.get(selector);
+  // Account tiers can share the same transport ID. It does not identify the
+  // intended capacity header, so require the explicit public tier selector.
+  if (transportMatches) return transportMatches.length === 1 ? transportMatches[0] : null;
+  return GEMINI_MODEL_BY_SELECTOR.get(selector) || null;
 }
 
 function nested(value, path) {

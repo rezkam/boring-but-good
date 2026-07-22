@@ -13,6 +13,13 @@ export function chatGptSubmissionObservationTimeoutMs(timeoutMs) {
   return Math.max(1, Math.min(Number.isFinite(requested) && requested > 0 ? requested : CHATGPT_PROVIDER_ID_OBSERVATION_TIMEOUT_MS, CHATGPT_PROVIDER_ID_OBSERVATION_TIMEOUT_MS));
 }
 
+function rejectedChatGptSubmissionStatus(snapshot = {}) {
+  if (snapshot.acceptedResponse || snapshot.conversationId) return null;
+  return Array.isArray(snapshot.responseStatuses)
+    ? snapshot.responseStatuses.find(item => Number.isInteger(item?.status) && item.status >= 400 && item.status <= 599)?.status || null
+    : null;
+}
+
 function isChatGptUrl(url) {
   return urlHasAllowedHostname(url, CHATGPT_HOSTNAMES);
 }
@@ -1044,6 +1051,8 @@ export const chatgptProvider = {
       networkTracker?.throwIfFatalProgressError?.();
       last = networkTracker?.snapshot?.() || last;
       if (last.error) throw new Error(last.error);
+      const rejectedStatus = rejectedChatGptSubmissionStatus(last);
+      if (rejectedStatus) throw new Error(`[chatgpt] Submission failed with HTTP ${rejectedStatus}.`);
       if (expectedConversationId && last.requestConversationId && last.requestConversationId !== expectedConversationId) throw new Error('[chatgpt] Submission request conversation id did not match the requested provider conversation id.');
       if (expectedConversationId && last.conversationId && last.conversationId !== expectedConversationId) throw new Error('[chatgpt] Submission stream conversation id did not match the requested provider conversation id.');
       const detailId = last.conversationId || expectedConversationId || null;
@@ -1058,9 +1067,9 @@ export const chatgptProvider = {
           lastDetailError = error;
         }
       }
-      if (detail) emitSnapshotMessages(onStreamEvent, detailId, detail, fingerprints, 'live-cdp');
-      networkTracker?.throwIfFatalProgressError?.();
       const changedBranch = !baselineCurrentNode || detail?.conversation?.current_node !== baselineCurrentNode;
+      if (detail && changedBranch) emitSnapshotMessages(onStreamEvent, detailId, detail, fingerprints, 'live-cdp');
+      networkTracker?.throwIfFatalProgressError?.();
       if (detail && changedBranch && hasChatGptTerminalQuorum(detail)) {
         const turn = selectChatGptStructuredTurn(detail);
         networkTracker?.throwIfFatalProgressError?.();
@@ -1082,14 +1091,19 @@ export const chatgptProvider = {
       }
     }
     networkTracker?.throwIfFatalProgressError?.();
+    const rejectedStatus = rejectedChatGptSubmissionStatus(last);
+    if (rejectedStatus) throw new Error(`[chatgpt] Submission failed with HTTP ${rejectedStatus}.`);
     if (lastDetailError && !detail) throw lastDetailError;
-    if (detail) emitSnapshotMessages(onStreamEvent, detailId, detail, fingerprints, 'live-cdp');
+    const changedBranch = !baselineCurrentNode || detail?.conversation?.current_node !== baselineCurrentNode;
+    if (detail && changedBranch) emitSnapshotMessages(onStreamEvent, detailId, detail, fingerprints, 'live-cdp');
     networkTracker?.throwIfFatalProgressError?.();
-    const turn = detail ? selectChatGptStructuredTurn(detail) : null;
-    // CDP/SSE text is progress evidence only. A timeout may expose text only from
-    // the authenticated current-branch structured turn.
+    const turn = detail && changedBranch ? selectChatGptStructuredTurn(detail) : null;
+    // CDP/SSE text is progress evidence only. A continuation may expose text only
+    // after authenticated detail confirms that its current branch advanced.
     const text = (turn?.text || '').trim();
+    const outputSnapshot = changedBranch ? last : { ...last, text: '', rawItems: [], searchResults: [] };
+    const outputDetail = changedBranch ? detail : null;
     networkTracker?.throwIfFatalProgressError?.();
-    return { text, rawText: text, done: false, providerConversationId: expectedConversationId || last.conversationId || null, modelUsed: turn?.modelSlug || last.modelSlug || last.observedPayloadModel || (expectedConversationId && selectedModel === 'default' ? null : resolveChatGptModel(selectedModel)?.model), finalUrl: chatGptConversationUrl(expectedConversationId || last.conversationId) || page.url(), providerState: buildProviderState(last, detail, { timeout: true }), searchResults: turn?.searchResultGroups || [] };
+    return { text, rawText: text, done: false, providerConversationId: expectedConversationId || last.conversationId || null, modelUsed: turn?.modelSlug || last.modelSlug || last.observedPayloadModel || (expectedConversationId && selectedModel === 'default' ? null : resolveChatGptModel(selectedModel)?.model), finalUrl: chatGptConversationUrl(expectedConversationId || last.conversationId) || page.url(), providerState: buildProviderState(outputSnapshot, outputDetail, { timeout: true }), searchResults: turn?.searchResultGroups || [] };
   },
 };
