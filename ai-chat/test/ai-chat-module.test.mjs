@@ -9,12 +9,14 @@ import {
   buildCacheInput,
   buildOutput,
   buildMetadata,
+  createChatGptStreamEmitter,
   conversationRecordPath,
   parseAiChatArgs,
   resolveConversationReference,
   resolveInitialModel,
   runPromptAttempt,
   runAiChat,
+  sanitizeChatGptStreamValue,
   saveConversationReference,
   validateConversationUrlForProvider,
   writeAiChatBrowserState,
@@ -1484,4 +1486,107 @@ test('submit-only disposes its attempt observer without closing the browser or p
   };
   const result = await runPromptAttempt({ browser, provider, request: buildAiChatRequest({ providerName: 'chatgpt', prompt: 'detach', submitOnly: true }), selectedModel: 'default' });
   assert.equal(result.providerConversationId, 'provider_123'); assert.equal(disposed, 1); assert.equal(closed, 0);
+});
+
+test('ChatGPT stream owns stdout as NDJSON and emits one terminal complete event', async () => {
+  const lines = [];
+  const provider = {
+    name: 'chatgpt', defaultModel: 'extra-high', transport: 'test',
+    capabilities: { localConversationState: false, cachePolicy: 'none', streamFormat: 'ndjson' },
+    runRequiresBrowser: () => false,
+    async run({ onStreamEvent }) {
+      onStreamEvent({ event: 'session', provider_conversation_id: 'provider_123', url: 'https://chatgpt.com/c/provider_123', source: 'live-cdp' });
+      onStreamEvent({ event: 'delta', provider_conversation_id: 'provider_123', text: 'answer', source: 'live-cdp' });
+      return { text: 'answer', rawText: 'answer', done: true, status: 'complete', modelUsed: 'gpt-test', providerConversationId: 'provider_123', finalUrl: 'https://chatgpt.com/c/provider_123', providerState: { conversation_id: 'provider_123', thinking_effort: 'max', structured_turn: { messages: [{ id: 'a', author: { role: 'assistant' }, content: { parts: ['answer'] } }] } } };
+    },
+  };
+  const result = await runAiChat(buildAiChatRequest({ providerName: 'chatgpt', prompt: 'hello', stream: true }), {
+    provider, cache: noCache(), io: { stdout: text => lines.push(text), writeFile: () => assert.fail('no file expected') },
+  });
+  const events = lines.map(line => JSON.parse(line));
+  assert.deepEqual(events.map(event => event.sequence), [1, 2, 3]);
+  assert.deepEqual(events.map(event => event.event), ['session', 'delta', 'complete']);
+  assert.equal(events.at(-1).complete, true);
+  assert.equal(events.at(-1).source, 'live-cdp');
+  assert.equal(events.at(-1).model, 'gpt-test'); assert.equal(events.at(-1).effort, 'max');
+  assert.equal(events.at(-1).url, 'https://chatgpt.com/c/provider_123');
+  assert.equal(events.at(-1).turn.messages[0].content.parts[0], 'answer');
+  assert.equal(aiChatResultExitCode({ stream: true }, result), 0);
+});
+
+test('ChatGPT NDJSON timeout emits one live terminal without normal output and exits nonzero', async () => {
+  const lines = [];
+  const provider = { name: 'chatgpt', defaultModel: 'extra-high', capabilities: { localConversationState: false, cachePolicy: 'none', streamFormat: 'ndjson' }, runRequiresBrowser: () => false, async run({ onStreamEvent }) { onStreamEvent({ event: 'session', provider_conversation_id: 'provider_123', source: 'live-cdp' }); return { text: 'partial', done: false, status: 'in_progress', providerConversationId: 'provider_123', finalUrl: 'https://chatgpt.com/c/provider_123', providerState: { conversation_id: 'provider_123', partial: true, structured_turn: { messages: [{ id: 'a', metadata: { resume_token: 'TEST_TIMEOUT_SECRET' }, content: { parts: ['partial'] } }] } } }; } };
+  const request = buildAiChatRequest({ providerName: 'chatgpt', prompt: 'hello', stream: true });
+  const result = await runAiChat(request, { provider, cache: noCache(), io: { stdout: line => lines.push(line) } });
+  const events = lines.map(line => JSON.parse(line));
+  assert.deepEqual(events.map(event => event.sequence), [1, 2]);
+  assert.equal(events.at(-1).event, 'timeout'); assert.equal(events.at(-1).source, 'live-cdp');
+  assert.equal(events.at(-1).response, 'partial'); assert.equal(JSON.stringify(events).includes('TEST_TIMEOUT_SECRET'), false);
+  assert.equal(aiChatResultExitCode(request, result), 1);
+});
+
+test('provider-ID reattachment streams snapshot messages then one provider-snapshot terminal without local state', async () => {
+  const lines = []; const calls = { cache: 0, fs: 0 };
+  const provider = {
+    name: 'chatgpt', defaultModel: 'extra-high', capabilities: { localConversationState: false, cachePolicy: 'none', streamFormat: 'ndjson' },
+    resolveConversationAttachment: chatgptProvider.resolveConversationAttachment, runRequiresBrowser: () => false,
+    async recheckConversation({ conversation, onStreamEvent }) { onStreamEvent({ event: 'session', provider_conversation_id: conversation.providerId, source: 'provider-snapshot' }); onStreamEvent({ event: 'message', provider_conversation_id: conversation.providerId, source: 'provider-snapshot', message: { id: 'a', content: { parts: ['answer'] } }, change: 'new' }); return { text: 'answer', done: true, status: 'complete', providerConversationId: conversation.providerId, finalUrl: conversation.url, modelUsed: 'gpt-test', providerState: { conversation_id: conversation.providerId, structured_turn: { messages: [{ id: 'a', content: { parts: ['answer'] } }] } } }; },
+  };
+  const request = buildAiChatRequest({ providerName: 'chatgpt', conversationTarget: 'provider_123', stream: true });
+  const result = await runAiChat(request, { provider, cache: { read() { calls.cache += 1; }, write() { calls.cache += 1; } }, fs: new Proxy({}, { get() { calls.fs += 1; throw new Error('local state accessed'); } }), io: { stdout: line => lines.push(line) } });
+  const events = lines.map(line => JSON.parse(line));
+  assert.deepEqual(events.map(event => event.event), ['session', 'message', 'complete']);
+  assert.equal(events.every(event => event.provider_conversation_id === 'provider_123'), true);
+  assert.equal(events.at(-1).source, 'provider-snapshot'); assert.equal(aiChatResultExitCode(request, result), 0);
+  assert.deepEqual(calls, { cache: 0, fs: 0 });
+});
+
+test('ChatGPT stream emitter keeps its envelope core-owned and preserves prose while redacting credentials', () => {
+  const lines = [];
+  const emitter = createChatGptStreamEmitter({ io: { stdout: line => lines.push(line) }, now: () => '2026-07-22T00:00:00.000Z' });
+  emitter.emit('delta', { event: 'error', provider: 'evil', sequence: 99, captured_at: 'evil-time', source: 'evil-source', provider_conversation_id: 'provider_123', text: 'Explain tokenization and secret management.', nested: { resume_token: 'TEST_SECRET', text: 'Bearer abc token=def' } });
+  const event = JSON.parse(lines[0]);
+  assert.deepEqual({ event: event.event, provider: event.provider, sequence: event.sequence, captured_at: event.captured_at, source: event.source }, { event: 'delta', provider: 'chatgpt', sequence: 1, captured_at: '2026-07-22T00:00:00.000Z', source: 'provider-snapshot' });
+  assert.equal(event.text, 'Explain tokenization and secret management.');
+  assert.equal(JSON.stringify(event).includes('TEST_SECRET'), false);
+  assert.equal(JSON.stringify(event).includes('abc'), false);
+  assert.equal(sanitizeChatGptStreamValue('API key and passwordless tokenization are prose.'), 'API key and passwordless tokenization are prose.');
+});
+
+test('ChatGPT NDJSON stream errors are terminal once and propagate only sanitized details', async () => {
+  const lines = [];
+  const secret = 'TEST_STREAM_SECRET';
+  const provider = { name: 'chatgpt', capabilities: { localConversationState: false, cachePolicy: 'none', streamFormat: 'ndjson' }, runRequiresBrowser: () => false, async run() { const error = new Error(`Bearer raw-value token=${secret} ${secret}`); error.code = secret; throw error; } };
+  const request = buildAiChatRequest({ providerName: 'chatgpt', prompt: 'hello', stream: true });
+  await assert.rejects(() => runAiChat(request, { provider, cache: noCache(), io: { stdout: line => lines.push(line) } }), error => {
+    assert.equal(error.message.includes(secret), false);
+    assert.equal(error.message.includes('raw-value'), false);
+    return true;
+  });
+  assert.equal(lines.length, 1);
+  const event = JSON.parse(lines[0]);
+  assert.equal(event.event, 'error'); assert.equal(event.complete, false);
+  assert.equal(event.source, 'live-cdp'); assert.equal(event.code, 'chatgpt_stream_error');
+  assert.equal(JSON.stringify(event).includes(secret), false);
+  assert.equal(aiChatResultExitCode(request, { provider, metadata: { complete: false } }), 1);
+});
+
+test('provider terminal progress is rejected as one safe terminal error and cannot be followed by complete', async () => {
+  const lines = []; const secret = 'PROGRESS_CODE_SECRET';
+  const provider = { name: 'chatgpt', capabilities: { localConversationState: false, cachePolicy: 'none', streamFormat: 'ndjson' }, runRequiresBrowser: () => false, async run({ onStreamEvent }) { onStreamEvent({ event: 'complete', source: 'live-cdp', code: secret }); return { text: 'must not return', done: true, providerConversationId: 'provider_123' }; } };
+  const request = buildAiChatRequest({ providerName: 'chatgpt', prompt: 'hello', stream: true });
+  await assert.rejects(() => runAiChat(request, { provider, cache: noCache(), io: { stdout: line => lines.push(line) } }), /Invalid provider ChatGPT stream progress event/);
+  const events = lines.map(line => JSON.parse(line));
+  assert.deepEqual(events.map(event => event.event), ['error']);
+  assert.equal(events[0].source, 'live-cdp');
+  assert.equal(JSON.stringify(events).includes(secret), false);
+});
+
+test('terminal reconciliation carries a provider id even without an earlier session event', async () => {
+  const lines = [];
+  const provider = { name: 'chatgpt', defaultModel: 'extra-high', capabilities: { localConversationState: false, cachePolicy: 'none', streamFormat: 'ndjson' }, runRequiresBrowser: () => false, async run() { return { text: 'answer', done: true, providerConversationId: 'provider_123', finalUrl: 'https://chatgpt.com/c/provider_123', providerState: { conversation_id: 'provider_123', structured_turn: { messages: [] } } }; } };
+  await runAiChat(buildAiChatRequest({ providerName: 'chatgpt', prompt: 'hello', stream: true }), { provider, cache: noCache(), io: { stdout: line => lines.push(line) } });
+  const terminal = JSON.parse(lines[0]);
+  assert.equal(terminal.event, 'complete'); assert.equal(terminal.provider_conversation_id, 'provider_123');
 });

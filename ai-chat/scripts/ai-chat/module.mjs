@@ -467,7 +467,10 @@ function normalizedProviderStateKey(key) {
 }
 
 function isSecretProviderStateKey(key) {
-  return SECRET_PROVIDER_STATE_KEYS.has(normalizedProviderStateKey(key));
+  const normalized = normalizedProviderStateKey(key);
+  if (normalized.startsWith('has_')) return false;
+  return SECRET_PROVIDER_STATE_KEYS.has(normalized)
+    || /(?:authorization|cookie|token|sentinel|conduit|turnstile|proof|resume|secret|credential|password|api_?key)/i.test(String(key || ''));
 }
 
 function secretPresenceKey(key) {
@@ -495,6 +498,99 @@ export function sanitizeProviderStateForOutput(provider, providerState) {
     safeState.has_read_write_token = Boolean(providerState.read_write_token || safeState.has_read_write_token);
   }
   return safeState;
+}
+
+// ChatGPT's streaming transport sees provider data which must never become a
+// public event verbatim. Keep this deliberately recursive so new nested
+// transport fields default to the same treatment as existing provider state.
+export function sanitizeChatGptStreamValue(value, key = '') {
+  if (isSecretProviderStateKey(key)) return '[redacted]';
+  if (Array.isArray(value)) return value.map(item => sanitizeChatGptStreamValue(item));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([itemKey, item]) => [
+      itemKey,
+      sanitizeChatGptStreamValue(item, itemKey),
+    ]));
+  }
+  if (typeof value !== 'string') return value;
+  return value
+    .replace(/(Bearer\s+)[^\s,;]+/gi, '$1[redacted]')
+    .replace(/((?:token|secret|password|api[_-]?key)\s*[=:]\s*)[^\s,;]+/gi, '$1[redacted]');
+}
+
+function sanitizeChatGptStreamErrorMessage(value) {
+  return sanitizeChatGptStreamValue(String(value || 'ChatGPT stream failed'))
+    .replace(/\b[A-Za-z0-9_-]*(?:secret|token|password|api[_-]?key)[A-Za-z0-9_-]*\b/gi, '[redacted]');
+}
+
+function safeChatGptStreamErrorCode(value) {
+  const code = String(value || '');
+  return /^[a-z][a-z0-9_]{0,63}$/i.test(code) && !/(?:token|secret|password|cookie|auth|api_?key|credential)/i.test(code)
+    ? code
+    : 'chatgpt_stream_error';
+}
+
+function isChatGptNdjsonStream(provider, request) {
+  return !!request?.stream && provider?.capabilities?.streamFormat === 'ndjson';
+}
+
+export function createChatGptStreamEmitter({ io = defaultIo, now = () => new Date().toISOString() } = {}) {
+  const eventNames = new Set(['session', 'status', 'delta', 'message', 'complete', 'timeout', 'error']);
+  const sources = new Set(['live-cdp', 'provider-snapshot']);
+  let sequence = 0;
+  let terminal = false;
+  let conversationId = null;
+  const write = (event, payload = {}, { terminalEvent = false } = {}) => {
+    if (terminal || (terminalEvent && terminal)) return null;
+    if (!eventNames.has(event)) {
+      return write('error', { code: 'invalid_stream_event', message: 'Invalid internal ChatGPT stream event.', source: 'provider-snapshot' }, { terminalEvent: true });
+    }
+    const safe = sanitizeChatGptStreamValue(payload);
+    const candidateId = safe.provider_conversation_id || safe.providerConversationId || conversationId || null;
+    if (candidateId) conversationId = candidateId;
+    const { event: _event, provider: _provider, provider_conversation_id: _providerConversationId, providerConversationId: _providerConversationIdAlias, sequence: _sequence, captured_at: _capturedAt, source: suppliedSource, ...content } = safe;
+    const line = {
+      ...content,
+      source: sources.has(suppliedSource) ? suppliedSource : 'provider-snapshot',
+      captured_at: now(),
+      sequence: ++sequence,
+      provider_conversation_id: conversationId,
+      provider: 'chatgpt',
+      event,
+    };
+    io.stdout(JSON.stringify(line));
+    if (terminalEvent) terminal = true;
+    return line;
+  };
+  const emitProgress = (event, payload = {}) => {
+    if (!['session', 'status', 'delta', 'message'].includes(event)) {
+      write('error', { code: 'invalid_stream_progress_event', message: 'Invalid provider ChatGPT stream progress event.', source: payload?.source }, { terminalEvent: true });
+      throw new Error('Invalid provider ChatGPT stream progress event.');
+    }
+    return write(event, payload);
+  };
+  const emitTerminal = (event, payload = {}) => {
+    if (!['complete', 'timeout', 'error'].includes(event)) throw new Error('Invalid internal ChatGPT stream terminal event.');
+    return write(event, payload, { terminalEvent: true });
+  };
+  return { emit: emitProgress, emitProgress, emitTerminal, get terminal() { return terminal; } };
+}
+
+function chatGptTerminalEvent(result, metadata, source) {
+  const providerState = sanitizeProviderStateForOutput('chatgpt', result?.providerState || metadata?.provider_state || null);
+  const structuredTurn = providerState?.structured_turn || null;
+  const common = {
+    source,
+    provider_conversation_id: result?.providerConversationId || providerState?.conversation_id || metadata?.provider_conversation_id || null,
+    response: sanitizeChatGptStreamValue(result?.text || ''),
+    turn: sanitizeChatGptStreamValue(structuredTurn),
+    provider_state: providerState,
+    model: result?.modelUsed || metadata?.model || null,
+    effort: providerState?.thinking_effort || null,
+    url: sanitizeConversationUrlForOutput(result?.finalUrl || metadata?.final_url || null),
+  };
+  if (result?.done) return { event: 'complete', payload: { ...common, complete: true, status: 'complete' } };
+  return { event: 'timeout', payload: { ...common, complete: false, status: 'in_progress' } };
 }
 
 const SAFE_ATTACHMENT_METADATA_KEYS = new Set([
@@ -1007,7 +1103,7 @@ export async function runPromptAttempt({ browser, provider, request, selectedMod
       validateConversationUrlForProvider(provider, request.conversationTarget, { optionName: '--conversation' });
     }
     console.error(`[${provider.name}] Running provider transport: ${provider.transport || 'direct'}`);
-    const result = await provider.run({ browser, request, selectedModel, conversation });
+    const result = await provider.run({ browser, request, selectedModel, conversation, onStreamEvent: request.onStreamEvent });
     const normalized = normalizeProviderResult({ result, page: null, provider, request, selectedModel });
     if (normalized.rateLimited) {
       console.error(`[${provider.name}] Rate limit detected for model: ${selectedModel}`);
@@ -1036,7 +1132,7 @@ export async function runPromptAttempt({ browser, provider, request, selectedMod
     console.error(`[${provider.name}] Page ready: ${page.url()}`);
     await provider.preflight?.({ browser, page, request, selectedModel, conversation });
 
-    attemptContext = await provider.createAttemptContext?.({ browser, page, request, selectedModel, conversation }) || null;
+    attemptContext = await provider.createAttemptContext?.({ browser, page, request, selectedModel, conversation, onStreamEvent: request.onStreamEvent }) || null;
 
     if (selectedModel !== 'default') {
       console.error(`[${provider.name}] Setting model: ${selectedModel}`);
@@ -1070,6 +1166,7 @@ export async function runPromptAttempt({ browser, provider, request, selectedMod
       prompt: request.prompt,
       selectedModel,
       request,
+      onStreamEvent: request.onStreamEvent,
     });
 
     let normalized = normalizeProviderResult({ result, page, provider, request, selectedModel });
@@ -1185,6 +1282,7 @@ function requestBypassesCache(request = {}, provider = null) {
 }
 
 export function aiChatResultExitCode(request, result) {
+  if (request?.stream && result?.provider?.capabilities?.streamFormat === 'ndjson') return result?.metadata?.complete ? 0 : 1;
   return request?.final && result?.metadata?.complete === false ? 1 : 0;
 }
 
@@ -1194,6 +1292,12 @@ function validateProviderRequest(provider, request) {
   if (request.submitOnly && (request.final || request.stream)) throw new Error('--submit-only conflicts with --final and --stream');
   if (request.final && request.prompt) throw new Error('--final cannot be used with --prompt');
   if (request.final && !request.conversationTarget) throw new Error('--final requires --conversation <provider-id-or-url>');
+  if (request.stream && caps.streamFormat === 'ndjson' && !request.prompt && !request.conversationTarget) {
+    throw new Error('[chatgpt] --stream requires --prompt or --conversation <provider-id-or-url>.');
+  }
+  if (request.stream && caps.streamFormat === 'ndjson' && request.outFile) {
+    throw new Error('[chatgpt] --out is not supported with --stream NDJSON output.');
+  }
   if (request.submitOnly && !caps.supportsSubmitOnly) throw new Error(`[${provider.name}] --submit-only is not supported by this provider.`);
   if (request.final && !caps.supportsFinal) throw new Error(`[${provider.name}] --final is not supported by this provider.`);
   if (caps.localConversationState === false && (request.saveConversation || request.attachConversation)) {
@@ -1218,13 +1322,25 @@ export async function runAiChat(request, deps = {}) {
   const cache = deps.cache || defaultCache;
   const io = deps.io || defaultIo;
   const fs = deps.fs || defaultFs;
-  if (request.conversationTarget && isHttpUrl(request.conversationTarget)) {
-    validateConversationUrlForProvider(provider, request.conversationTarget, { optionName: '--conversation' });
+  const streamEmitter = isChatGptNdjsonStream(provider, request) ? createChatGptStreamEmitter({ io }) : null;
+  const emitStreamError = (error, source = request.prompt ? 'live-cdp' : 'provider-snapshot') => {
+    if (!streamEmitter) return error;
+    const safe = new Error(sanitizeChatGptStreamErrorMessage(error?.message));
+    safe.code = safeChatGptStreamErrorCode(error?.code);
+    streamEmitter.emitTerminal('error', { source, complete: false, code: safe.code, message: safe.message });
+    return safe;
+  };
+  try {
+    if (request.conversationTarget && isHttpUrl(request.conversationTarget)) {
+      validateConversationUrlForProvider(provider, request.conversationTarget, { optionName: '--conversation' });
+    }
+    if (request.attachConversation && isHttpUrl(request.attachConversation)) {
+      validateConversationUrlForProvider(provider, request.attachConversation, { optionName: '--attach-conversation' });
+    }
+    validateProviderRequest(provider, request);
+  } catch (error) {
+    throw emitStreamError(error, 'provider-snapshot');
   }
-  if (request.attachConversation && isHttpUrl(request.attachConversation)) {
-    validateConversationUrlForProvider(provider, request.attachConversation, { optionName: '--attach-conversation' });
-  }
-  validateProviderRequest(provider, request);
 
   if (request.listModels) {
     let browser = null;
@@ -1261,11 +1377,21 @@ export async function runAiChat(request, deps = {}) {
     }
   }
 
-  const attachedConversation = request.attachConversation ? attachConversationReference(request, provider, fs) : null;
+  let attachedConversation;
+  try {
+    attachedConversation = request.attachConversation ? attachConversationReference(request, provider, fs) : null;
+  } catch (error) {
+    throw emitStreamError(error, 'provider-snapshot');
+  }
   if (request.conversationTarget && isHttpUrl(request.conversationTarget)) {
     validateConversationUrlForProvider(provider, request.conversationTarget, { optionName: '--conversation' });
   }
-  const conversation = deps.conversation || attachedConversation?.conversation || resolveConversationReference(request, fs, provider);
+  let conversation;
+  try {
+    conversation = deps.conversation || attachedConversation?.conversation || resolveConversationReference(request, fs, provider);
+  } catch (error) {
+    throw emitStreamError(error, 'provider-snapshot');
+  }
 
   if (request.attachConversation && !request.prompt) {
     const metadata = {
@@ -1312,11 +1438,15 @@ export async function runAiChat(request, deps = {}) {
     : true;
   let browserSession = null;
   let browser = null;
-  let activeRequest = request;
-  if (needsBrowser) {
-    browserSession = await ensureAiChatBrowserSession(browserRequestForProvider(request, provider), deps);
-    browser = browserSession.browser;
-    activeRequest = browserSession.request;
+  let activeRequest = streamEmitter ? { ...request, onStreamEvent: event => streamEmitter.emitProgress(event.event, event) } : request;
+  try {
+    if (needsBrowser) {
+      browserSession = await ensureAiChatBrowserSession(browserRequestForProvider(activeRequest, provider), deps);
+      browser = browserSession.browser;
+      activeRequest = streamEmitter ? { ...browserSession.request, onStreamEvent: event => streamEmitter.emitProgress(event.event, event) } : browserSession.request;
+    }
+  } catch (error) {
+    throw emitStreamError(error, activeRequest.prompt ? 'live-cdp' : 'provider-snapshot');
   }
 
   try {
@@ -1324,7 +1454,7 @@ export async function runAiChat(request, deps = {}) {
       const selectedModel = resolveInitialModel(provider, activeRequest, conversation);
       console.error(`[${provider.name}] Rechecking saved conversation: ${conversation.id || sanitizeConversationUrlForOutput(conversation.url) || 'provider-state'}`);
       const result = normalizeProviderResult({
-        result: await provider.recheckConversation({ browser, request: activeRequest, selectedModel, conversation }),
+        result: await provider.recheckConversation({ browser, request: activeRequest, selectedModel, conversation, onStreamEvent: activeRequest.onStreamEvent }),
         page: null,
         provider,
         request: activeRequest,
@@ -1349,7 +1479,10 @@ export async function runAiChat(request, deps = {}) {
       const savedConversation = saveConversationReference(activeRequest, provider, result, metadata, fs, conversation);
       if (savedConversation) metadata.conversation_record_path = savedConversation.path;
       const finalOutput = buildOutput({ request: activeRequest, metadata, text: result.text });
-      emitOutput({ request: activeRequest, outputText: finalOutput.text, metadata, rawText: result.rawText, io });
+      if (streamEmitter) {
+        const terminal = chatGptTerminalEvent(result, metadata, 'provider-snapshot');
+        streamEmitter.emitTerminal(terminal.event, terminal.payload);
+      } else emitOutput({ request: activeRequest, outputText: finalOutput.text, metadata, rawText: result.rawText, io });
       if (activeRequest.outFile) console.error(`[${provider.name}] Saved to ${activeRequest.outFile}`);
       return { source: 'recheck', provider, result: publicProviderResult(result), metadata, output: finalOutput.text };
     }
@@ -1387,10 +1520,15 @@ export async function runAiChat(request, deps = {}) {
     if (savedConversation) metadata.conversation_record_path = savedConversation.path;
 
     const finalOutput = buildOutput({ request: activeRequest, metadata, text: result.text });
-    emitOutput({ request: activeRequest, outputText: finalOutput.text, metadata, rawText: result.rawText, io });
+    if (streamEmitter) {
+      const terminal = chatGptTerminalEvent(result, metadata, 'live-cdp');
+      streamEmitter.emitTerminal(terminal.event, terminal.payload);
+    } else emitOutput({ request: activeRequest, outputText: finalOutput.text, metadata, rawText: result.rawText, io });
     if (activeRequest.outFile) console.error(`[${provider.name}] Saved to ${activeRequest.outFile}`);
 
     return { source: 'live', provider, result: publicProviderResult(result), metadata, output: finalOutput.text };
+  } catch (error) {
+    throw emitStreamError(error, activeRequest.prompt ? 'live-cdp' : 'provider-snapshot');
   } finally {
     if (browserSession?.shouldDisconnect) browser?.disconnect();
   }
