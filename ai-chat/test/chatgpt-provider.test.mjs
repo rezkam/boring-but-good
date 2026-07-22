@@ -15,12 +15,66 @@ import {
   extractChatGptWebSocketPayload,
   hasChatGptTerminalQuorum,
   readChatGptConversation,
+  listChatGptConversations,
   resolveChatGptModel,
   selectChatGptCurrentBranch,
   selectChatGptModelInUi,
   selectChatGptStructuredTurn,
   verifyChatGptObservedModel,
 } from '../scripts/ai-chat/providers/chatgpt.mjs';
+
+test('listing keeps auth in page, uses one bounded GET, and exposes only safe fields', async () => {
+  const calls = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === '/api/auth/session') return { ok: true, json: async () => ({ accessToken: 'secret-token', account: { id: 'account-1' } }) };
+    return { ok: true, json: async () => ({ total: 2, items: [
+      { id: 'good_1', title: 'token=abc normal prose', create_time: 1, update_time: 2, current_node: 'node', async_status: { state: 'token=abc', progress: 1 }, is_temporary_chat: true, is_archived: true, is_starred: true, mapping: { hidden: true }, snippet: 'hidden' },
+      { id: '../bad', title: 'bad' },
+    ] }) };
+  };
+  try {
+    const page = { url: () => 'https://chatgpt.com/', evaluate: async (fn, arg) => fn(arg) };
+    const result = await listChatGptConversations({ browser: { pages: async () => [page] }, limit: 20, now: () => 'now' });
+    assert.equal(calls.length, 2); assert.equal(calls[1].options.method, 'GET'); assert.match(calls[1].url, /offset=0&limit=20&order=updated/);
+    assert.equal(result.count, 1); assert.equal(result.conversations[0].is_temporary, true); assert.equal(result.conversations[0].async_status.state, 'token=[redacted]');
+    assert.equal('mapping' in result.conversations[0], false); assert.equal('snippet' in result.conversations[0], false); assert.doesNotMatch(JSON.stringify(result), /secret-token|account-1/);
+  } finally { globalThis.fetch = previousFetch; }
+});
+
+test('preflight returns minimal provider baseline without mutating request', async () => {
+  const request = { conversationTarget: 'provider_1' }; const page = { url: () => 'https://chatgpt.com/c/provider_1' };
+  const context = await chatgptProvider.preflight({ page, request, readConversation: async () => ({ conversation: { current_node: 'node_1', mapping: { secret: true } } }) });
+  assert.deepEqual(context, { expectedConversationId: 'provider_1', baselineCurrentNode: 'node_1' }); assert.equal('chatgptContinuationBaseline' in request, false);
+});
+test('preflight rejects wrong ChatGPT continuation URL', async () => {
+  await assert.rejects(() => chatgptProvider.preflight({ page: { url: () => 'https://chatgpt.com/' }, request: { conversationTarget: 'provider_1' }, readConversation: async () => null }), /not the requested/);
+});
+test('preflight rejects missing detail and baseline node', async () => {
+  const page = { url: () => 'https://chatgpt.com/c/provider_1' };
+  await assert.rejects(() => chatgptProvider.preflight({ page, request: { conversationTarget: 'provider_1' }, readConversation: async () => null }), /baseline/);
+  await assert.rejects(() => chatgptProvider.preflight({ page, request: { conversationTarget: 'provider_1' }, readConversation: async () => ({ conversation: {} }) }), /baseline/);
+});
+test('preserve continuation model uses default sentinel while explicit model remains explicit', () => {
+  assert.equal(chatgptProvider.preserveContinuationModel({ request: {}, conversation: { providerId: 'provider_1' } }), true);
+  assert.equal(chatgptProvider.preserveContinuationModel({ request: { modelExplicit: true }, conversation: { providerId: 'provider_1' } }), false);
+});
+test('preserve submit-only uses observed model rather than Extra High', async () => {
+  const result = await chatgptProvider.waitForResponse({ page: { url: () => 'https://chatgpt.com/' }, timeoutMs: 10, selectedModel: 'default', request: { submitOnly: true }, networkTracker: { waitForSubmission: async () => ({ conversationId: 'provider_1', observedPayloadModel: 'observed-model', observedPayloadThinkingEffort: 'extended' }) } });
+  assert.equal(result.modelUsed, 'observed-model'); assert.equal(result.providerState.model_slug, 'observed-model');
+});
+test('preserve response rejects missing continuation baseline', async () => {
+  await assert.rejects(() => chatgptProvider.waitForResponse({ page: { url: () => '' }, timeoutMs: 1, selectedModel: 'default', request: {}, attemptContext: { expectedConversationId: 'provider_1' }, networkTracker: { snapshot: () => ({}) } }), /baseline/);
+});
+test('listing errors are sanitized and actionable', async () => {
+  const previous = globalThis.fetch; globalThis.fetch = async () => ({ ok: false, status: 401 });
+  try { await assert.rejects(() => listChatGptConversations({ browser: { pages: async () => [{ url: () => 'https://chatgpt.com/', evaluate: async (fn, arg) => fn(arg) }] } }), /Authentication/); } finally { globalThis.fetch = previous; }
+});
+test('listing status redacts nested secret values', async () => {
+  const previous = globalThis.fetch; globalThis.fetch = async url => url === '/api/auth/session' ? ({ ok: true, json: async () => ({ accessToken: 'AUTH_SECRET', account: { id: 'ACCOUNT_SECRET' } }) }) : ({ ok: true, json: async () => ({ items: [{ id: 'provider_1', async_status: { nested: { token: 'SENTINEL', list: ['Bearer SENTINEL'] } } }] }) });
+  try { const value = await listChatGptConversations({ browser: { pages: async () => [{ url: () => 'https://chatgpt.com/', evaluate: async (fn, arg) => fn(arg) }] } }); assert.doesNotMatch(JSON.stringify(value), /SENTINEL|AUTH_SECRET|ACCOUNT_SECRET/); } finally { globalThis.fetch = previous; }
+});
 
 class FakeCdpSession extends EventEmitter {
   constructor() { super(); this.calls = []; this.responses = new Map(); }
@@ -350,7 +404,7 @@ test('composer setup failure prevents submit', async () => {
 function completeDetail({ status = 'COMPLETE', final = true } = {}) {
   return { streamStatus: { status }, conversation: { mapping: {
     user: { id: 'user', parent: null, message: { id: 'u', author: { role: 'user' }, create_time: 2, content: { parts: ['question'] } } },
-    assistant: { id: 'assistant', parent: 'user', message: { id: 'a', author: { role: 'assistant' }, channel: 'final', status: final ? 'finished_successfully' : 'in_progress', end_turn: final, content: { parts: ['answer'], citations: [{ url: 'x' }] }, metadata: { model_slug: 'gpt-5-6-thinking', thinking_effort: 'max', resume_token: 'secret' } } },
+    assistant: { id: 'assistant', parent: 'user', message: { id: 'a', author: { role: 'assistant' }, create_time: 3, update_time: 4, channel: 'final', status: final ? 'finished_successfully' : 'in_progress', end_turn: final, content: { parts: ['answer'], citations: [{ url: 'content-citation' }] }, metadata: { model_slug: 'gpt-5-6-thinking', thinking_effort: 'max', turn_exchange_id: 'turn-1', citations: [{ url: 'citation' }], content_references: [{ type: 'webpage' }], search_result_groups: [{ type: 'search' }], story_events: [{ type: 'tool' }], resume_token: 'secret' } } },
     system: { id: 'system', parent: null, message: { author: { role: 'system' }, content: { parts: ['hidden'] } } },
   }, current_node: 'assistant' } };
 }
@@ -574,4 +628,72 @@ test('attached polling emits deduplicated structured message snapshots before st
   assert.deepEqual(messages.map(event => event.change), ['new', 'new', 'changed', 'changed']);
   assert.equal(messages.filter(event => event.message.id === 'u').length, 1);
   assert.equal(messages.every(event => event.source === 'live-cdp'), true);
+});
+
+test('continuation ignores the old complete node and completes only after the branch changes', async () => {
+  const oldDetail = completeDetail();
+  const continued = structuredClone(oldDetail);
+  continued.conversation.mapping.user2 = { id: 'user2', parent: 'assistant', message: { id: 'u2', author: { role: 'user' }, create_time: 5, content: { parts: ['follow-up'] } } };
+  continued.conversation.mapping.assistant2 = { id: 'assistant2', parent: 'user2', message: { ...structuredClone(oldDetail.conversation.mapping.assistant.message), id: 'a2', create_time: 6, update_time: 7, content: { parts: ['follow-up answer'] }, metadata: { ...oldDetail.conversation.mapping.assistant.message.metadata, turn_exchange_id: 'turn-2' } } };
+  continued.conversation.current_node = 'assistant2';
+  let reads = 0;
+  const result = await chatgptProvider.waitForResponse({
+    page: { url: () => 'https://chatgpt.com/c/provider_1' }, timeoutMs: 2_000, selectedModel: 'default', request: {},
+    attemptContext: { expectedConversationId: 'provider_1', baselineCurrentNode: 'assistant' },
+    networkTracker: { snapshot: () => ({ conversationId: 'provider_1', observedPayloadModel: 'gpt-observed', observedPayloadThinkingEffort: 'extended', transport: 'network-incremental-sse' }) },
+    readConversation: async () => reads++ === 0 ? oldDetail : continued,
+    sleepFn: async () => {},
+  });
+  assert.equal(result.done, true);
+  assert.equal(result.providerConversationId, 'provider_1');
+  assert.equal(result.modelUsed, 'gpt-5-6-thinking');
+  assert.deepEqual(result.providerState.structured_turn.messages.map(message => message.id), ['u2', 'a2']);
+  assert.deepEqual({
+    user: result.providerState.structured_turn.user_message_id,
+    assistant: result.providerState.structured_turn.assistant_message_id,
+    exchange: result.providerState.structured_turn.turn_exchange_id,
+    started: result.providerState.structured_turn.started_at,
+    completed: result.providerState.structured_turn.completed_at,
+  }, { user: 'u2', assistant: 'a2', exchange: 'turn-2', started: 5, completed: 7 });
+  assert.equal(result.providerState.structured_turn.citations[0].url, 'citation');
+  assert.equal(result.providerState.structured_turn.content_references[0].type, 'webpage');
+  assert.equal(result.providerState.structured_turn.search_result_groups[0].type, 'search');
+  assert.equal(result.providerState.structured_turn.story_events[0].type, 'tool');
+  assert.doesNotMatch(JSON.stringify(result), /secret|hidden/);
+});
+
+test('continuation does not accept unchanged old terminal detail', async () => {
+  const result = await chatgptProvider.waitForResponse({
+    page: { url: () => 'https://chatgpt.com/c/provider_1' }, timeoutMs: 1_000, selectedModel: 'default', request: {},
+    attemptContext: { expectedConversationId: 'provider_1', baselineCurrentNode: 'assistant' },
+    networkTracker: { snapshot: () => ({ conversationId: 'provider_1', observedPayloadModel: 'gpt-observed', transport: 'network-incremental-sse' }) },
+    readConversation: async () => completeDetail(), sleepFn: async () => {},
+  });
+  assert.equal(result.done, false);
+  assert.equal(result.providerConversationId, 'provider_1');
+  assert.equal(result.modelUsed, 'gpt-5-6-thinking');
+});
+
+test('continuation request identity mismatch emits no accepted progress', async () => {
+  let clock = 0; const events = []; const client = new FakeCdpSession();
+  const tracker = await createChatGptNetworkTracker({ page: pageFor(client), selectedModel: 'default', expectedConversationId: 'provider_1', preserveSelection: true, onStreamEvent: event => events.push(event), now: () => clock, sleepFn: async () => { clock += 100; } });
+  try {
+    client.emit('Network.requestWillBeSent', { requestId: 'request', request: { method: 'POST', url: 'https://chatgpt.com/backend-api/f/conversation', postData: '{"conversation_id":"provider_2"}' } });
+    client.emit('Network.responseReceived', { requestId: 'request', response: { status: 200, mimeType: 'text/event-stream' } });
+    await assert.rejects(() => tracker.waitForSubmission(100), /request conversation id did not match/);
+    assert.deepEqual(events, []);
+  } finally { await tracker.dispose(); }
+});
+
+test('continuation stream identity mismatch emits no session', async () => {
+  const events = []; const client = new FakeCdpSession();
+  client.responses.set('Network.streamResourceContent', { bufferedData: Buffer.from('data: {"conversation_id":"provider_2"}\n\n').toString('base64') });
+  const tracker = await createChatGptNetworkTracker({ page: pageFor(client), selectedModel: 'default', expectedConversationId: 'provider_1', preserveSelection: true, onStreamEvent: event => events.push(event) });
+  try {
+    client.emit('Network.requestWillBeSent', { requestId: 'request', request: { method: 'POST', url: 'https://chatgpt.com/backend-api/f/conversation', postData: '{"conversation_id":"provider_1"}' } });
+    client.emit('Network.responseReceived', { requestId: 'request', response: { status: 200, mimeType: 'text/event-stream' } });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.match(tracker.snapshot().error, /stream conversation id did not match/);
+    assert.equal(events.some(event => event.event === 'session'), false);
+  } finally { await tracker.dispose(); }
 });

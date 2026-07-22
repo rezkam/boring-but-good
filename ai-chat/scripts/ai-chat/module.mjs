@@ -77,12 +77,15 @@ export function parseAiChatArgs(args = process.argv.slice(2)) {
   const files = optionValues(args, '--file');
   const spaceUuid = optionValue(args, '--space-uuid', optionValue(args, '--space', null));
   const verifyModelTimeoutSeconds = parsePositiveIntegerOption(args, '--verify-model-timeout', 90);
+  const conversationLimit = parsePositiveIntegerOption(args, '--conversation-limit', 20);
+  if (args.includes('--conversation-limit') && conversationLimit > 100) throw new Error('Invalid --conversation-limit value: must be between 1 and 100');
 
   return {
     providerName,
     promptFile: promptFile === true ? null : promptFile,
     inlinePrompt: inlinePrompt === true ? null : inlinePrompt,
     modelName: modelName === true ? 'default' : modelName,
+    modelExplicit: args.includes('--model'),
     modelTask: modelTask === true ? null : modelTask,
     thinking: hasFlag(args, '--thinking'),
     outFile: outFile === true ? null : outFile,
@@ -99,6 +102,8 @@ export function parseAiChatArgs(args = process.argv.slice(2)) {
     saveConversation: saveConversation === true ? null : saveConversation,
     attachConversation: attachConversation === true ? null : attachConversation,
     listModels: hasFlag(args, '--list-models'),
+    listConversations: hasFlag(args, '--list-conversations'),
+    conversationLimit,
     verifyModels: hasFlag(args, '--verify-models'),
     verifyModelTimeoutSeconds,
     includeConversation: hasFlag(args, '--include-conversation'),
@@ -375,7 +380,7 @@ export async function ensureAiChatBrowserSession(request, deps = {}) {
 }
 
 export function buildAiChatRequest(options = {}) {
-  const prompt = options.listModels
+  const prompt = options.listModels || options.listConversations
     || (options.final && !hasPromptInput(options))
     || (options.attachConversation && !hasPromptInput(options))
     || (options.conversationTarget && !hasPromptInput(options))
@@ -387,6 +392,7 @@ export function buildAiChatRequest(options = {}) {
   return {
     providerName: options.providerName || 'grok',
     modelName: options.modelName || 'default',
+    modelExplicit: typeof options.modelExplicit === 'boolean' ? options.modelExplicit : (typeof options.modelName === 'string' && options.modelName !== 'default'),
     modelTask: options.modelTask || null,
     thinking: !!options.thinking,
     outFile: options.outFile || null,
@@ -406,6 +412,9 @@ export function buildAiChatRequest(options = {}) {
     attachConversation: options.attachConversation || null,
     conversationStoreDir: options.conversationStoreDir || DEFAULT_CONVERSATION_STORE_DIR,
     listModels: !!options.listModels,
+    listConversations: !!options.listConversations,
+    conversationLimit: options.conversationLimit || 20,
+    hasPromptInput: hasPromptInput(options),
     verifyModels: !!options.verifyModels,
     verifyModelTimeoutSeconds: options.verifyModelTimeoutSeconds || 90,
     includeConversation: !!options.includeConversation,
@@ -534,7 +543,7 @@ function isChatGptNdjsonStream(provider, request) {
   return !!request?.stream && provider?.capabilities?.streamFormat === 'ndjson';
 }
 
-export function createChatGptStreamEmitter({ io = defaultIo, now = () => new Date().toISOString() } = {}) {
+export function createChatGptStreamEmitter({ io = defaultIo, now = () => new Date().toISOString(), outFile = null } = {}) {
   const eventNames = new Set(['session', 'status', 'delta', 'message', 'complete', 'timeout', 'error']);
   const sources = new Set(['live-cdp', 'provider-snapshot']);
   let sequence = 0;
@@ -547,18 +556,30 @@ export function createChatGptStreamEmitter({ io = defaultIo, now = () => new Dat
     }
     const safe = sanitizeChatGptStreamValue(payload);
     const candidateId = safe.provider_conversation_id || safe.providerConversationId || conversationId || null;
-    if (candidateId) conversationId = candidateId;
     const { event: _event, provider: _provider, provider_conversation_id: _providerConversationId, providerConversationId: _providerConversationIdAlias, sequence: _sequence, captured_at: _capturedAt, source: suppliedSource, ...content } = safe;
     const line = {
       ...content,
       source: sources.has(suppliedSource) ? suppliedSource : 'provider-snapshot',
       captured_at: now(),
-      sequence: ++sequence,
-      provider_conversation_id: conversationId,
+      sequence: sequence + 1,
+      provider_conversation_id: candidateId,
       provider: 'chatgpt',
       event,
     };
-    io.stdout(JSON.stringify(line));
+    const serialized = JSON.stringify(line);
+    if (outFile) {
+      try {
+        io.appendPrivateStreamFile(outFile, `${serialized}\n`);
+      } catch {
+        outFile = null;
+        const safe = new Error('Failed to append the requested private NDJSON transcript.');
+        safe.code = 'stream_file_error';
+        throw safe;
+      }
+    }
+    sequence += 1;
+    if (candidateId) conversationId = candidateId;
+    io.stdout(serialized);
     if (terminalEvent) terminal = true;
     return line;
   };
@@ -720,9 +741,17 @@ export function buildMetadata({ request, provider, result, fallbackFrom, fallbac
 export function buildOutput({ request, metadata, text }) {
   const submitOnlyText = request.submitOnly ? (metadata.provider_conversation_id || text) : text;
   if (request.jsonOutput) {
+    const isChatGpt = metadata.provider === 'chatgpt';
     return {
       extension: 'json',
-      text: JSON.stringify({ ...metadata, response: submitOnlyText }, null, 2),
+      text: JSON.stringify({
+        ...metadata,
+        ...(isChatGpt ? {
+          thinking_effort: metadata.provider_state?.thinking_effort || null,
+          turn: metadata.provider_state?.structured_turn || null,
+        } : {}),
+        response: submitOnlyText,
+      }, null, 2),
     };
   }
 
@@ -1130,16 +1159,18 @@ export async function runPromptAttempt({ browser, provider, request, selectedMod
       page = await provider.findPage({ browser, continueChat: request.continueChat, request });
     }
     console.error(`[${provider.name}] Page ready: ${page.url()}`);
-    await provider.preflight?.({ browser, page, request, selectedModel, conversation });
+    const preflightContext = await provider.preflight?.({ browser, page, request, selectedModel, conversation }) || null;
 
-    attemptContext = await provider.createAttemptContext?.({ browser, page, request, selectedModel, conversation, onStreamEvent: request.onStreamEvent }) || null;
+    attemptContext = await provider.createAttemptContext?.({ browser, page, request, selectedModel, conversation, preflightContext, onStreamEvent: request.onStreamEvent }) || null;
 
-    if (selectedModel !== 'default') {
+    if (selectedModel !== 'default' && provider.shouldSetModel?.({ request, conversation, selectedModel }) !== false) {
       console.error(`[${provider.name}] Setting model: ${selectedModel}`);
       await provider.setModel({ page, model: selectedModel, thinking: request.thinking, request, selectedModel });
     }
 
-    const preSubmitLen = await page.evaluate(() => document.body.innerText.length);
+    const preSubmitLen = provider.capabilities?.requiresPreSubmitTextRead === false
+      ? null
+      : await page.evaluate(() => document.body.innerText.length);
 
     await provider.clearInput({ page, request });
     console.error(`[${provider.name}] Typing ${request.prompt.length} chars...`);
@@ -1234,6 +1265,7 @@ function savedConversationModel(conversation = null) {
 }
 
 export function resolveInitialModel(provider, request, conversation = null) {
+  if (provider?.preserveContinuationModel?.({ request, conversation })) return 'default';
   if (request.modelName && request.modelName !== 'default') return request.modelName;
   if (request.modelTask && provider.taskModels?.[request.modelTask]) return provider.taskModels[request.modelTask];
   const conversationModel = savedConversationModel(conversation);
@@ -1288,15 +1320,19 @@ export function aiChatResultExitCode(request, result) {
 
 function validateProviderRequest(provider, request) {
   const caps = provider?.capabilities || {};
+  if (request.listConversations) {
+    if (!caps.supportsConversationListing) throw new Error(`[${provider.name}] --list-conversations is not supported by this provider.`);
+    if (!Number.isInteger(request.conversationLimit) || request.conversationLimit < 1 || request.conversationLimit > 100) throw new Error('--conversation-limit must be between 1 and 100');
+    if (request.hasPromptInput || request.conversationTarget || request.submitOnly || request.final || request.stream || request.listModels || request.saveConversation || request.attachConversation) {
+      throw new Error('--list-conversations conflicts with prompt, conversation, submit, final, stream, models, save, and attach options.');
+    }
+  }
   if (request.submitOnly && !request.prompt) throw new Error('--submit-only requires --prompt');
   if (request.submitOnly && (request.final || request.stream)) throw new Error('--submit-only conflicts with --final and --stream');
   if (request.final && request.prompt) throw new Error('--final cannot be used with --prompt');
   if (request.final && !request.conversationTarget) throw new Error('--final requires --conversation <provider-id-or-url>');
   if (request.stream && caps.streamFormat === 'ndjson' && !request.prompt && !request.conversationTarget) {
     throw new Error('[chatgpt] --stream requires --prompt or --conversation <provider-id-or-url>.');
-  }
-  if (request.stream && caps.streamFormat === 'ndjson' && request.outFile) {
-    throw new Error('[chatgpt] --out is not supported with --stream NDJSON output.');
   }
   if (request.submitOnly && !caps.supportsSubmitOnly) throw new Error(`[${provider.name}] --submit-only is not supported by this provider.`);
   if (request.final && !caps.supportsFinal) throw new Error(`[${provider.name}] --final is not supported by this provider.`);
@@ -1322,7 +1358,7 @@ export async function runAiChat(request, deps = {}) {
   const cache = deps.cache || defaultCache;
   const io = deps.io || defaultIo;
   const fs = deps.fs || defaultFs;
-  const streamEmitter = isChatGptNdjsonStream(provider, request) ? createChatGptStreamEmitter({ io }) : null;
+  let streamEmitter = null;
   const emitStreamError = (error, source = request.prompt ? 'live-cdp' : 'provider-snapshot') => {
     if (!streamEmitter) return error;
     const safe = new Error(sanitizeChatGptStreamErrorMessage(error?.message));
@@ -1339,7 +1375,35 @@ export async function runAiChat(request, deps = {}) {
     }
     validateProviderRequest(provider, request);
   } catch (error) {
+    if (!streamEmitter && isChatGptNdjsonStream(provider, request)) streamEmitter = createChatGptStreamEmitter({ io });
     throw emitStreamError(error, 'provider-snapshot');
+  }
+
+  if (isChatGptNdjsonStream(provider, request)) {
+    try {
+      if (request.outFile) io.initializePrivateStreamFile(request.outFile);
+      streamEmitter = createChatGptStreamEmitter({ io, outFile: request.outFile });
+    } catch (error) {
+      // stdout remains a valid one-terminal-event NDJSON stream even when the optional transcript cannot be initialized.
+      streamEmitter = createChatGptStreamEmitter({ io });
+      streamEmitter.emitTerminal('error', { source: request.prompt ? 'live-cdp' : 'provider-snapshot', complete: false, code: 'stream_file_error', message: sanitizeChatGptStreamErrorMessage(error.message) });
+      return { source: 'stream-file-error', provider, metadata: { complete: false }, result: { text: '', done: false }, output: '' };
+    }
+  }
+
+  if (request.listConversations) {
+    let browser = null;
+    let browserSession = null;
+    try {
+      browserSession = await ensureAiChatBrowserSession(browserRequestForProvider(request, provider), deps);
+      browser = browserSession.browser;
+      const listing = await provider.listConversations({ browser, request: browserSession.request });
+      const output = JSON.stringify(listing, null, 2);
+      emitOutput({ request: { ...browserSession.request, jsonOutput: true }, outputText: output, metadata: listing, rawText: output, io });
+      return { source: 'provider-list', provider, metadata: listing, result: { text: output, done: true }, output };
+    } finally {
+      if (browserSession?.shouldDisconnect) browser?.disconnect();
+    }
   }
 
   if (request.listModels) {
@@ -1540,6 +1604,16 @@ export const defaultIo = {
   },
   writeFile(path, text, encoding = 'utf-8') {
     writePrivateArtifact(path, text, encoding);
+  },
+  initializePrivateStreamFile(path) {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, '', { encoding: 'utf-8', mode: PRIVATE_STATE_FILE_MODE });
+    enforcePrivateFilePermissions(path, defaultFs, 'ChatGPT NDJSON transcript');
+  },
+  appendPrivateStreamFile(path, text) {
+    // writeFile with append mode would weaken test injection; use the native append flag and verify mode.
+    writeFileSync(path, text, { encoding: 'utf-8', flag: 'a', mode: PRIVATE_STATE_FILE_MODE });
+    enforcePrivateFilePermissions(path, defaultFs, 'ChatGPT NDJSON transcript');
   },
 };
 

@@ -111,6 +111,52 @@
         "A saved local conversation retains the private read-write token when the provider supplies it, but public JSON, sidecars, cache metadata, stderr, and URLs never expose the token.",
         "Both turns use browser-network-sse without rendered HTML, element interaction, DOM fallback, or cookie extraction."
       ]
+    },
+    {
+      "id": 10,
+      "prompt": "Draft, but do not execute, the ChatGPT command to continue provider conversation ID example-provider-id with a follow-up, preserving its current model selection and returning JSON.",
+      "expected_output": "Provides a provider-ID-only command and explains that the visible UI performs the single write while network reads verify the changed branch and strict quorum.",
+      "files": [],
+      "expectations": [
+        "Uses --provider chatgpt --conversation example-provider-id --prompt and --json.",
+        "Does not use --save-conversation, --attach-conversation, a local alias, or an automated live write.",
+        "States that omitting --model preserves the existing UI selection and reports observed model verification."
+      ]
+    },
+    {
+      "id": 11,
+      "prompt": "List my ChatGPT conversations read-only, with at most 20 results, and return the safe structured JSON contract.",
+      "expected_output": "Uses the bounded read-only listing command and returns only safe provider conversation fields.",
+      "files": [],
+      "expectations": [
+        "Uses --provider chatgpt --list-conversations --conversation-limit 20 --json.",
+        "Does not include credentials, headers, mapping, snippets, account data, or arbitrary provider fields.",
+        "Does not submit, archive, star, delete, or otherwise mutate a provider conversation."
+      ]
+    },
+    {
+      "id": 12,
+      "prompt": "Draft, do not execute, a ChatGPT Pro submit-only detach command for a new prompt.",
+      "expected_output": "Drafts --provider chatgpt --model pro --submit-only without execution.",
+      "files": [], "expectations": ["Explicitly says draft/do not execute."]
+    },
+    {
+      "id": 13,
+      "prompt": "Draft, do not execute, an explicit High ChatGPT provider-ID continuation command.",
+      "expected_output": "Uses --conversation <provider-id> --model high and --json without local save state.",
+      "files": [], "expectations": ["Explicitly says draft/do not execute."]
+    },
+    {
+      "id": 14,
+      "prompt": "Read-only: show the final JSON command for an existing ChatGPT provider conversation ID.",
+      "expected_output": "Uses --conversation <provider-id> --final --json and does not submit.",
+      "files": [], "expectations": ["No write is requested."]
+    },
+    {
+      "id": 15,
+      "prompt": "Read-only: show the NDJSON reattach/watch command for an existing ChatGPT provider conversation ID.",
+      "expected_output": "Uses --conversation <provider-id> --stream and describes one terminal event.",
+      "files": [], "expectations": ["No write is requested."]
     }
   ]
 }

@@ -45,3 +45,13 @@ test('public skill surface does not include local account or machine details', (
   }
   assert.deepEqual(leaks, []);
 });
+
+test('public ChatGPT contract has no stale local or rewrite claims', () => {
+  const docs = ['SKILL.md', 'references/ai-chat.md', 'references/providers.md', 'references/transport.md', 'references/orchestration.md', 'references/evaluation.md']
+    .map(file => readFileSync(join(ROOT, file), 'utf8')).join('\n');
+  for (const stale of [/pro-extended/i, /gpt-5\.5/i, /chatgpt[^\n]*save-conversation/i, /chatgpt[^\n]*attach-conversation/i, /The adapter rewrites the backend request payload/i, /DOM text is only a fallback/i, /old [^\n]*medium[^\n]*high[^\n]*HTTP 422/i, /Sentinel flow/i, /imported-chatgpt/i, /launch-risks/i]) assert.doesNotMatch(docs, stale);
+  assert.match(docs, /--list-conversations/); assert.match(docs, /provider conversation ID/i); assert.match(docs, /extra-high/);
+  const source = readFileSync(join(ROOT, 'scripts/ai-chat/providers/chatgpt.mjs'), 'utf8');
+  assert.doesNotMatch(source, /Fetch\.enable|Network\.setRequestInterception|continueRequest|fulfillRequest/);
+  assert.doesNotMatch(source, /document\.body\.innerText|text stability|localConversationState:\s*true/);
+});

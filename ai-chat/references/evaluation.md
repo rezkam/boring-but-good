@@ -73,7 +73,7 @@ The automated matrix lives in `test/provider-model-selection-matrix.test.mjs`. I
 | Provider | Static assertions | Gated live cases | Actual selected model reporting | Known limitations |
 | --- | --- | --- | --- | --- |
 | Perplexity | Direct tool aliases, captured GPT-5.6 Terra Thinking toggle mapping, task defaults, unknown model rejection, no UI lifecycle methods, and no DOM source patterns | `perplexity/best`, `openai/gpt-5.6-terra`, `openai/gpt-5.6-terra-thinking`, `perplexity/deep-research`, `perplexity/sonar-2` | Canonical model id plus `provider_state.transport: browser-network-sse`, `network_only: true`, and `dom_processing: false` | Max-tier models are filtered. Account acceptance depends on the current account tier. Deep research is slow |
-| ChatGPT | Request profile aliases like `fast`, `reasoning`, `extra-high`, task defaults for quick, reasoning, and pro, unknown profile rejection | `instant`, `extra-high`, `pro-extended` | Backend slug from the observed stream when available, with request profile and applied payload in `provider_state` | Selection uses payload rewrite and stream observation, not a public model list API. The current backend rejects old `medium` and `high` `thinking_effort` payloads with HTTP 422, so they are not exposed. Live checks create normal ChatGPT conversations. Deep research is not a stable AI Chat profile |
+| ChatGPT | Five public UI profiles, provider-ID continuation, strict quorum, safe final turn, NDJSON, and bounded listing | Deterministic UI/network fixtures only | Observed backend model and effort verify explicit selection; omitted continuation model is reported as preserved/observed | UI drift remains a current-provider risk. Coordinator-only read gates may inspect listing or existing conversations; no automated live write is allowed |
 | Gemini | WebUI model aliases like `flash`, `thinking`, `pro`, task defaults for quick, reasoning, and pro, unknown model rejection | `gemini-3-flash`, `gemini-3-flash-thinking`, `gemini-3-pro` | Gemini model id from the WebUI API result | Live checks require Google cookies. Backend error `1052` fallback must be explicit. Deep research is not a stable AI Chat profile |
 | Grok | UI label aliases like `default`, `quick`, `think`, task defaults for quick and reasoning, unknown label rejection | `fast` for the current X/Grok session | Verified UI label id in `selected_model` and visible label details in `provider_state` | Grok exposes UI labels only. It does not report a backend model slug. Current X/Grok sessions can expose only `Fast`; run `--list-models --verify-models` before using `Auto` or `Expert`. Live checks create normal Grok conversations. Deep research is not a stable AI Chat profile |
 
@@ -109,7 +109,7 @@ Recommended environment gates:
 For a provider feature, save commands, stdout JSON, stderr, notes, and screenshots when applicable under:
 
 ```text
-/tmp/ai-chat-verify/<provider>/<case>/
+.agents/artifacts/ai-chat-verify/<provider>/<case>/
 ```
 
 Suggested files:
@@ -124,7 +124,7 @@ Suggested files:
 
 Private state and generated artifacts that must not be committed:
 
-- `/tmp/ai-chat-verify/...`
+- `.agents/artifacts/ai-chat-verify/...`
 - `~/.cache/pi-browser-tools/ai-chat-browser.json`
 - `~/.cache/pi-browser-tools/ai-chat-conversations/...`
 - Browser Tools cache and copied profiles under `~/.cache/pi-browser-tools`
@@ -136,7 +136,7 @@ Private state and generated artifacts that must not be committed:
 A claim like "Perplexity deep research works" or "ChatGPT extra-high continuation works" needs this evidence:
 
 1. Unit test command and passing result for the changed parser, routing, metadata, and state behavior.
-2. Live command with exact flags, saved under `/tmp/ai-chat-verify/<provider>/<case>/`.
+2. Coordinator-owned read-only live command with exact flags, saved under `.agents/artifacts/ai-chat-verify/<provider>/<case>/`.
 3. Non-empty response and `complete` state, or a clearly documented partial state when the feature is resumable.
 4. Metadata showing `provider`, `requested_model`, `selected_model`, `model_task` when used, `captured_at`, completion fields, and relevant `provider_state`.
 5. Proof that private tokens are redacted from public output. For Perplexity, public output may show `has_read_write_token: true` but not the token.
@@ -154,7 +154,7 @@ Use `references/perplexity.md` for the full normal research and deep research pl
 
 ### ChatGPT
 
-Long-running claims require stream-state evidence. Save JSON showing `provider_state.stream_state.status`, `assistant_turn_complete`, `handed_off`, `resumed_stream`, `partial`, `timeout`, and `dom_fallback`. If a request times out, recheck the saved conversation with no prompt and show whether it completed.
+Use deterministic tests for all writes. A coordinator may gate read-only listing or `--final` on an existing provider ID. Evidence must show strict quorum, provider-ID equality, the safe current turn, and observed model/effort. Current provider UI drift is residual risk.
 
 ### Gemini
 
@@ -172,7 +172,7 @@ Prompt-level evals should cover:
 - saved conversation, follow-up continuation, and attach by link or backend id
 - account-specific model discovery with `--verify-models`
 - Grok model selection and reasoning or non-reasoning behavior
-- ChatGPT request profiles, long-running handoff, timeout recheck, and DOM fallback visibility
+- ChatGPT request profiles, long-running handoff, strict quorum, provider-ID final retrieval, and safe turn visibility
 - Gemini RPC model discovery, temporary/history behavior, session verification, and native continuation fallback
 - browser lifecycle refusal and recovery messages
 - fallback and failure reporting
