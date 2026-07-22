@@ -70,43 +70,45 @@ const MODEL_SELECTION_MATRIX = [
     defaultModel: 'extra-high',
     resolveId: model => resolveChatGptModel(model)?.id || null,
     aliases: [
-      ['fast', 'instant'],
-      ['reasoning', 'extra-high'],
+      ['instant', 'instant'],
+      ['medium', 'medium'],
+      ['high', 'high'],
       ['extra-high', 'extra-high'],
+      ['pro', 'pro'],
     ],
     taskDefaults: [
       ['quick', 'instant'],
-      ['reasoning', 'extra-high'],
-      ['pro', 'pro-extended'],
+      ['reasoning', 'high'],
+      ['pro', 'pro'],
     ],
     unknownModel: 'definitely-not-a-chatgpt-profile',
     outputCase: {
       requestedModel: 'extra-high',
-      selectedModel: 'gpt-5-5-thinking',
+      selectedModel: 'gpt-5-6-thinking',
       fallbackTrail: ['extra-high'],
       providerState: {
-        transport: 'network-stream',
+        transport: 'network-incremental-sse',
         requested_model_profile: 'extra-high',
-        requested_payload_model: 'gpt-5-5-thinking',
-        model_slug: 'gpt-5-5-thinking',
+        observed_payload_model: 'gpt-5-6-thinking',
+        model_slug: 'gpt-5-6-thinking',
         thinking_effort: 'max',
         stream_state: {
           status: 'completed',
           requested_model_profile: 'extra-high',
-          model_slug: 'gpt-5-5-thinking',
-          dom_fallback: false,
+          model_slug: 'gpt-5-6-thinking',
+          terminal_quorum: true,
         },
       },
     },
     liveCases: [
       { kind: 'fast', model: 'instant', timeoutSeconds: 180 },
       { kind: 'reasoning', model: 'extra-high', timeoutSeconds: 300 },
-      { kind: 'provider_specific', model: 'pro-extended', timeoutSeconds: 300 },
+      { kind: 'provider_specific', model: 'pro', timeoutSeconds: 300 },
     ],
     limitations: [
-      'Request profiles are applied by payload rewrite, not by a public model list API.',
-      'Some profile ids are marked unverified until a live account run observes the selected slug.',
-      'The old medium/high thinking_effort payloads are not exposed because the current ChatGPT backend rejects them with HTTP 422.',
+      'Model selection is performed through the ChatGPT UI before prompt submission.',
+      'Network-observed model and effort fields verify the UI-selected profile after submission.',
+      'Only instant, medium, high, extra-high, and pro are public profile ids.',
       'Live prompt checks create normal ChatGPT conversations, so use a disposable profile if account history matters.',
       'Deep research is not exposed as a stable AI Chat model profile.',
     ],
@@ -367,13 +369,13 @@ function assertLiveProviderEvidence(providerName, emitted, { tokenRequired = tru
 
   const state = emitted.provider_state || {};
   if (providerName === 'chatgpt') {
-    assert.ok(state.intercepted_requests > 0, 'chatgpt must prove a conversation request was intercepted');
+    assert.ok((state.response_statuses || []).some(item => /\/backend-api\/f\/conversation$/.test(item.url)), 'chatgpt must observe the final conversation request');
     assert.ok(
       (state.response_statuses || []).some(item => /\/backend-api\/f\/conversation$/.test(item.url) && item.status === 200 && /event-stream/.test(item.mimeType || '')),
       'chatgpt must prove the conversation event stream returned HTTP 200',
     );
     assert.equal(state.stream_state?.status, 'completed');
-    assert.equal(state.dom_fallback, false);
+    assert.equal(state.stream_state?.terminal_quorum, true);
   } else if (providerName === 'perplexity') {
     assert.equal(typeof state.backend_uuid, 'string', 'perplexity must return a backend UUID');
     assert.equal(state.has_read_write_token, true, 'perplexity must report private continuation token presence safely');
