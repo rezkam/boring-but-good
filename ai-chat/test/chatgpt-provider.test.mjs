@@ -379,6 +379,40 @@ test('final retrieval timeout returns safe incomplete state without provider wri
   assert.equal(JSON.stringify(result).includes('secret'), false);
 });
 
+test('reattached streams emit one session, deduplicate snapshots, and report changed messages', async () => {
+  let clock = 0;
+  const events = [];
+  const page = { url: () => 'https://chatgpt.com/c/provider_123', goto: async () => { throw new Error('unexpected navigation'); } };
+  const first = completeDetail({ status: 'IN_PROGRESS', final: false });
+  const second = structuredClone(first);
+  second.conversation.mapping.assistant.message.content.parts = ['updated answer'];
+  let reads = 0;
+  await chatgptProvider.recheckConversation({
+    browser: { pages: async () => [page], newPage: async () => page }, selectedModel: 'extra-high',
+    conversation: { providerId: 'provider_123', url: page.url() }, request: { timeoutSeconds: 2 },
+    onStreamEvent: event => events.push(event), now: () => clock, sleepFn: async () => { clock += 1000; },
+    readConversation: async () => [first, first, second][Math.min(reads++, 2)],
+  });
+  assert.equal(events.filter(event => event.event === 'session').length, 1);
+  assert.equal(events.filter(event => event.event === 'message').length, 3);
+  assert.deepEqual(events.filter(event => event.event === 'message').map(event => event.change), ['new', 'new', 'changed']);
+});
+
+test('network tracker emits safe live session, delta, and handoff progress without raw payloads', async () => {
+  const client = new FakeCdpSession(); const events = [];
+  client.responses.set('Network.streamResourceContent', { bufferedData: Buffer.from('data: {"conversation_id":"provider_123"}\n\ndata: {"p":"/message/content/parts/0","o":"append","v":"hello"}\n\ndata: {"type":"stream_handoff","resume_token":"test-secret"}\n\ndata: [DONE]\n\n').toString('base64') });
+  const tracker = await createChatGptNetworkTracker({ page: pageFor(client), selectedModel: 'instant', onStreamEvent: event => events.push(event) });
+  try {
+    client.emit('Network.requestWillBeSent', { requestId: 'request', request: { method: 'POST', url: 'https://chatgpt.com/backend-api/f/conversation' } });
+    client.emit('Network.responseReceived', { requestId: 'request', response: { status: 200, mimeType: 'text/event-stream' } });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(events.filter(event => event.event === 'session').length, 1);
+    assert.deepEqual(events.filter(event => event.event === 'delta').map(event => event.text), ['hello']);
+    assert.ok(events.some(event => event.event === 'status' && event.status === 'stream_handoff'));
+    assert.equal(JSON.stringify(events).includes('test-secret'), false);
+  } finally { await tracker.dispose(); }
+});
+
 test('strict terminal quorum requires both persistent completion and a finished final assistant', () => {
   assert.equal(hasChatGptTerminalQuorum(completeDetail({ status: 'COMPLETE', final: false })), false);
   assert.equal(hasChatGptTerminalQuorum(completeDetail({ status: 'IN_PROGRESS', final: true })), false);
@@ -520,4 +554,24 @@ test('persistent response returns a complete structured turn only after both quo
   assert.equal(result.text, 'answer');
   assert.equal(result.providerState.stream_state.terminal_quorum, true);
   assert.equal(JSON.stringify(result.providerState).includes('secret'), false);
+});
+
+test('attached polling emits deduplicated structured message snapshots before strict completion', async () => {
+  const events = []; let reads = 0;
+  const first = completeDetail({ status: 'IN_PROGRESS', final: false });
+  const changed = structuredClone(first);
+  changed.conversation.mapping.assistant.message.content.parts = ['changed answer'];
+  const complete = completeDetail();
+  const result = await chatgptProvider.waitForResponse({
+    page: { url: () => 'https://chatgpt.com/c/c' }, timeoutMs: 4_000, selectedModel: 'extra-high',
+    networkTracker: { snapshot: () => ({ text: '', conversationId: 'c', requestedModelProfile: 'extra-high', transport: 'network-incremental-sse' }) },
+    onStreamEvent: event => events.push(event),
+    readConversation: async () => [first, first, changed, complete][Math.min(reads++, 3)],
+    sleepFn: async () => {},
+  });
+  assert.equal(result.done, true);
+  const messages = events.filter(event => event.event === 'message');
+  assert.deepEqual(messages.map(event => event.change), ['new', 'new', 'changed', 'changed']);
+  assert.equal(messages.filter(event => event.message.id === 'u').length, 1);
+  assert.equal(messages.every(event => event.source === 'live-cdp'), true);
 });
