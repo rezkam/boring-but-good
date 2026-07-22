@@ -28,6 +28,10 @@ Provider auth failures should point to profile-sync recovery, not to unsafe atta
 
 ## Conversation and provider state
 
+### ChatGPT provider sessions
+
+ChatGPT has no local conversation record, cache entry, pending-turn file, or checkpoint. Its identity is a provider conversation ID or a trusted clean `https://chatgpt.com/c/<id>` URL. Continuation reads baseline detail before visible composer work, verifies the loaded URL, then accepts completion only when the current branch changed and strict provider quorum is met. `--final` and no-prompt reattach are read-only; temporary chats reject detached reads and continuation. Conversation listing is a bounded authenticated GET performed inside managed Chrome. Coordinator-owned live verification may be read-only only; provider UI drift remains a residual risk.
+
 AI Chat owns the provider-neutral session record lifecycle. A saved local conversation id is scoped by provider and stores enough private continuation state to send only the next user turn when the provider supports backend continuation.
 
 Normal JSON output exposes safe continuation metadata only. If a provider needs a secret continuation token, the local private conversation record can store it, but stdout, stderr, sidecar metadata, and query cache entries must use a redacted form such as `has_read_write_token: true` instead of the token value.

@@ -11,6 +11,7 @@ import {
   buildMetadata,
   createChatGptStreamEmitter,
   conversationRecordPath,
+  defaultIo,
   parseAiChatArgs,
   resolveConversationReference,
   resolveInitialModel,
@@ -1589,4 +1590,151 @@ test('terminal reconciliation carries a provider id even without an earlier sess
   await runAiChat(buildAiChatRequest({ providerName: 'chatgpt', prompt: 'hello', stream: true }), { provider, cache: noCache(), io: { stdout: line => lines.push(line) } });
   const terminal = JSON.parse(lines[0]);
   assert.equal(terminal.event, 'complete'); assert.equal(terminal.provider_conversation_id, 'provider_123');
+});
+
+test('ChatGPT stream transcript appends before stdout and turns an append failure into one error terminal', () => {
+  const stdout = []; const file = [];
+  const emitter = createChatGptStreamEmitter({ outFile: 'explicit.ndjson', io: { stdout: line => stdout.push(line), appendPrivateStreamFile: (_path, line) => file.push(line) }, now: () => 'now' });
+  emitter.emitProgress('status', { source: 'live-cdp', status: 'submitted' });
+  emitter.emitTerminal('complete', { source: 'live-cdp', complete: true });
+  assert.deepEqual(stdout.map(line => `${line}\n`), file);
+  const failed = []; let appendCount = 0;
+  const failing = createChatGptStreamEmitter({ outFile: 'explicit.ndjson', io: { stdout: line => failed.push(line), appendPrivateStreamFile: () => { appendCount += 1; if (appendCount === 2) throw new Error('disk'); } }, now: () => 'now' });
+  failing.emitProgress('status', { source: 'live-cdp', status: 'submitted' });
+  assert.throws(() => failing.emitTerminal('complete', { source: 'live-cdp', complete: true }), /private NDJSON transcript/);
+  failing.emitTerminal('error', { source: 'live-cdp', complete: false, code: 'stream_file_error', message: 'safe' });
+  const failedEvents = failed.map(line => JSON.parse(line));
+  assert.deepEqual(failedEvents.map(line => line.event), ['status', 'error']);
+  assert.deepEqual(failedEvents.map(line => line.sequence), [1, 2]);
+  assert.equal(failedEvents.filter(line => ['complete', 'timeout', 'error'].includes(line.event)).length, 1);
+});
+
+test('listing parses bounded flags and rejects invalid limits before browser use', async () => {
+  const parsed = parseAiChatArgs(['--provider', 'chatgpt', '--list-conversations', '--conversation-limit', '20']);
+  assert.equal(parsed.listConversations, true); assert.equal(parsed.conversationLimit, 20);
+  for (const limit of ['0', '-1', '101', 'nope']) assert.throws(() => parseAiChatArgs(['--conversation-limit', limit]));
+  const request = buildAiChatRequest({ providerName: 'grok', listConversations: true });
+  await assert.rejects(() => runAiChat(request, { provider: { name: 'grok', capabilities: {} }, browserTools: { startChrome: async () => { throw new Error('browser started'); } } }), /not supported/);
+});
+
+test('ChatGPT stream validation emits one stdout terminal before browser work', async () => {
+  const lines = []; const provider = { name: 'chatgpt', capabilities: { streamFormat: 'ndjson' } };
+  await assert.rejects(() => runAiChat(buildAiChatRequest({ providerName: 'chatgpt', prompt: 'x', stream: true, submitOnly: true }), { provider, io: { stdout: line => lines.push(line) } }));
+  assert.deepEqual(lines.map(line => JSON.parse(line).event), ['error']);
+});
+test('stream initialization failure uses prompted and reattach sources', async () => {
+  for (const [request, source] of [[buildAiChatRequest({ providerName: 'chatgpt', prompt: 'x', stream: true, outFile: 'x' }), 'live-cdp'], [buildAiChatRequest({ providerName: 'chatgpt', conversationTarget: 'provider_1', stream: true, outFile: 'x' }), 'provider-snapshot']]) {
+    const lines = []; const provider = { name: 'chatgpt', capabilities: { streamFormat: 'ndjson', localConversationState: false } };
+    const result = await runAiChat(request, { provider, io: { stdout: line => lines.push(line), initializePrivateStreamFile: () => { throw new Error('no'); } } });
+    assert.equal(JSON.parse(lines[0]).source, source); assert.equal(aiChatResultExitCode(request, result), 1);
+  }
+});
+test('resolveInitialModel preserves ChatGPT continuation only when omitted', () => {
+  const provider = { ...chatgptProvider }; assert.equal(resolveInitialModel(provider, { modelName: 'default' }, { providerId: 'p' }), 'default'); assert.equal(resolveInitialModel(provider, { modelName: 'high', modelExplicit: true }, { providerId: 'p' }), 'high'); assert.equal(resolveInitialModel(provider, { modelName: 'default' }), 'extra-high');
+});
+test('ChatGPT listing invokes only listing transport and prints one JSON object', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-listing-'));
+  try {
+    const lines = []; let listed = 0; let started = 0; let connected = 0;
+    const browser = { disconnect() {} };
+    const provider = {
+      name: 'chatgpt', capabilities: { supportsConversationListing: true },
+      async listConversations({ request }) {
+        listed += 1; assert.equal(request.conversationLimit, 7);
+        return { provider: 'chatgpt', count: 1, conversations: [{ provider_conversation_id: 'provider_1' }] };
+      },
+    };
+    const result = await runAiChat(buildAiChatRequest({ providerName: 'chatgpt', listConversations: true, conversationLimit: 7, browserStateFile: join(dir, 'browser.json') }), {
+      provider,
+      startChrome: async () => { started += 1; return { ownerToken: 'owner', port: 4771, profileName: 'Default' }; },
+      connectBrowser: async () => { connected += 1; return browser; },
+      cache: { read: () => assert.fail('listing must not read cache'), write: () => assert.fail('listing must not write cache') },
+      fs: new Proxy({}, { get: () => () => assert.fail('listing must not use conversation storage') }),
+      io: { stdout: line => lines.push(line), writeFile: () => assert.fail('no output file requested') },
+    });
+    assert.deepEqual({ listed, started, connected }, { listed: 1, started: 1, connected: 1 });
+    assert.equal(result.source, 'provider-list');
+    assert.equal(lines.length, 1);
+    assert.equal(JSON.parse(lines[0]).conversations[0].provider_conversation_id, 'provider_1');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test('ChatGPT structured JSON exposes full turn fields', () => {
+  const output = JSON.parse(buildOutput({ request: { jsonOutput: true }, metadata: { provider: 'chatgpt', provider_state: { thinking_effort: 'high', structured_turn: { messages: [{ id: 'u' }], user_message_id: 'u', assistant_message_id: 'a', turn_exchange_id: 't', citations: [{ url: 'x' }], content_references: [], search_result_groups: [], story_events: [], started_at: 1, completed_at: 2 } }, response: 'x' }, text: 'x' }).text);
+  assert.equal(output.turn.user_message_id, 'u'); assert.equal(output.thinking_effort, 'high');
+  assert.deepEqual(Object.keys(output.turn).sort(), ['assistant_message_id', 'citations', 'completed_at', 'content_references', 'messages', 'search_result_groups', 'started_at', 'story_events', 'turn_exchange_id', 'user_message_id'].sort());
+});
+
+test('ChatGPT stream append failures produce one contiguous error terminal through runAiChat', async () => {
+  for (const progressBeforeFailure of [false, true]) {
+    const lines = []; let appends = 0;
+    const provider = {
+      name: 'chatgpt', defaultModel: 'extra-high', capabilities: { streamFormat: 'ndjson', localConversationState: false, cachePolicy: 'none' }, runRequiresBrowser: () => false,
+      async run({ onStreamEvent }) {
+        if (progressBeforeFailure) onStreamEvent({ event: 'status', status: 'submitted', source: 'live-cdp' });
+        return { text: 'answer', done: true, providerConversationId: 'provider_1', providerState: { conversation_id: 'provider_1', structured_turn: { messages: [] } } };
+      },
+    };
+    const failOn = progressBeforeFailure ? 2 : 1;
+    await assert.rejects(() => runAiChat(buildAiChatRequest({ providerName: 'chatgpt', prompt: 'x', stream: true, outFile: 'explicit.ndjson' }), {
+      provider, cache: noCache(), io: {
+        stdout: line => lines.push(line), initializePrivateStreamFile: () => {},
+        appendPrivateStreamFile: () => { appends += 1; if (appends === failOn) throw new Error('disk failure'); },
+      },
+    }), /private NDJSON transcript/);
+    const events = lines.map(JSON.parse);
+    assert.deepEqual(events.map(event => event.sequence), events.map((_, index) => index + 1));
+    assert.equal(events.at(-1).event, 'error');
+    assert.equal(events.filter(event => ['complete', 'timeout', 'error'].includes(event.event)).length, 1);
+    assert.equal(events.some(event => event.event === 'complete'), false);
+  }
+});
+
+test('default ChatGPT stream file IO creates private output without sidecars', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-stream-file-'));
+  try {
+    const output = join(dir, 'private', 'events.ndjson');
+    defaultIo.initializePrivateStreamFile(output);
+    defaultIo.appendPrivateStreamFile(output, '{"event":"complete"}\n');
+    assert.equal(statSync(dirname(output)).mode & 0o777, 0o700);
+    assert.equal(statSync(output).mode & 0o777, 0o600);
+    assert.equal(readFileSync(output, 'utf8'), '{"event":"complete"}\n');
+    assert.equal(existsSync(`${output}.meta.json`), false);
+    assert.equal(existsSync(`${output}.raw.txt`), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('ChatGPT listing conflicts reject before browser, cache, or conversation storage', async () => {
+  const provider = { name: 'chatgpt', capabilities: { supportsConversationListing: true, streamFormat: 'ndjson', localConversationState: false } };
+  const conflicts = [
+    { inlinePrompt: 'x' }, { conversationTarget: 'provider_1' }, { submitOnly: true }, { final: true },
+    { stream: true }, { listModels: true }, { saveConversation: 'local' }, { attachConversation: 'provider_1' },
+  ];
+  for (const conflict of conflicts) {
+    const lines = [];
+    await assert.rejects(() => runAiChat(buildAiChatRequest({ providerName: 'chatgpt', listConversations: true, ...conflict }), {
+      provider,
+      startChrome: () => assert.fail('browser must not start'), connectBrowser: () => assert.fail('browser must not connect'),
+      cache: { read: () => assert.fail('cache read'), write: () => assert.fail('cache write') },
+      fs: new Proxy({}, { get: () => () => assert.fail('conversation storage used') }),
+      io: { stdout: line => lines.push(line) },
+    }), /list-conversations conflicts/);
+    if (conflict.stream) assert.deepEqual(lines.map(line => JSON.parse(line).event), ['error']);
+  }
+});
+
+test('runPromptAttempt passes minimal preflight context and skips ChatGPT pre-submit text reads', async () => {
+  const order = []; const page = { url: () => 'https://chatgpt.com/c/provider_1', evaluate: () => assert.fail('body text must not be read') };
+  const browser = { pages: async () => [page] };
+  const provider = {
+    name: 'chatgpt', capabilities: { requiresPreSubmitTextRead: false },
+    findPage: async () => page,
+    preflight: async () => { order.push('preflight'); return { expectedConversationId: 'provider_1', baselineCurrentNode: 'node_1' }; },
+    createAttemptContext: async ({ preflightContext }) => { order.push('observer'); assert.deepEqual(preflightContext, { expectedConversationId: 'provider_1', baselineCurrentNode: 'node_1' }); return { marker: true }; },
+    clearInput: async () => order.push('clear'), typePrompt: async () => order.push('type'), submit: async () => order.push('submit'),
+    waitForResponse: async ({ attemptContext }) => { order.push('wait'); assert.equal(attemptContext.marker, true); return { text: 'answer', done: true, providerConversationId: 'provider_1' }; },
+    disposeAttemptContext: async () => order.push('dispose'),
+  };
+  const result = await runPromptAttempt({ browser, provider, request: buildAiChatRequest({ providerName: 'chatgpt', prompt: 'follow-up' }), selectedModel: 'default', conversation: { providerId: 'provider_1' } });
+  assert.equal(result.providerConversationId, 'provider_1');
+  assert.deepEqual(order, ['preflight', 'observer', 'clear', 'type', 'submit', 'wait', 'dispose']);
 });

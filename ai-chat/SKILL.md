@@ -1,6 +1,6 @@
 ---
 name: ai-chat
-description: "Use browser-authenticated AI chat providers through reusable provider adapters and Browser Tools. Use this skill whenever the user asks to query Grok, ChatGPT, Gemini, or Perplexity through their logged-in browser session, select or discover available models, run deep research, continue an existing browser chat, save chat history, compare provider outputs, or build a multi-turn research workflow."
+description: "Use browser-authenticated AI chat providers through reusable provider adapters and Browser Tools. Use this skill for ChatGPT provider-ID continuation, read-only reattach/watch, conversation listing, model profiles, and final or NDJSON output, as well as Grok, Gemini, and Perplexity browser-session work."
 compatibility: "Requires the browser-tools skill as a sibling checkout, macOS Chrome, Node.js 20+, npm dependencies from package.json, and logged-in browser sessions for selected providers."
 ---
 
@@ -27,8 +27,8 @@ By default, AI Chat copies and uses Chrome profile `Default`, so normal logged-i
 | Capability | Providers | Notes |
 | --- | --- | --- |
 | Ask a new question | Grok, ChatGPT, Gemini, Perplexity | Starts or reuses the AI Chat owned Browser Tools browser when needed |
-| Save and continue a conversation | Grok, ChatGPT, Gemini, Perplexity | Save with `--save-conversation`, continue with `--conversation` |
-| Attach an existing provider chat | Grok, ChatGPT, Gemini, Perplexity | Use `--attach-conversation <provider-id-or-url> --save-conversation <local-id>` |
+| Save and continue a conversation | Grok, Gemini, Perplexity | Save with `--save-conversation`, continue with `--conversation` |
+| ChatGPT continuation and reattach | ChatGPT | Use a `provider_conversation_id` or clean trusted `https://chatgpt.com/c/<id>` URL; no local alias, save, or attach |
 | Select a model | Grok, ChatGPT, Gemini, Perplexity | Use `--model <id-or-alias>` or `--task <task>`. Perplexity also supports `--thinking` when a captured Thinking variant exists |
 | List known or discovered models | ChatGPT, Gemini, Perplexity, Grok | Use `--list-models --json`; add `--verify-models` where supported |
 | Deep research | Perplexity | Uses `perplexity/deep-research` and a 3600 second timeout unless `--timeout` is explicit |
@@ -43,17 +43,15 @@ By default, AI Chat copies and uses Chrome profile `Default`, so normal logged-i
 Run commands from `ai-chat/`.
 
 ```bash
-# New chat. AI Chat starts or reuses its owned Browser Tools browser.
-scripts/ai-chat.mjs --provider chatgpt --model instant --prompt "Give three launch risks" --json --save-conversation launch-risks
+# ChatGPT identities are provider IDs only. New writes use the visible UI; reads use authenticated same-origin network requests.
+scripts/ai-chat.mjs --provider chatgpt --model instant --prompt "Give three launch risks" --json
+scripts/ai-chat.mjs --provider chatgpt --model pro --prompt-file ./question.md --submit-only --json
+scripts/ai-chat.mjs --provider chatgpt --conversation provider-id --prompt "Rank them by mitigation cost" --json
+scripts/ai-chat.mjs --provider chatgpt --conversation provider-id --final --json
+scripts/ai-chat.mjs --provider chatgpt --conversation provider-id --stream --out .agents/artifacts/chatgpt.ndjson
+scripts/ai-chat.mjs --provider chatgpt --list-conversations --conversation-limit 20 --json
 
-# Continue a saved chat by provider-scoped local id.
-scripts/ai-chat.mjs --provider chatgpt --conversation launch-risks --prompt "Rank them by mitigation cost" --json --save-conversation launch-risks
-
-# Recheck a saved ChatGPT request that timed out, without sending a new prompt.
-scripts/ai-chat.mjs --provider chatgpt --conversation launch-risks --save-conversation launch-risks --json
-
-# Attach an existing provider link or backend id to a reusable local session.
-scripts/ai-chat.mjs --provider chatgpt --attach-conversation https://chatgpt.com/c/example-id --save-conversation imported-chatgpt --json
+# Attach remains available for providers with local state.
 scripts/ai-chat.mjs --provider perplexity --attach-conversation 123e4567-e89b-12d3-a456-426614174000 --save-conversation imported-pplx --json
 
 # Continue a Perplexity thread URL returned in a previous response.
@@ -99,7 +97,7 @@ scripts/ai-chat.mjs \
 ## Provider notes
 
 - Perplexity has one transport, `browser-network-sse`. It runs authenticated same-origin requests in a headless-preferred managed browser, parses captured schematized SSE block patches, supports model and Thinking variants, persistent-by-default history, explicit Incognito, research filters, deep research, files, Spaces, streaming, and backend UUID continuation. New responses expose the backend UUID and canonical `/search/<uuid>` thread URL. It never extracts browser cookies and has no rendered HTML, element, or DOM fallback path.
-- ChatGPT long-running requests use network SSE and WebSocket state first. Metadata reports stream handoff, timeout, partial or empty response, resumed stream, assistant turn completion, and DOM fallback when fallback is used.
+- ChatGPT uses visible UI only for model selection, composer input, and a single submission. Network observation and authenticated same-origin reads provide progress, listing, and final output. `--submit-only` returns a real provider ID and leaves the managed browser alive. `--stream` writes NDJSON to stdout and ends with exactly one `complete`, `timeout`, or `error` event. It has no local ChatGPT session state, DOM answer fallback, request rewrite, or automated live write verification.
 - Gemini uses WebUI API cookies from the AI Chat owned browser by default. It can fall back to an explicit Chrome profile cookie source. Native continuation can fail with backend error `1097`; metadata must show that and the local transcript fallback.
 - Grok uses browser UI labels and preflights the X/Grok composer before typing. It can verify visible labels, but not a backend model slug. In the current X/Grok app `Fast` is the reliable default; check `--list-models --verify-models` before selecting `Auto` or `Expert`.
 
@@ -121,7 +119,7 @@ scripts/ai-chat.mjs \
 - Grok preflights the X/Grok composer before typing. Fresh, wrong, or logged-out profiles fail with an auth/session error before prompt submission.
 - Open any browser tabs in the background with `browser.newPage({ background: true })`.
 - Prefer provider APIs and network streams whenever possible. Perplexity is strictly network-only and must not add UI automation or DOM parsing. Other UI providers can use browser interaction to authenticate, trigger, and verify; any DOM fallback must be explicit in metadata.
-- For multi-turn work, save a conversation id on the first turn and continue by id. Attach existing provider links or backend ids with `--attach-conversation` and `--save-conversation`. For ChatGPT timeouts, run `--conversation <id> --save-conversation <id>` without a prompt to recheck the same saved turn. Do not replay the whole chat history unless the provider lacks backend continuation.
+- For ChatGPT, continue only with `provider_conversation_id` or trusted `https://chatgpt.com/c/<id>`. `--conversation <id>` without a prompt is read-only; temporary chats reject detached retrieval and continuation. Other providers retain local-state behavior where documented.
 - For model selection, prefer a provider adapter that can list or verify available models. If the account gates models, report which models were visible or accepted. Fallbacks must be explicit in metadata and must not hide a rejected requested model.
-- For live verification, save JSON output, stderr, notes, and screenshots when applicable under `/tmp/ai-chat-verify/...`. Never commit provider responses, model acceptance lists, screenshots, account-visible metadata, conversation records, owner tokens, or read-write tokens.
+- Read-only live verification is a coordinator responsibility. Keep any durable evidence under `.agents/artifacts/`; never commit provider responses, account metadata, credentials, or tokens.
 - Final answers should include what was verified, what failed, evidence paths, and remaining uncertainty.
