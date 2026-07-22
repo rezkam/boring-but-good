@@ -3,7 +3,12 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import {
   CHATGPT_MODEL_LEVELS,
+  CHATGPT_PROVIDER_ID_OBSERVATION_TIMEOUT_MS,
   chatgptProvider,
+  chatGptConversationIdFromUrl,
+  chatGptSubmissionObservationTimeoutMs,
+  normalizeChatGptConversationId,
+  resolveChatGptConversationTarget,
   createChatGptNetworkTracker,
   createChatGptSseDecoder,
   extractChatGptStreamStateFromEncodedItem,
@@ -23,6 +28,57 @@ class FakeCdpSession extends EventEmitter {
   async detach() { this.calls.push({ method: 'detach', params: {} }); }
 }
 const pageFor = client => ({ target: () => ({ createCDPSession: async () => client }) });
+
+test('ChatGPT provider conversation targets accept only opaque ids or trusted clean URLs', () => {
+  assert.equal(normalizeChatGptConversationId('thread_123-abc'), 'thread_123-abc');
+  assert.equal(resolveChatGptConversationTarget('https://chatgpt.com/c/thread_123').providerId, 'thread_123');
+  for (const value of ['', '../thread', 'thread/next', 'thread?x=1', 'https://evil.example/c/thread', 'https://chatgpt.com/c/thread?x=1']) {
+    assert.throws(() => /^https/.test(value) ? chatGptConversationIdFromUrl(value) : normalizeChatGptConversationId(value));
+  }
+});
+
+test('submit-only provider id observation is capped at 30 seconds', async () => {
+  assert.equal(CHATGPT_PROVIDER_ID_OBSERVATION_TIMEOUT_MS, 30_000);
+  assert.equal(chatGptSubmissionObservationTimeoutMs(undefined), 30_000);
+  assert.equal(chatGptSubmissionObservationTimeoutMs(300_000), 30_000);
+  assert.equal(chatGptSubmissionObservationTimeoutMs(5_000), 5_000);
+  let observed = null;
+  await chatgptProvider.waitForResponse({ page: { url: () => 'https://chatgpt.com/' }, timeoutMs: 300_000, selectedModel: 'instant', request: { submitOnly: true }, networkTracker: { waitForSubmission: async timeout => { observed = timeout; return { conversationId: 'provider_123' }; } } });
+  assert.equal(observed, 30_000);
+  await chatgptProvider.waitForResponse({ page: { url: () => 'https://chatgpt.com/' }, timeoutMs: 4_000, selectedModel: 'instant', request: { submitOnly: true }, networkTracker: { waitForSubmission: async timeout => { observed = timeout; return { conversationId: 'provider_123' }; } } });
+  assert.equal(observed, 4_000);
+});
+
+test('submit-only waits for accepted SSE plus a provider id without terminal completion', async () => {
+  const client = new FakeCdpSession();
+  client.responses.set('Network.streamResourceContent', { bufferedData: Buffer.from('data: {"conversation_id":"provider_123"}\n\n').toString('base64') });
+  const tracker = await createChatGptNetworkTracker({ page: pageFor(client), selectedModel: 'instant' });
+  try {
+    client.emit('Network.requestWillBeSent', { requestId: 'request', request: { method: 'POST', url: 'https://chatgpt.com/backend-api/f/conversation' } });
+    client.emit('Network.responseReceived', { requestId: 'request', response: { status: 200, mimeType: 'text/event-stream' } });
+    await new Promise(resolve => setImmediate(resolve));
+    const result = await chatgptProvider.waitForResponse({ page: { url: () => 'https://chatgpt.com/' }, timeoutMs: 100, networkTracker: tracker, selectedModel: 'instant', request: { submitOnly: true } });
+    assert.equal(result.status, 'submitted'); assert.equal(result.done, false); assert.equal(result.providerConversationId, 'provider_123');
+  } finally { await tracker.dispose(); }
+});
+
+test('submit-only reports accepted responses without ids and rejected final responses safely', async () => {
+  for (const response of [
+    { status: 200, mimeType: 'text/event-stream', expected: /Submission may have occurred, but no provider conversation id was observed before timeout/ },
+    { status: 429, mimeType: 'application/json', expected: /Submission failed with HTTP 429/ },
+  ]) {
+    let clock = 0;
+    const client = new FakeCdpSession();
+    const tracker = await createChatGptNetworkTracker({ page: pageFor(client), selectedModel: 'instant', now: () => clock, sleepFn: async () => { clock += 100; } });
+    try {
+      client.emit('Network.requestWillBeSent', { requestId: 'request', request: { method: 'POST', url: 'https://chatgpt.com/backend-api/f/conversation' } });
+      client.emit('Network.responseReceived', { requestId: 'request', response });
+      await new Promise(resolve => setImmediate(resolve));
+      await assert.rejects(() => tracker.waitForSubmission(100), response.expected);
+      assert.equal(tracker.snapshot().conversationId, undefined);
+    } finally { await tracker.dispose(); assert.equal(client.calls.filter(call => call.method === 'detach').length, 1); }
+  }
+});
 
 class FakeInputSession {
   constructor() { this.calls = []; this.detached = false; }
@@ -299,6 +355,30 @@ function completeDetail({ status = 'COMPLETE', final = true } = {}) {
   }, current_node: 'assistant' } };
 }
 
+test('final retrieval polls authenticated detail reads to strict quorum without composer actions', async () => {
+  let clock = 0; let reads = 0; const actions = [];
+  const page = { url: () => 'https://chatgpt.com/c/provider_123', goto: async () => actions.push('goto') };
+  const result = await chatgptProvider.recheckConversation({
+    browser: { pages: async () => [page], newPage: async () => page }, selectedModel: 'extra-high',
+    conversation: { providerId: 'provider_123', url: page.url() }, request: { timeoutSeconds: 2 },
+    now: () => clock, sleepFn: async () => { clock += 1000; },
+    readConversation: async () => (++reads === 1 ? completeDetail({ final: false }) : completeDetail()),
+  });
+  assert.equal(result.done, true); assert.equal(result.status, 'complete'); assert.equal(result.providerConversationId, 'provider_123');
+  assert.equal(result.text, 'answer'); assert.equal(result.providerState.structured_turn.messages.length, 2); assert.deepEqual(actions, []);
+});
+
+test('final retrieval timeout returns safe incomplete state without provider writes', async () => {
+  let clock = 0; const page = { url: () => 'https://chatgpt.com/c/provider_123', goto: async () => { throw new Error('unexpected navigation'); } };
+  const result = await chatgptProvider.recheckConversation({
+    browser: { pages: async () => [page], newPage: async () => page }, selectedModel: 'extra-high',
+    conversation: { providerId: 'provider_123', url: page.url() }, request: { timeoutSeconds: 1 }, now: () => clock,
+    sleepFn: async () => { clock += 1000; }, readConversation: async () => completeDetail({ status: 'IN_PROGRESS', final: false }),
+  });
+  assert.equal(result.done, false); assert.equal(result.status, 'in_progress'); assert.equal(result.providerState.timeout, true);
+  assert.equal(JSON.stringify(result).includes('secret'), false);
+});
+
 test('strict terminal quorum requires both persistent completion and a finished final assistant', () => {
   assert.equal(hasChatGptTerminalQuorum(completeDetail({ status: 'COMPLETE', final: false })), false);
   assert.equal(hasChatGptTerminalQuorum(completeDetail({ status: 'IN_PROGRESS', final: true })), false);
@@ -376,6 +456,29 @@ test('authenticated conversation reads retain auth inside page context', async (
   }
 });
 
+test('authenticated detail reads fail promptly with sanitized actionable errors', async () => {
+  const originalFetch = globalThis.fetch;
+  const page = { evaluate: async (callback, arg) => callback(arg) };
+  const scenarios = [
+    { fetch: async () => ({ ok: true, json: async () => ({}) }), expected: /Authentication is unavailable or expired/ },
+    { fetch: async url => url.includes('/stream_status') ? { ok: true, json: async () => ({ status: 'IN_PROGRESS' }) } : (url.includes('/backend-api/') ? { ok: false, status: 404 } : { ok: true, json: async () => ({ accessToken: 'secret-token', account: { id: 'secret-account' } }) }), expected: /invalid or unavailable.*404/ },
+    { fetch: async url => url.includes('/stream_status') ? { ok: false, status: 503 } : (url.includes('/backend-api/') ? { ok: true, json: async () => ({ mapping: {}, current_node: null }) } : { ok: true, json: async () => ({ accessToken: 'secret-token', account: { id: 'secret-account' } }) }), expected: /status read failed with HTTP 503/ },
+  ];
+  try {
+    for (const scenario of scenarios) {
+      globalThis.fetch = scenario.fetch;
+      await assert.rejects(() => readChatGptConversation(page, 'provider_123'), error => {
+        assert.match(error.message, scenario.expected); assert.equal(error.message.includes('secret'), false); return true;
+      });
+    }
+    globalThis.fetch = async url => url === '/api/auth/session'
+      ? { ok: true, json: async () => ({ accessToken: 'secret-token', account: { id: 'secret-account' } }) }
+      : { ok: true, json: async () => ({ mapping: {}, current_node: null, token: 'secret-token', status: 'IN_PROGRESS' }) };
+    const detail = await readChatGptConversation(page, 'provider_123');
+    assert.equal(detail.streamStatus.status, 'IN_PROGRESS'); assert.equal(JSON.stringify(detail).includes('secret'), false);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test('post-submit model verification accepts observed mappings and exposes mismatches', () => {
   const accepted = [
     ['instant', 'gpt-5-5-instant', null], ['instant', 'gpt-5-5', 'ignored'],
@@ -401,7 +504,7 @@ test('tracker records explicit post-submit model verification without changing t
 
 test('persistent response completion waits for reconciliation instead of DOM or text stability', async () => {
   const result = await chatgptProvider.waitForResponse({
-    page: { url: () => 'https://chatgpt.com/c/c', evaluate: async () => completeDetail() }, timeoutMs: 0, selectedModel: 'extra-high',
+    page: { url: () => 'https://chatgpt.com/c/c', evaluate: async () => ({ detail: completeDetail() }) }, timeoutMs: 0, selectedModel: 'extra-high',
     networkTracker: { snapshot: () => ({ text: 'partial', rawItems: [], conversationId: 'c', requestedModelProfile: 'extra-high', transport: 'network-incremental-sse' }) },
   });
   assert.equal(result.done, false);
@@ -410,7 +513,7 @@ test('persistent response completion waits for reconciliation instead of DOM or 
 
 test('persistent response returns a complete structured turn only after both quorum conditions hold', async () => {
   const result = await chatgptProvider.waitForResponse({
-    page: { url: () => 'https://chatgpt.com/c/c', evaluate: async () => completeDetail() }, timeoutMs: 1_000, selectedModel: 'extra-high',
+    page: { url: () => 'https://chatgpt.com/c/c', evaluate: async () => ({ detail: completeDetail() }) }, timeoutMs: 1_000, selectedModel: 'extra-high',
     networkTracker: { snapshot: () => ({ text: 'stream text', rawItems: ['stream text'], conversationId: 'c', requestedModelProfile: 'extra-high', transport: 'network-incremental-sse' }) },
   });
   assert.equal(result.done, true);

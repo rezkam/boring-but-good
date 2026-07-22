@@ -1,16 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
   buildAiChatRequest,
+  aiChatResultExitCode,
   buildCacheInput,
+  buildOutput,
   buildMetadata,
   conversationRecordPath,
   parseAiChatArgs,
   resolveConversationReference,
   resolveInitialModel,
+  runPromptAttempt,
   runAiChat,
   saveConversationReference,
   validateConversationUrlForProvider,
@@ -1380,4 +1383,105 @@ test('conversation references preserve provider state', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('submit-only and final flags validate the detached ChatGPT contract before browser startup', async () => {
+  const base = { name: 'chatgpt', capabilities: { localConversationState: false, cachePolicy: 'none', supportsSubmitOnly: true, supportsFinal: true }, resolveConversationAttachment: chatgptProvider.resolveConversationAttachment };
+  const submit = buildAiChatRequest(parseAiChatArgs(['--provider', 'chatgpt', '--prompt', 'x', '--submit-only']));
+  assert.equal(submit.prompt, 'x'); assert.equal(submit.submitOnly, true);
+  const finalWithoutPrompt = buildAiChatRequest(parseAiChatArgs(['--provider', 'chatgpt', '--conversation', 'provider_123', '--final']));
+  assert.equal(finalWithoutPrompt.prompt, ''); assert.equal(finalWithoutPrompt.final, true);
+  for (const [args, message] of [
+    [['--provider', 'chatgpt', '--prompt', 'x', '--submit-only', '--stream'], /--submit-only conflicts with --final and --stream/],
+    [['--provider', 'chatgpt', '--prompt', 'x', '--conversation', 'provider_123', '--final'], /--final cannot be used with --prompt/],
+  ]) {
+    const request = buildAiChatRequest(parseAiChatArgs(args));
+    await assert.rejects(() => runAiChat(request, { provider: base, cache: noCache() }), message);
+  }
+  await assert.rejects(() => runAiChat(buildAiChatRequest({ providerName: 'chatgpt', submitOnly: true, prompt: '' }), { provider: base, cache: noCache() }), /--submit-only requires --prompt/);
+  const request = buildAiChatRequest(parseAiChatArgs(['--provider', 'chatgpt', '--conversation', 'provider_123', '--final', '--json', '--timeout', '1']));
+  let reads = 0;
+  const result = await runAiChat(request, {
+    provider: { ...base, async recheckConversation({ conversation }) { assert.equal(conversation.providerId, 'provider_123'); return { text: '', done: false, status: 'in_progress', providerConversationId: conversation.providerId, finalUrl: conversation.url, providerState: { conversation_id: conversation.providerId } }; } },
+    fs: { exists: () => { reads += 1; throw new Error('local state read'); } },
+    cache: { read: () => { reads += 1; }, write: () => { reads += 1; } },
+    browser: {}, io: { stdout() {} },
+  });
+  assert.equal(reads, 0);
+  assert.equal(result.metadata.status, 'in_progress');
+  assert.equal(aiChatResultExitCode(request, result), 1);
+  assert.equal(aiChatResultExitCode(buildAiChatRequest({ providerName: 'chatgpt', prompt: 'x', submitOnly: true }), { metadata: { complete: false } }), 0);
+});
+
+test('submit-only preserves every prompt source while final stays stdin-free', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-submit-prompt-'));
+  const promptFile = join(dir, 'prompt.txt'); const stdinFile = join(dir, 'stdin.txt');
+  try {
+    writeFileSync(promptFile, 'file prompt\n', { mode: 0o600 }); writeFileSync(stdinFile, 'stdin prompt\n', { mode: 0o600 });
+    assert.equal(buildAiChatRequest(parseAiChatArgs(['--prompt', 'inline prompt', '--submit-only'])).prompt, 'inline prompt');
+    assert.equal(buildAiChatRequest({ promptFile, submitOnly: true }).prompt, 'file prompt');
+    assert.equal(buildAiChatRequest({ prompt: 'programmatic prompt', submitOnly: true }).prompt, 'programmatic prompt');
+    assert.equal(buildAiChatRequest({ submitOnly: true, stdinPath: stdinFile }).prompt, 'stdin prompt');
+    assert.equal(buildAiChatRequest({ final: true, conversationTarget: 'provider_123', stdinPath: join(dir, 'missing') }).prompt, '');
+    assert.equal(buildAiChatRequest({ final: true, conversationTarget: 'provider_123', prompt: 'blocked' }).prompt, 'blocked');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('submit-only emits a provider id in plain and JSON output', () => {
+  const metadata = { provider: 'chatgpt', provider_conversation_id: 'provider_123', status: 'submitted', complete: false, conversation_url: 'https://chatgpt.com/c/provider_123' };
+  assert.equal(buildOutput({ request: buildAiChatRequest({ submitOnly: true, prompt: 'x' }), metadata, text: '' }).text, 'provider_123');
+  const json = JSON.parse(buildOutput({ request: buildAiChatRequest({ submitOnly: true, prompt: 'x', jsonOutput: true }), metadata, text: '' }).text);
+  assert.equal(json.provider_conversation_id, 'provider_123'); assert.equal(json.status, 'submitted'); assert.equal(json.complete, false); assert.equal(json.response, 'provider_123');
+});
+
+test('provider-only ChatGPT state and unsupported mode flags reject before browser, fs, or cache use', async () => {
+  const forbidden = { get() { throw new Error('unexpected local or browser access'); } };
+  const chatgpt = { name: 'chatgpt', capabilities: { localConversationState: false, cachePolicy: 'none', supportsSubmitOnly: true, supportsFinal: true }, resolveConversationAttachment: chatgptProvider.resolveConversationAttachment };
+  for (const request of [
+    buildAiChatRequest({ providerName: 'chatgpt', prompt: 'x', saveConversation: 'local' }),
+    buildAiChatRequest({ providerName: 'chatgpt', prompt: 'x', attachConversation: 'provider_123' }),
+  ]) await assert.rejects(() => runAiChat(request, { provider: chatgpt, fs: forbidden, cache: forbidden }), /--save-conversation and --attach-conversation are not supported; use the provider conversation id directly/);
+  const unsupported = { name: 'other', capabilities: {} };
+  await assert.rejects(() => runAiChat(buildAiChatRequest({ providerName: 'other', prompt: 'x', submitOnly: true }), { provider: unsupported, fs: forbidden, cache: forbidden }), /--submit-only is not supported/);
+  await assert.rejects(() => runAiChat(buildAiChatRequest({ providerName: 'other', final: true, conversationTarget: 'id' }), { provider: unsupported, fs: forbidden, cache: forbidden }), /--final is not supported/);
+});
+
+test('ChatGPT capability modes never touch local cache or conversation storage', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-chatgpt-stateless-'));
+  const calls = { cache: 0, fs: 0, run: 0 };
+  const provider = {
+    name: 'chatgpt', capabilities: { localConversationState: false, cachePolicy: 'none', supportsSubmitOnly: true, supportsFinal: true },
+    resolveConversationAttachment: chatgptProvider.resolveConversationAttachment,
+    async run({ request }) { calls.run += 1; return { text: request.submitOnly ? '' : 'answer', done: !request.submitOnly, status: request.submitOnly ? 'submitted' : 'complete', providerConversationId: 'provider_123', finalUrl: 'https://chatgpt.com/c/provider_123', providerState: { conversation_id: 'provider_123' } }; },
+    async recheckConversation({ conversation }) { return { text: '', done: false, status: 'in_progress', providerConversationId: conversation.providerId, finalUrl: conversation.url, providerState: { conversation_id: conversation.providerId } }; },
+  };
+  const fs = new Proxy({}, { get() { calls.fs += 1; throw new Error('local conversation fs accessed'); } });
+  const cache = { read() { calls.cache += 1; }, write() { calls.cache += 1; } };
+  try {
+    const results = [];
+    for (const request of [
+      buildAiChatRequest({ providerName: 'chatgpt', prompt: 'sync', conversationStoreDir: dir }),
+      buildAiChatRequest({ providerName: 'chatgpt', prompt: 'detach', submitOnly: true, conversationStoreDir: dir }),
+      buildAiChatRequest({ providerName: 'chatgpt', final: true, conversationTarget: 'provider_123', conversationStoreDir: dir }),
+    ]) results.push(await runAiChat(request, { provider, cache, fs, browser: {}, io: { stdout() {} } }));
+    assert.equal(calls.cache, 0); assert.equal(calls.fs, 0); assert.equal(calls.run, 2); assert.deepEqual(readdirSync(dir), []);
+    assert.deepEqual({ provider: results[1].metadata.provider, provider_conversation_id: results[1].metadata.provider_conversation_id, status: results[1].metadata.status, complete: results[1].metadata.complete, conversation_url: results[1].metadata.conversation_url }, { provider: 'chatgpt', provider_conversation_id: 'provider_123', status: 'submitted', complete: false, conversation_url: 'https://chatgpt.com/c/provider_123' });
+    assert.equal(results[2].metadata.status, 'in_progress'); assert.equal(results[2].metadata.complete, false); assert.equal(aiChatResultExitCode(buildAiChatRequest({ providerName: 'chatgpt', final: true }), results[2]), 1);
+    const completeFinal = await runAiChat(buildAiChatRequest({ providerName: 'chatgpt', final: true, conversationTarget: 'provider_123', conversationStoreDir: dir }), { provider: { ...provider, async recheckConversation({ conversation }) { return { text: 'answer', done: true, status: 'complete', providerConversationId: conversation.providerId, finalUrl: conversation.url, providerState: { conversation_id: conversation.providerId, structured_turn: { messages: [] } } }; } }, cache, fs, browser: {}, io: { stdout() {} } });
+    assert.equal(completeFinal.metadata.provider_conversation_id, 'provider_123'); assert.equal(completeFinal.metadata.status, 'complete'); assert.equal(completeFinal.metadata.complete, true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('submit-only disposes its attempt observer without closing the browser or page', async () => {
+  let disposed = 0; let closed = 0;
+  const page = { url: () => 'https://chatgpt.com/', evaluate: async () => 0, close: () => { closed += 1; } };
+  const browser = { pages: async () => [], close: () => { closed += 1; } };
+  const provider = {
+    name: 'chatgpt', findPage: async () => page, createAttemptContext: async () => ({ networkTracker: {} }),
+    clearInput: async () => {}, typePrompt: async () => {}, submit: async () => {},
+    waitForResponse: async () => ({ text: '', done: false, status: 'submitted', providerConversationId: 'provider_123', finalUrl: 'https://chatgpt.com/c/provider_123', providerState: { conversation_id: 'provider_123' } }),
+    disposeAttemptContext: async () => { disposed += 1; },
+  };
+  const result = await runPromptAttempt({ browser, provider, request: buildAiChatRequest({ providerName: 'chatgpt', prompt: 'detach', submitOnly: true }), selectedModel: 'default' });
+  assert.equal(result.providerConversationId, 'provider_123'); assert.equal(disposed, 1); assert.equal(closed, 0);
 });
