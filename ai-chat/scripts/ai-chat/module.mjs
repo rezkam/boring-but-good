@@ -92,6 +92,8 @@ export function parseAiChatArgs(args = process.argv.slice(2)) {
     timeoutExplicit: args.includes('--timeout'),
     jsonOutput: hasFlag(args, '--json'),
     stream: hasFlag(args, '--stream'),
+    submitOnly: hasFlag(args, '--submit-only'),
+    final: hasFlag(args, '--final'),
     continueChat: hasFlag(args, '--continue'),
     conversationTarget: conversationTarget === true ? null : conversationTarget,
     saveConversation: saveConversation === true ? null : saveConversation,
@@ -374,6 +376,7 @@ export async function ensureAiChatBrowserSession(request, deps = {}) {
 
 export function buildAiChatRequest(options = {}) {
   const prompt = options.listModels
+    || (options.final && !hasPromptInput(options))
     || (options.attachConversation && !hasPromptInput(options))
     || (options.conversationTarget && !hasPromptInput(options))
     ? ''
@@ -395,6 +398,8 @@ export function buildAiChatRequest(options = {}) {
     timeoutExplicit,
     jsonOutput: !!options.jsonOutput,
     stream: !!options.stream,
+    submitOnly: !!options.submitOnly,
+    final: !!options.final,
     continueChat: !!options.continueChat,
     conversationTarget: options.conversationTarget || null,
     saveConversation: options.saveConversation || null,
@@ -595,9 +600,11 @@ export function buildMetadata({ request, provider, result, fallbackFrom, fallbac
     prompt_chars: request.prompt.length,
     response_chars: text.length,
     complete: !!result.done,
+    status: result.status || (result.done ? 'complete' : 'in_progress'),
     rate_limited: !!result.rateLimited,
     final_url: safeFinalUrl,
     conversation_id: conversation?.id || request.saveConversation || null,
+    provider_conversation_id: result.providerConversationId || providerState?.conversation_id || null,
     conversation_url: safeConversationUrl,
     provider_state: providerState,
     search_results: searchResults,
@@ -615,14 +622,15 @@ export function buildMetadata({ request, provider, result, fallbackFrom, fallbac
 }
 
 export function buildOutput({ request, metadata, text }) {
+  const submitOnlyText = request.submitOnly ? (metadata.provider_conversation_id || text) : text;
   if (request.jsonOutput) {
     return {
       extension: 'json',
-      text: JSON.stringify({ ...metadata, response: text }, null, 2),
+      text: JSON.stringify({ ...metadata, response: submitOnlyText }, null, 2),
     };
   }
 
-  return { extension: 'md', text };
+  return { extension: 'md', text: submitOnlyText };
 }
 
 function writePrivateArtifact(path, text, encoding = 'utf-8') {
@@ -769,6 +777,11 @@ export function attachConversationReference(request, provider, fs = defaultFs) {
 export function resolveConversationReference(request, fs = defaultFs, provider = null) {
   const target = request.conversationTarget;
   if (!target) return null;
+  if (provider?.capabilities?.localConversationState === false) {
+    const attachment = resolveConversationAttachment(provider, target);
+    if (!attachment.provider_id || !attachment.url) throw new Error(`[${provider.name}] Invalid provider conversation id.`);
+    return { id: null, url: attachment.url, providerId: attachment.provider_id, providerState: attachment.provider_state, source: 'provider' };
+  }
   if (isHttpUrl(target)) {
     if (provider) validateConversationUrlForProvider(provider, target, { optionName: '--conversation' });
     const attachment = provider ? resolveConversationAttachment(provider, target) : null;
@@ -797,6 +810,7 @@ function providerStateForConversationRecord(provider, result, conversation = nul
 }
 
 export function saveConversationReference(request, provider, result, metadata, fs = defaultFs, conversation = null) {
+  if (provider?.capabilities?.localConversationState === false) return null;
   const conversationId = request.saveConversation || conversation?.id;
   if (!conversationId) return null;
   const path = conversationRecordPath({ providerName: provider.name, id: conversationId, storeDir: request.conversationStoreDir });
@@ -1109,6 +1123,8 @@ export function normalizeProviderResult({ result, page, provider, request, selec
     attachments: sanitizeAttachmentMetadata(result?.attachments || providerState?.attachments || []),
     evidencePath: result?.evidencePath || null,
     evidenceUrl: result?.evidenceUrl || null,
+    providerConversationId: result?.providerConversationId || result?.provider_conversation_id || providerState?.conversation_id || null,
+    status: result?.status || (result?.done ? 'complete' : null),
   };
 
   return attachPrivateProviderState(normalized, privateProviderStateForConversation(provider, result));
@@ -1164,8 +1180,28 @@ function requestHasFileAttachments(request = {}) {
   return !!files;
 }
 
-function requestBypassesCache(request = {}) {
-  return !!request.stream || !!request.providerOptions?.incognito || requestHasFileAttachments(request);
+function requestBypassesCache(request = {}, provider = null) {
+  return provider?.capabilities?.cachePolicy === 'none' || !!request.stream || !!request.submitOnly || !!request.final || !!request.providerOptions?.incognito || requestHasFileAttachments(request);
+}
+
+export function aiChatResultExitCode(request, result) {
+  return request?.final && result?.metadata?.complete === false ? 1 : 0;
+}
+
+function validateProviderRequest(provider, request) {
+  const caps = provider?.capabilities || {};
+  if (request.submitOnly && !request.prompt) throw new Error('--submit-only requires --prompt');
+  if (request.submitOnly && (request.final || request.stream)) throw new Error('--submit-only conflicts with --final and --stream');
+  if (request.final && request.prompt) throw new Error('--final cannot be used with --prompt');
+  if (request.final && !request.conversationTarget) throw new Error('--final requires --conversation <provider-id-or-url>');
+  if (request.submitOnly && !caps.supportsSubmitOnly) throw new Error(`[${provider.name}] --submit-only is not supported by this provider.`);
+  if (request.final && !caps.supportsFinal) throw new Error(`[${provider.name}] --final is not supported by this provider.`);
+  if (caps.localConversationState === false && (request.saveConversation || request.attachConversation)) {
+    throw new Error(`[${provider.name}] --save-conversation and --attach-conversation are not supported; use the provider conversation id directly.`);
+  }
+  if (caps.localConversationState === false && request.providerOptions?.incognito && (request.submitOnly || request.final || request.conversationTarget)) {
+    throw new Error(`[${provider.name}] temporary chats cannot be used with detached submission or retrieval.`);
+  }
 }
 
 function browserRequestForProvider(request, provider) {
@@ -1182,6 +1218,13 @@ export async function runAiChat(request, deps = {}) {
   const cache = deps.cache || defaultCache;
   const io = deps.io || defaultIo;
   const fs = deps.fs || defaultFs;
+  if (request.conversationTarget && isHttpUrl(request.conversationTarget)) {
+    validateConversationUrlForProvider(provider, request.conversationTarget, { optionName: '--conversation' });
+  }
+  if (request.attachConversation && isHttpUrl(request.attachConversation)) {
+    validateConversationUrlForProvider(provider, request.attachConversation, { optionName: '--attach-conversation' });
+  }
+  validateProviderRequest(provider, request);
 
   if (request.listModels) {
     let browser = null;
@@ -1255,7 +1298,7 @@ export async function runAiChat(request, deps = {}) {
   }
 
   const cacheInput = buildCacheInput(request);
-  const useCache = !request.captureEvidence && !!request.prompt && !requestBypassesCache(request);
+  const useCache = !request.captureEvidence && !!request.prompt && !requestBypassesCache(request, provider);
   const cached = useCache ? cache.read('ai-chat', cacheInput) : null;
   if (cached) {
     const cachedResponse = buildCachedResponse({ request, cached, conversation });
