@@ -35,12 +35,12 @@ test('resolves Gemini model aliases without escalating shared transport identifi
   assert.equal(resolveGeminiModel('9d8ca3786ebdfbea'), null);
 });
 
-test('buildGeminiInnerRequest defaults to temporary and can save to history', () => {
-  const temporary = buildGeminiInnerRequest({ prompt: 'hello', requestUuid: 'REQ' }).innerReqList;
-  const saved = buildGeminiInnerRequest({ prompt: 'hello', temporary: false, requestUuid: 'REQ' }).innerReqList;
+test('buildGeminiInnerRequest defaults to provider history and uses temporary mode only explicitly', () => {
+  const persistent = buildGeminiInnerRequest({ prompt: 'hello', requestUuid: 'REQ' }).innerReqList;
+  const temporary = buildGeminiInnerRequest({ prompt: 'hello', temporary: true, requestUuid: 'REQ' }).innerReqList;
+  assert.equal(persistent[45], null);
   assert.equal(temporary[45], 1);
-  assert.equal(saved[45], null);
-  assert.equal(temporary[59], 'REQ');
+  assert.equal(persistent[59], 'REQ');
 });
 
 test('parseGeminiAccountModelsResponse extracts account model registry', () => {

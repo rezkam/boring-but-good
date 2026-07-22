@@ -82,8 +82,8 @@ scripts/ai-chat.mjs --provider perplexity --prompt "Analyze this file" --file ./
 | `--timezone <zone>` | Perplexity timezone passed to the WebUI API |
 | `--file <path>` | Perplexity local attachment. Repeatable. Metadata is safe, file contents are not echoed into metadata |
 | `--space-uuid <uuid>` or `--space <uuid>` | Perplexity Space identifier supplied by the user |
-| `--incognito` | Explicit Perplexity Incognito request. It is not saved to history and the provider reports an expiry time |
-| `--save-to-library` | Explicit provider-history persistence where supported. Perplexity already persists normal requests and rejects this together with `--incognito` |
+| `--incognito` | Explicit provider-supported private request. It is not saved to provider history; Perplexity reports an expiry time |
+| `--save-to-library` | Compatibility flag for provider-history persistence where supported. Normal requests already persist and it conflicts with `--incognito` |
 | `--continue` | Continue the active provider conversation tab when the current URL is already a conversation |
 | `--conversation <id-or-url>` | Open a provider conversation. ChatGPT accepts only a provider ID or trusted clean `/c/<id>` URL; no prompt is read-only and never submits |
 | `--list-conversations` | Read-only provider listing where supported. ChatGPT returns a safe structured JSON object |
@@ -129,7 +129,7 @@ Rules for supported non-ChatGPT providers:
 - Gemini always sends authenticated requests from the Browser Tools managed page. Credentials and page tokens remain in that page context.
 - `--list-models` uses Gemini account RPC discovery through the managed same-origin page.
 - Verified account models from the managed Gemini-capable browser include `gemini-3-flash`, `gemini-3-flash-thinking`, and `gemini-3-pro`.
-- Default chats are temporary. Use `--save-to-library` when the user wants Gemini history.
+- Default chats persist to Gemini history. Use `--incognito` only when the user explicitly wants a temporary Gemini chat.
 - Native Gemini continuation can return backend error `1097`; the helper reports `native_continuation_error` and uses local transcript fallback.
 - Model unavailable error `1052` can fall back only when the adapter reports that fallback in metadata.
 

@@ -90,11 +90,18 @@ function streamCalls(calls) {
   return calls.filter(call => call.href.includes('/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate'));
 }
 
-function promptFromStreamCall(call) {
+function innerRequestFromStreamCall(call) {
   const body = new URLSearchParams(call.body);
   const outer = JSON.parse(body.get('f.req'));
-  const innerReqList = JSON.parse(outer[1]);
-  return innerReqList[0][0];
+  return JSON.parse(outer[1]);
+}
+
+function promptFromStreamCall(call) {
+  return innerRequestFromStreamCall(call)[0][0];
+}
+
+function isTemporaryStreamCall(call) {
+  return innerRequestFromStreamCall(call)[45] === 1;
 }
 
 test('Gemini continuation error classifier is explicit to 1097', () => {
@@ -136,6 +143,9 @@ test('Gemini native continuation error 1097 uses local transcript fallback and r
     assert.equal(result.metadata.provider_state.local_transcript_fallback, true);
     assert.equal(emitted.provider_state.local_transcript_fallback, true);
     assert.equal(emitted.provider_state.auth_source, 'managed-browser-same-origin');
+    assert.equal(emitted.provider_state.is_temporary, false);
+    assert.equal(emitted.provider_state.saved_to_library, true);
+    assert.equal(streamCalls(calls).every(call => !isTemporaryStreamCall(call)), true);
     assert.doesNotMatch(JSON.stringify(emitted), /chrome_profile|cookie_source|cookie_extraction|psid/i);
     assert.deepEqual(emitted.provider_state.native_continuation_error, {
       message: 'Gemini Web returned error 1097',
@@ -148,6 +158,35 @@ test('Gemini native continuation error 1097 uses local transcript fallback and r
       'follow up',
       'Continue this conversation. Use the prior messages as context, then answer the new user message.\n\nUser: first question\n\nAssistant: first answer\n\nUser: follow up',
     ]);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('Gemini uses temporary mode only for explicit --incognito', async () => {
+  const previousFetch = globalThis.fetch;
+  const calls = installGeminiFetch([streamAnswerRaw('private answer')]);
+  const stdout = [];
+
+  try {
+    const request = buildAiChatRequest({
+      providerName: 'gemini',
+      modelName: 'gemini-3-flash',
+      prompt: 'private question',
+      jsonOutput: true,
+      timeoutSeconds: 1,
+      providerOptions: { incognito: true },
+    });
+    const result = await runAiChat(request, {
+      provider: geminiProvider,
+      browser: fakeGeminiBrowser(),
+      cache: noCache(),
+      io: { stdout: text => stdout.push(text), writeFile: () => assert.fail('no file expected') },
+    });
+
+    assert.equal(result.metadata.provider_state.is_temporary, true);
+    assert.equal(result.metadata.provider_state.saved_to_library, false);
+    assert.equal(isTemporaryStreamCall(streamCalls(calls)[0]), true);
   } finally {
     globalThis.fetch = previousFetch;
   }

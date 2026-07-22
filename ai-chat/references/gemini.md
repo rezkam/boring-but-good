@@ -20,8 +20,8 @@ Gemini uses a same-origin WebUI API path inside the Browser Tools managed page. 
   - advanced variants when the account allows them
 - Falls back from `pro` to `flash` on Gemini model unavailable error `1052`.
 - Extracts Gemini conversation ids from stream responses.
-- Defaults to temporary chats by setting `innerReqList[45]=1`.
-- Uses `--save-to-library` to omit the temporary flag so the chat can appear in Gemini history.
+- Defaults to normal provider history and omits `innerReqList[45]`.
+- Sets `innerReqList[45]=1` only for an explicit `--incognito` request. `--save-to-library` remains a compatibility flag for normal persistence.
 - Attempts native Gemini metadata continuation first.
 - Reports `native_continuation_error` when Gemini rejects the stored ids, commonly backend error `1097`.
 - Saves a local conversation transcript and can continue by replaying prior messages as context when Gemini backend continuation rejects the stored ids.

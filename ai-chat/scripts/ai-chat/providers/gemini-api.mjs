@@ -166,7 +166,7 @@ export function parseGeminiStreamResponse(rawText) {
   return { text: bestText, errorCode, conversationId, responseId, choiceId, metadata };
 }
 
-export function buildGeminiInnerRequest({ prompt, conversationState = {}, temporary = true, requestUuid = crypto.randomUUID().toUpperCase() }) {
+export function buildGeminiInnerRequest({ prompt, conversationState = {}, temporary = false, requestUuid = crypto.randomUUID().toUpperCase() }) {
   const list = new Array(69).fill(null);
   list[0] = [prompt, 0, null, null, null, null, 0];
   list[1] = ['en'];

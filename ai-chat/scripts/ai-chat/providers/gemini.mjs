@@ -159,7 +159,7 @@ export const geminiProvider = {
     reasoning: 'gemini-3-flash-thinking',
     pro: 'gemini-3-pro',
   },
-  historyPolicy: { default: 'temporary', saveFlag: '--save-to-library', transportField: 'innerReqList[45]' },
+  historyPolicy: { default: 'provider-history', incognitoFlag: '--incognito', saveFlag: '--save-to-library', transportField: 'innerReqList[45]' },
   resolveConversationAttachment: resolveGeminiConversationAttachment,
 
   runRequiresBrowser() {
@@ -204,7 +204,7 @@ export const geminiProvider = {
     if (!modelConfig) modelConfig = findModel((await discoverGeminiModels(page, 60000)).models, requestedModel);
     if (!modelConfig) throw new Error(`[gemini] Unknown model: ${requestedModel}. Run --provider gemini --list-models --json to inspect selectable models.`);
 
-    const temporary = !request.providerOptions?.saveToLibrary;
+    const temporary = request.providerOptions?.incognito === true;
     let result;
     try {
       result = await queryGeminiWeb(page, request.prompt, {

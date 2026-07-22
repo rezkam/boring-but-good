@@ -34,7 +34,7 @@ By default, AI Chat copies and uses Chrome profile `Default`, so normal logged-i
 | Deep research | Perplexity | Uses `perplexity/deep-research` and a 3600 second timeout unless `--timeout` is explicit |
 | Research filters | Perplexity | `--source-focus`, `--search-focus`, `--time-range`, `--citation-mode`, `--language`, `--timezone` |
 | Files, Spaces, streaming | Perplexity | `--file`, `--space-uuid` or `--space`, `--stream` |
-| Incognito or provider history | Perplexity, Gemini where applicable | Perplexity persists normal requests by default. Use `--incognito` for a private expiring request. `--save-to-library` remains an explicit compatibility flag for persistence, and it conflicts with `--incognito` |
+| Incognito or provider history | All providers where supported | Normal AI Chat requests are non-Incognito and persist to provider history by default. Use `--incognito` only for a provider-supported private request. `--save-to-library` remains a compatibility flag and conflicts with `--incognito` |
 | JSON output with metadata | All | Use `--json` |
 | Evidence screenshots | Browser UI providers with a final URL | Perplexity and Gemini API transports usually provide JSON and stderr evidence, not screenshots |
 

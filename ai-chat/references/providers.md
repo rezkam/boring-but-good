@@ -113,7 +113,7 @@ Gemini uses the WebUI API path and live account discovery where possible:
 - Default auth source is the AI Chat owned Browser Tools browser.
 - Gemini always uses the managed browser same-origin transport.
 - `--verify-session` reports direct API readiness and browser UI readiness separately.
-- Default chats are temporary. `--save-to-library` requests provider history.
+- Default chats persist to provider history. `--incognito` requests a temporary chat where Gemini supports it; `--save-to-library` remains a compatibility flag.
 - Native continuation is attempted first. If backend ids fail, metadata reports `native_continuation_error` and `local_transcript_fallback`.
 
 Known limits:
