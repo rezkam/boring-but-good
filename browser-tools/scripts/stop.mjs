@@ -74,7 +74,7 @@ if (hasFlag(args, '--prune')) {
   const freedPorts = reaped.reaped
     .filter((entry) => entry.status === 'would-reap' || entry.status === 'reaped' || entry.status === 'killed' || entry.status === 'already-gone')
     .map((entry) => entry.port);
-  const prune = pruneChromeClones({ dryRun, assumeStoppedPorts: freedPorts });
+  const prune = pruneChromeClones({ dryRun, assumeStoppedPorts: dryRun ? freedPorts : [] });
   if (!prune.removed.length && !prune.kept.length) {
     console.log('No cached Chrome clones found.');
   }
