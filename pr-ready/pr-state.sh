@@ -86,7 +86,13 @@ fi
 
 if [ -z "$pr" ]; then
   echo "PR             none"
-  echo "VERDICT        NO_PR"
+  # Uncommitted work outranks a missing PR. Reporting NO_PR here sends the caller off to
+  # push work that is not committed yet, which is what happened the first time this ran.
+  if [ "$mine" -gt 0 ]; then
+    echo "VERDICT        UNCOMMITTED_WORK"
+  else
+    echo "VERDICT        NO_PR"
+  fi
   exit 0
 fi
 
