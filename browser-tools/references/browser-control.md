@@ -89,7 +89,7 @@ Each clone lives in a per-port sandbox directory (about 400 MB per profile), and
 
 A managed browser is expensive, and nothing stops an agent session from calling `start` in a loop. Three guardrails bound that:
 
-- **A hard cap of 5 concurrent managed browsers.** A start that would exceed it fails with the list of occupied ports and the commands that free one. Override deliberately with `BROWSER_TOOLS_MAX_BROWSERS=<n>` or `browser.maxBrowsers` in the config file; a configured `maxBrowsers` survives `browser-tools config profiles --refresh`.
+- **A hard cap of 5 concurrent managed browsers.** A start that would exceed it fails with the list of occupied ports and the commands that free one. Override deliberately with `BROWSER_TOOLS_MAX_BROWSERS=<n>` or `browser.maxBrowsers` in the config file; a configured `maxBrowsers` survives `browser-tools config profiles --refresh`, in both the nested `browser.maxBrowsers` and legacy top-level forms.
 - **A warning on the last free slot**, printed before the launch, so hitting the cap is never a surprise.
 - **A warning about leftovers.** Any managed browser running longer than two hours is reported at start time as a likely leftover from a finished session.
 
@@ -99,10 +99,13 @@ The cap holds under concurrency. Slot reservation and the spawn happen together 
 
 ### Reaping untracked browsers
 
-A managed browser whose lifecycle files no longer describe it, including a half-written pair where only one of the pid and state files survives, is an **orphan**: `browser-tools stop --port <n>` cannot see it, and it holds both a memory slot and its clone directory indefinitely.
+A managed browser whose lifecycle files no longer describe it is an **orphan**. That includes a half-written pair where only one of the pid and state files survives, and state that contradicts the running process on port, clone directory, or managed token. The orphan test deliberately matches what `stop` verifies, so the two can never disagree and strand a browser between them.
+
+An orphan: `browser-tools stop --port <n>` cannot see it, and it holds both a memory slot and its clone directory indefinitely.
 
 - `browser-tools stop --status` lists every running managed browser with its port, PID, and age, plus the cap and any warnings.
-- `browser-tools stop --reap` kills the orphans. Add `--dry-run` to list them first.
+- `browser-tools stop --reap` kills the orphans. Add `--dry-run` to list them first. It exits non-zero if a browser could not be reaped, so a script freeing a slot can tell the cleanup did not work.
+- `browser-tools stop --prune --dry-run` previews the reap and the clone removals it enables, rather than reporting those clones as still in use.
 - `browser-tools start` reaps orphans automatically before counting against the cap, then prunes their clone dirs, so a leak self-heals on the next start.
 
 Reaping only ever targets processes carrying the Browser Tools managed token *and* a user-data-dir inside the cache directory, so the main Chrome and any unrelated browser are never candidates. Every PID is re-verified immediately before each signal, and the check compares the full scanned identity (port, clone directory, and the per-launch managed token) rather than only that the PID is *some* managed Chrome. A PID recycled between the scan and the kill, even by another managed browser, is therefore skipped rather than signalled. A port held by a concurrent start's lock is skipped, because that browser exists before its state file does.

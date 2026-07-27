@@ -30,6 +30,8 @@ import {
   portLockDirForPort,
   acquireLaunchLock,
   occupiedManagedSlotPorts,
+  pruneChromeClones,
+  reapExitCode,
   reapOrphanedChromes,
   staleManagedBrowsers,
   stopChrome,
@@ -699,4 +701,79 @@ test('reuse is refused when the existing browser is not the configuration that w
     'sync-requested',
     '--sync explicitly asks for fresh credentials, so reuse would defeat it',
   );
+});
+
+test('lifecycle state that contradicts the running process counts as an orphan', () => {
+  // stopChrome verifies managedToken, userDataDir, port and args, refuses a mismatch, and sends the
+  // user to --reap. If the orphan predicate stops at the PID match, --reap disagrees and the browser
+  // has no supported cleanup path at all while still holding a slot.
+  withTempCache((tmp) => {
+    const write = (port, state) => {
+      writeFileSync(join(tmp, `chrome-${port}.pid`), String(state.pid));
+      writeFileSync(join(tmp, `chrome-${port}.json`), JSON.stringify({ managedBy: 'browser-tools', ...state }));
+    };
+    const scanned = (port, over = {}) => ({
+      pid: 7000 + port, port, ageMs: 1000,
+      userDataDir: `${tmp}/chrome-data-${port}`, managedToken: `tok-${port}`, ...over,
+    });
+
+    write(9801, { pid: 7000 + 9801, port: 9801, userDataDir: `${tmp}/chrome-data-9801`, managedToken: 'tok-9801' });
+    write(9802, { pid: 7000 + 9802, port: 9802, userDataDir: `${tmp}/chrome-data-9802`, managedToken: 'STALE-TOKEN' });
+    write(9803, { pid: 7000 + 9803, port: 9803, userDataDir: `${tmp}/chrome-data-OTHER`, managedToken: 'tok-9803' });
+    write(9804, { pid: 7000 + 9804, port: 6666, userDataDir: `${tmp}/chrome-data-9804`, managedToken: 'tok-9804' });
+
+    const orphans = orphanedManagedBrowsers([scanned(9801), scanned(9802), scanned(9803), scanned(9804)])
+      .map((o) => o.port).sort();
+    assert.deepEqual(orphans, [9802, 9803, 9804], 'token, data-dir and port contradictions are all orphans');
+  });
+});
+
+test('a config refresh preserves a top-level browser cap too', () => {
+  // browserToolsRuntimeConfig honours `{ "maxBrowsers": 12 }` at the top level as a compatibility
+  // form, so a refresh that only looks at browser.maxBrowsers silently resets the cap.
+  const built = buildBrowserToolsConfig({ sourceDir: '/opt/fake', existing: { maxBrowsers: 12 } });
+  assert.equal(built.browser.maxBrowsers, 12, 'the legacy top-level cap must survive --refresh');
+
+  const nested = buildBrowserToolsConfig({
+    sourceDir: '/opt/fake',
+    existing: { maxBrowsers: 12, browser: { maxBrowsers: 3 } },
+  });
+  assert.equal(nested.browser.maxBrowsers, 3, 'the nested value wins when both are present');
+});
+
+test('a prune dry-run models the reap that a real prune performs first', () => {
+  // --prune kills orphans and then reclaims their clones. A dry run that leaves them alive reports
+  // those clones as "kept", hiding exactly the removals the real command would do.
+  withTempCache((tmp) => {
+    mkdirSync(join(tmp, 'chrome-data-9901'));
+    const preview = pruneChromeClones({ dryRun: true, assumeStoppedPorts: [9901] });
+    assert.ok(
+      preview.removed.some((entry) => entry.port === 9901),
+      'a port the reap will free must appear as a removal in the preview',
+    );
+    assert.ok(existsSync(join(tmp, 'chrome-data-9901')), 'a dry run must still delete nothing');
+  });
+});
+
+test('stop --reap exits non-zero when a browser could not be reaped', () => {
+  // A script that runs `stop --reap` to free a slot must be able to tell that it did not work.
+  const stopScript = new URL('../scripts/stop.mjs', import.meta.url).pathname;
+  const tmp = mkdtempSync(join(tmpdir(), 'bt-reap-exit-'));
+  try {
+    const run = (env) => spawnSync(process.execPath, [stopScript, '--reap'], {
+      encoding: 'utf-8',
+      env: { ...process.env, BROWSER_TOOLS_CACHE_DIR: tmp, ...env },
+    });
+    const clean = run({});
+    assert.equal(clean.status, 0, 'nothing to reap is a success');
+    assert.match(clean.stdout, /No untracked managed browsers found/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+
+  // The exit-code rule itself, independent of needing a live unkillable process.
+  assert.equal(reapExitCode([]), 0);
+  assert.equal(reapExitCode([{ status: 'reaped' }, { status: 'already-gone' }]), 0);
+  assert.equal(reapExitCode([{ status: 'skipped-not-managed' }]), 0, 'a safety refusal is not a failure');
+  assert.equal(reapExitCode([{ status: 'reaped' }, { status: 'failed' }]), 1, 'a failed kill must surface');
 });
