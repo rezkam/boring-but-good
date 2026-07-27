@@ -89,23 +89,23 @@ Each clone lives in a per-port sandbox directory (about 400 MB per profile), and
 
 A managed browser is expensive, and nothing stops an agent session from calling `start` in a loop. Three guardrails bound that:
 
-- **A hard cap of 5 concurrent managed browsers.** A start that would exceed it fails with the list of occupied ports and the commands that free one. Override deliberately with `BROWSER_TOOLS_MAX_BROWSERS=<n>` or `browser.maxBrowsers` in the config file.
+- **A hard cap of 5 concurrent managed browsers.** A start that would exceed it fails with the list of occupied ports and the commands that free one. Override deliberately with `BROWSER_TOOLS_MAX_BROWSERS=<n>` or `browser.maxBrowsers` in the config file; a configured `maxBrowsers` survives `browser-tools config profiles --refresh`.
 - **A warning on the last free slot**, printed before the launch, so hitting the cap is never a surprise.
 - **A warning about leftovers.** Any managed browser running longer than two hours is reported at start time as a likely leftover from a finished session.
 
-The count comes from scanning the process table for browsers carrying the managed token and a user-data-dir inside the cache directory, not from the lifecycle files. The `--user-data-dir` value is read up to the next argument rather than the next space, so a cache directory containing spaces is handled correctly. Files can be deleted while a browser keeps running; processes cannot. Helper processes (renderers, GPU, utility) are excluded, so the count is browsers, not processes.
+The count comes from scanning the process table for browsers carrying the managed token and a user-data-dir inside the cache directory, not from the lifecycle files. The `--user-data-dir` value is read up to the next argument rather than the next space, so a cache directory containing spaces is handled correctly, and the cache directory is normalised so a configured trailing slash still matches. Clone directories are matched on path segments, so a sibling such as `/opt/cache-other` is never mistaken for `/opt/cache`. Files can be deleted while a browser keeps running; processes cannot. Helper processes (renderers, GPU, utility) are excluded, so the count is browsers, not processes.
 
 The cap holds under concurrency. Slot reservation and the spawn happen together under a single cache-wide `launch.lock`, because the per-port locks cannot bound a total: two starts racing for different ports never contend, so both could pass the same check and both launch. The reservation count also includes a browser whose state file exists with a live PID but which has not yet appeared in the process table, closing the gap right after a spawn. A start that cannot take the launch lock within 30 seconds fails rather than proceeding uncounted.
 
 ### Reaping untracked browsers
 
-A managed browser whose lifecycle files no longer describe it is an **orphan**: `browser-tools stop --port <n>` cannot see it, and it holds both a memory slot and its clone directory indefinitely.
+A managed browser whose lifecycle files no longer describe it, including a half-written pair where only one of the pid and state files survives, is an **orphan**: `browser-tools stop --port <n>` cannot see it, and it holds both a memory slot and its clone directory indefinitely.
 
 - `browser-tools stop --status` lists every running managed browser with its port, PID, and age, plus the cap and any warnings.
 - `browser-tools stop --reap` kills the orphans. Add `--dry-run` to list them first.
 - `browser-tools start` reaps orphans automatically before counting against the cap, then prunes their clone dirs, so a leak self-heals on the next start.
 
-Reaping only ever targets processes carrying the Browser Tools managed token *and* a user-data-dir inside the cache directory, so the main Chrome and any unrelated browser are never candidates. Every PID is re-verified immediately before each signal, so a PID recycled between the scan and the kill is skipped rather than signalled. A port held by a concurrent start's lock is skipped, because that browser exists before its state file does.
+Reaping only ever targets processes carrying the Browser Tools managed token *and* a user-data-dir inside the cache directory, so the main Chrome and any unrelated browser are never candidates. Every PID is re-verified immediately before each signal, and the check compares the full scanned identity (port, clone directory, and the per-launch managed token) rather than only that the PID is *some* managed Chrome. A PID recycled between the scan and the kill, even by another managed browser, is therefore skipped rather than signalled. A port held by a concurrent start's lock is skipped, because that browser exists before its state file does.
 
 ## Agent ownership
 
@@ -115,7 +115,8 @@ Every Managed Browser is owned by one agent token. For a user-supplied token, ex
 
 Ownership rules:
 
-- Starting without an explicit `--port` reuses a running browser that the caller's owner token already owns, on whatever port it landed on. Export `BROWSER_TOOLS_OWNER_TOKEN` after the first start and repeated starts in that session return the same browser instead of accumulating new ones.
+- Starting without an explicit `--port` reuses a running browser that the caller's owner token already owns, on whatever port it landed on, **provided its launch configuration matches the request**. Export `BROWSER_TOOLS_OWNER_TOKEN` after the first start and repeated starts in that session return the same browser instead of accumulating new ones.
+- Reuse requires the same profile, the same headless mode, and the same Google mode, and is skipped entirely when `--sync` is passed. Adopting a browser built from a different profile would run the automation against the wrong account, headless is fixed at launch, and `--sync` explicitly asks for freshly copied credentials. A mismatch on an explicit `--port` reports which setting differs rather than an ownership error.
 - Starting without an explicit `--port` and without an owner token cannot prove ownership of anything, so it auto-allocates the next free port and creates a new owned sandbox, subject to the concurrency cap.
 - Starting with an explicit `--port` reuses only when that browser is Browser Tools managed and the owner token matches.
 - Reuse never crosses Google modes: a default (stripped) start will not adopt a `--include-google` browser, or the reverse.
