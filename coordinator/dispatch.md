@@ -4,31 +4,18 @@ Read this only when a unit cleared the DIRECT/DISPATCH gate in SKILL.md and is g
 
 ## Mechanism
 
-This differs by harness. Establish which one you are in before planning dispatches, and
+SKILL.md section 2 carries the per-harness pinning contract, including which call shape
+accepts a model at all. Establish which harness you are in before planning dispatches, and
 never assume a tool exists because another harness has it.
 
-**Claude Code.** `Workflow`'s `agent(prompt, {model, effort})` is the default: it is the
-only call that pins both values. `Agent` pins model only; use it solely when effort
-genuinely does not matter, or when dispatching a pre-defined agent type whose frontmatter
-already carries `model:` and `effort:`.
+What that section does not cover: verify what actually resolved. A same-name user or
+project agent definition can shadow a builtin, and a builtin's model summary may describe
+the hidden builtin rather than the definition you selected. Confirm the source path,
+model, effort, and tools before the first dispatch of a campaign and again after any
+worktree or dependency change.
 
-**pi.** There is no `Workflow` tool. The `subagent` tool pins both values inside one
-string: `model: "<provider>/<model>:<effort>"`, for example
-`openai-codex/gpt-5.6-luna:medium`. See [harness.md](harness.md).
-
-**Codex.** No `Workflow` tool. Pin what the local spawn mechanism actually supports,
-verify it from the launched process rather than from the flag you passed, and state in
-the dispatch table which values are pinned and which are inherited. Do not describe an
-inherited effort as pinned.
-
-**Any harness.** If neither model nor effort can be pinned for a stage, say so in the
-table and let the user decide, rather than launching and reporting as though the plan
-was honored.
-
-Verify what actually resolved. A same-name user or project agent definition can shadow a
-builtin, and a builtin's model summary may describe the hidden builtin rather than the
-definition you selected. Confirm the source path, model, effort, and tools before the
-first dispatch of a campaign and again after any worktree or dependency change.
+If neither model nor effort can be pinned for a stage, say so in the table and let the
+user decide, rather than launching and reporting as though the plan was honored.
 
 ## Tier selection
 
@@ -81,11 +68,6 @@ cannot trust:
 Lint the rendered prompt before sending it. Reject `undefined`, `null`, `NaN`, and empty
 interpolations. One unset variable once shipped `cd undefined/<pkg>` to every agent in a
 fanout, under a header telling them the path was verified.
-
-Do not give a mutating agent a hard turn or tool-call budget. A real task can legitimately
-use many turns and then be called failed after it already finished its edits. Split work
-that exceeds one context into serial milestones instead, and use elapsed time only as a
-liveness bound with generous margin.
 
 ## Parallel writers
 

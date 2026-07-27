@@ -119,19 +119,25 @@ that the audit would reject.
 
 ## pi
 
-**Effort is pinned inside the model string**, not as a separate argument. The `subagent`
-tool takes `model: "<provider>/<model>:<effort>"`, for example
-`openai-codex/gpt-5.6-luna:medium` or `openai-codex/gpt-5.6-sol:high`. Observed working in
-a real campaign. So pi can pin both values, and the dispatch table should say so rather
-than reporting effort as inherited.
+**pi ships its own subagent registry and it competes with this skill.** `subagent
+action:"list"` shows builtin roles (`scout`, `advisor`, `oracle`, `worker`, `reviewer`,
+`planner`, `researcher`, `delegate`, `context-builder`) interleaved with your own skills,
+and `action:"models"` reports every one of them as "inherits current session model". They
+are pi's roles, not the roles in [dispatch.md](dispatch.md)'s tier table, and choosing one
+chooses no model at all.
+
+**Resolution.** Pick the tier from the table first, then whichever pi agent type carries
+the right tools for it, then pin the model on the call. SKILL.md section 2 has the string
+format and the batch-form trap. An unpinned pi dispatch is an inherited one, every time.
 
 `subagent` also takes `action` values (`list`, `status`, `get`) for inspecting running
 agents. Use `status` for the liveness check instead of assuming a quiet agent is working.
 
 A dispatch that returns nothing inside its liveness bound is a failed dispatch, not a slow
 one. One review dispatch in a real campaign timed out at three minutes with no result and
-was never retried. Retry once with a longer bound, or take the unit back and do it
-directly, and say which you did.
+was never retried; in another, the last dispatch of the session was launched and the
+session ended before it returned, leaving an empty run directory and no report. Retry once
+with a longer bound, or take the unit back and do it directly, and say which you did.
 
 Confirm at campaign start that the goal or loop command exists before planning around it,
 and write what you found into the notes file. Whatever genuinely cannot be pinned is
