@@ -91,6 +91,14 @@ usually means do it now, in one tool call.
 - status reporting, reading state, adjudicating a deviation an agent reported
 - any fix under roughly two files, and every review follow-up fix
 
+Owning git means owning the risk in it. **Never run `git reset --hard`, `git checkout -- <path>`,
+`git restore`, or `git stash` while the tree is dirty.** Each discards the user's
+uncommitted work with no prompt, and a backup branch does not save it because a branch
+only captures commits. A real campaign created a backup branch, ran `git reset --hard`,
+then printed "working tree preserved?" and destroyed a pending dependency override. To
+move a branch pointer use `git switch -C <branch> <sha>` or `git update-ref`, which refuse
+rather than discard. If you truly need a clean tree, commit or export first and say so.
+
 **Always dispatch:**
 
 - every full vertical slice. This is the unit that pays for a separate context, and it is
@@ -121,10 +129,21 @@ CAMPAIGN  <slug>          WORKTREE <path>
 SLICES    <n> done / <n> total     NOW: <slice> (<state>, <elapsed>)
 PR        #<n> <MERGE_STATE>, checks <n>/<n>
 AGENTS    <role> <model>@<effort> <alive|done|dead>
+DIRECT    <slice> because <reason>, or none
 PARKED    <gate waiting on an external dependency, or none>
 NEEDS YOU <the one thing outside authorized scope, or nothing>
 NEXT      <the one next action>
 ```
+
+`DIRECT` is a field, not an optional remark, because a paragraph elsewhere in this skill
+asking you to justify non-dispatch was silently skipped for two full slices in a real
+campaign. Every slice you implemented yourself appears there with its reason, or the line
+reads `none`.
+
+Every task in the campaign gets a row in the routing table, including the ones you own.
+The same campaign listed three coordinator-owned tasks and omitted the two real
+implementation slices entirely, so nothing showed they had never been considered for
+dispatch. A missing row is invisible; a row saying `DIRECT, single file` is a decision.
 
 If a background agent has produced nothing for several minutes, check whether it is alive
 before assuming progress. A dead agent that was silently retried is a real event, not a
