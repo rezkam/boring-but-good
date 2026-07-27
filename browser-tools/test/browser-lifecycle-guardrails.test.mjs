@@ -25,6 +25,8 @@ import {
   parseManagedChromeProcesses,
   parseProcessAgeMs,
   portLockDirForPort,
+  acquireLaunchLock,
+  occupiedManagedSlotPorts,
   reapOrphanedChromes,
   staleManagedBrowsers,
   stopChrome,
@@ -494,4 +496,89 @@ test('the concurrency guardrails are documented where an agent will actually rea
     !/Starting without an explicit `--port` never reuses another listening browser/.test(reference),
     'the superseded "never reuses" ownership rule must not survive in the docs',
   );
+});
+
+test('a cache path containing spaces does not silently disable the inventory', () => {
+  // Regression: --user-data-dir=(\S+) truncated at the first space, so startsWith(cacheDir) failed
+  // and every managed browser vanished from the inventory. The cap then never fired, --reap found
+  // nothing, and --status read 0. Silent, and in the exact direction that recreates the leak.
+  const spaced = '/opt/fake home/.cache/pi-browser-tools';
+  const line = (port, dir, trailing) =>
+    `${100 + port} 01:00 ${CHROME_BIN} --remote-debugging-port=${port} --user-data-dir=${spaced}/${dir} --pi-browser-tools-managed=tok${trailing}`;
+
+  // --user-data-dir in the middle, at the end, and followed by other flags
+  const psOutput = [
+    line(9222, 'chrome-data-9222', ''),
+    `9223 01:00 ${CHROME_BIN} --user-data-dir=${spaced}/chrome-fresh-9223 --remote-debugging-port=9223 --pi-browser-tools-managed=tok --no-first-run`,
+    `9224 01:00 ${CHROME_BIN} --remote-debugging-port=9224 --pi-browser-tools-managed=tok --user-data-dir=${spaced}/chrome-data-9224`,
+  ].join('\n');
+
+  const found = parseManagedChromeProcesses(psOutput, { cacheDir: spaced, chromeBin: CHROME_BIN });
+  assert.equal(found.length, 3, 'every spaced-path browser must be seen');
+  assert.deepEqual(found.map((f) => f.userDataDir), [
+    `${spaced}/chrome-data-9222`,
+    `${spaced}/chrome-fresh-9223`,
+    `${spaced}/chrome-data-9224`,
+  ], 'the full path must survive, including the space');
+  assert.deepEqual(found.map((f) => f.port), [9222, 9223, 9224]);
+
+  // A browser under a different spaced root must still be excluded.
+  const foreign = `9225 01:00 ${CHROME_BIN} --remote-debugging-port=9225 --user-data-dir=/opt/other home/x/chrome-data-9225 --pi-browser-tools-managed=tok`;
+  assert.equal(parseManagedChromeProcesses(foreign, { cacheDir: spaced, chromeBin: CHROME_BIN }).length, 0);
+});
+
+test('occupied slots include a just-launched browser that ps has not listed yet', () => {
+  // The cap is only sound if a browser counts the instant its state file exists. Otherwise a second
+  // start can read a stale count during the window before the new process appears in ps.
+  withTempCache((tmp) => {
+    writeFileSync(join(tmp, `chrome-9401.pid`), String(process.pid));
+    writeFileSync(join(tmp, `chrome-9401.json`), JSON.stringify({
+      managedBy: 'browser-tools', pid: process.pid, port: 9401,
+    }));
+    // a tracked port whose pid is long dead must NOT hold a slot
+    writeFileSync(join(tmp, `chrome-9402.pid`), '999999');
+    writeFileSync(join(tmp, `chrome-9402.json`), JSON.stringify({
+      managedBy: 'browser-tools', pid: 999999, port: 9402,
+    }));
+
+    const ports = occupiedManagedSlotPorts({ processes: [{ pid: 777, port: 9400, ageMs: 1 }] });
+    assert.ok(ports.has(9400), 'a running browser holds a slot');
+    assert.ok(ports.has(9401), 'a freshly written state file with a live pid holds a slot');
+    assert.ok(!ports.has(9402), 'a dead tracked port must not hold a slot');
+  });
+});
+
+test('the launch lock serialises slot reservation and is released', () => {
+  withTempCache(() => {
+    const first = acquireLaunchLock();
+    assert.ok(first, 'the first caller gets the lock');
+    assert.equal(acquireLaunchLock({ waitMs: 0 }), null, 'a second caller is refused while it is held');
+    first.release();
+    const second = acquireLaunchLock({ waitMs: 0 });
+    assert.ok(second, 'the lock is reusable after release');
+    second.release();
+  });
+});
+
+test('the reaper refuses to signal a PID that is no longer a managed browser', () => {
+  // PID recycling: the scan saw a managed browser, but by kill time the PID belongs to something
+  // else. stopChrome rechecks before SIGKILL; the reaper runs automatically on every start, so it
+  // needs at least the same guard.
+  withTempCache(() => {
+    const victim = spawnSync('/bin/sh', ['-c', 'sleep 30 >/dev/null 2>&1 & echo $!'], { encoding: 'utf-8' });
+    const pid = Number.parseInt(victim.stdout.trim(), 10);
+    assert.ok(Number.isInteger(pid) && pid > 0, 'test needs a live throwaway process');
+    try {
+      // No state file for :9500, so this looks like an orphan by the lifecycle-file test alone.
+      const result = reapOrphanedChromes({ processes: [{ pid, port: 9500, ageMs: 1000 }] });
+      assert.equal(result.reaped[0].status, 'skipped-not-managed', 'must refuse, not kill');
+      assert.equal(
+        spawnSync('/bin/ps', ['-p', String(pid)], { encoding: 'utf-8' }).status,
+        0,
+        'the unrelated process must still be alive',
+      );
+    } finally {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+  });
 });

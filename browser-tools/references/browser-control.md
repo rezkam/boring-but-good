@@ -93,7 +93,9 @@ A managed browser is expensive, and nothing stops an agent session from calling 
 - **A warning on the last free slot**, printed before the launch, so hitting the cap is never a surprise.
 - **A warning about leftovers.** Any managed browser running longer than two hours is reported at start time as a likely leftover from a finished session.
 
-The count comes from scanning the process table for browsers carrying the managed token and a user-data-dir inside the cache directory, not from the lifecycle files. Files can be deleted while a browser keeps running; processes cannot. Helper processes (renderers, GPU, utility) are excluded, so the count is browsers, not processes.
+The count comes from scanning the process table for browsers carrying the managed token and a user-data-dir inside the cache directory, not from the lifecycle files. The `--user-data-dir` value is read up to the next argument rather than the next space, so a cache directory containing spaces is handled correctly. Files can be deleted while a browser keeps running; processes cannot. Helper processes (renderers, GPU, utility) are excluded, so the count is browsers, not processes.
+
+The cap holds under concurrency. Slot reservation and the spawn happen together under a single cache-wide `launch.lock`, because the per-port locks cannot bound a total: two starts racing for different ports never contend, so both could pass the same check and both launch. The reservation count also includes a browser whose state file exists with a live PID but which has not yet appeared in the process table, closing the gap right after a spawn. A start that cannot take the launch lock within 30 seconds fails rather than proceeding uncounted.
 
 ### Reaping untracked browsers
 
@@ -103,7 +105,7 @@ A managed browser whose lifecycle files no longer describe it is an **orphan**: 
 - `browser-tools stop --reap` kills the orphans. Add `--dry-run` to list them first.
 - `browser-tools start` reaps orphans automatically before counting against the cap, then prunes their clone dirs, so a leak self-heals on the next start.
 
-Reaping only ever targets processes carrying the Browser Tools managed token *and* a user-data-dir inside the cache directory, so the main Chrome and any unrelated browser are never candidates. A port held by a concurrent start's lock is skipped, because that browser exists before its state file does.
+Reaping only ever targets processes carrying the Browser Tools managed token *and* a user-data-dir inside the cache directory, so the main Chrome and any unrelated browser are never candidates. Every PID is re-verified immediately before each signal, so a PID recycled between the scan and the kill is skipped rather than signalled. A port held by a concurrent start's lock is skipped, because that browser exists before its state file does.
 
 ## Agent ownership
 

@@ -933,30 +933,52 @@ export function parseProcessAgeMs(etime) {
 // renderer/GPU/utility helpers inherit --user-data-dir and the managed token from their parent, so
 // counting them would inflate the browser count roughly tenfold; and a user-data-dir outside our
 // cache dir is somebody else's Chrome, which we must never count or kill.
+// Extract --user-data-dir from a Chrome command line. Chrome does not quote this argument, and the
+// path is user-configurable, so it can legitimately contain spaces ("/Volumes/My Drive/..."). Read
+// to the next " --" rather than to the next space: a \S+ capture truncates the path, the cache-dir
+// test then fails, and the browser silently disappears from the inventory.
+export function parseUserDataDirArg(command) {
+  const match = String(command ?? '').match(/--user-data-dir=(.+?)(?=\s--|$)/);
+  return match ? match[1].trim() : null;
+}
+
+// Decide whether one ps line is a managed browser, and describe it. Shared by the inventory scan and
+// by the pre-signal recheck in the reaper, so both apply exactly the same definition.
+export function managedChromeProcessFromCommand({ pid, etime = null, command, cacheDir = browserToolsCacheDir(), chromeBin = browserToolsChromeBin() }) {
+  if (!command || !command.includes(chromeBin)) return null;
+  if (/--type=/.test(command)) return null;
+  if (!command.includes('--pi-browser-tools-managed=')) return null;
+  const portMatch = command.match(/--remote-debugging-port=(\d+)/);
+  if (!portMatch) return null;
+  const userDataDir = parseUserDataDirArg(command);
+  if (!userDataDir || !userDataDir.startsWith(`${cacheDir}/chrome-`)) return null;
+  return {
+    pid: Number.parseInt(String(pid), 10),
+    port: normalizePort(portMatch[1]),
+    ageMs: parseProcessAgeMs(etime),
+    userDataDir,
+    command,
+  };
+}
+
 export function parseManagedChromeProcesses(psOutput, { cacheDir = browserToolsCacheDir(), chromeBin = browserToolsChromeBin() } = {}) {
   const found = [];
   for (const line of String(psOutput ?? '').split('\n')) {
     const match = line.trim().match(/^(\d+)\s+(\S+)\s+(.*)$/);
     if (!match) continue;
     const [, pidText, etime, command] = match;
-    if (!command.includes(chromeBin)) continue;
-    if (/--type=/.test(command)) continue;
-    if (!command.includes('--pi-browser-tools-managed=')) continue;
-    const portMatch = command.match(/--remote-debugging-port=(\d+)/);
-    if (!portMatch) continue;
-    const dirMatch = command.match(/--user-data-dir=(\S+)/);
-    if (!dirMatch) continue;
-    const userDataDir = dirMatch[1];
-    if (!userDataDir.startsWith(`${cacheDir}/chrome-`)) continue;
-    found.push({
-      pid: Number.parseInt(pidText, 10),
-      port: normalizePort(portMatch[1]),
-      ageMs: parseProcessAgeMs(etime),
-      userDataDir,
-      command,
-    });
+    const entry = managedChromeProcessFromCommand({ pid: pidText, etime, command, cacheDir, chromeBin });
+    if (entry) found.push(entry);
   }
   return found;
+}
+
+// Is this PID, right now, still one of our managed browsers? Used immediately before sending a
+// signal so a recycled PID cannot be hit.
+export function verifyManagedChromePid(pid, { cacheDir = browserToolsCacheDir(), chromeBin = browserToolsChromeBin() } = {}) {
+  const command = commandForPid(pid);
+  if (!command) return null;
+  return managedChromeProcessFromCommand({ pid, command, cacheDir, chromeBin });
 }
 
 // The live inventory of managed browsers. This reads the process table rather than the lifecycle
@@ -973,6 +995,74 @@ export function maxManagedBrowsers(options = {}) {
   const parsed = Number.parseInt(String(raw ?? ''), 10);
   if (!Number.isInteger(parsed) || parsed < 1) return DEFAULT_MAX_MANAGED_BROWSERS;
   return parsed;
+}
+
+export function launchLockDir() {
+  return join(browserToolsCacheDir(), 'launch.lock');
+}
+
+// A single cache-wide lock, distinct from the per-port locks. Per-port locks cannot bound total
+// concurrency: two starts racing for different ports never contend, so both can pass a 4-of-5 check
+// and both launch. Slot reservation has to serialise on one lock.
+export function acquireLaunchLock({ staleMs = PORT_LOCK_STALE_MS, waitMs = 30000, pollMs = 50 } = {}) {
+  ensureCacheDir();
+  const lockDir = launchLockDir();
+  const deadline = Date.now() + Math.max(0, waitMs);
+
+  while (true) {
+    try {
+      mkdirSync(lockDir, { mode: 0o700 });
+      writePrivateFile(join(lockDir, 'lock.json'), JSON.stringify({
+        pid: process.pid,
+        createdAt: new Date().toISOString(),
+      }, null, 2));
+      return { lockDir, release() { rmSync(lockDir, { recursive: true, force: true }); } };
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      let lockState = null;
+      try {
+        lockState = safeReadJson(join(lockDir, 'lock.json'));
+      } catch {
+        lockState = null;
+      }
+      let stale = false;
+      if (lockState?.pid && !processExists(Number(lockState.pid))) stale = true;
+      try {
+        if (Date.now() - statSync(lockDir).mtimeMs > staleMs) stale = true;
+      } catch {
+        stale = true;
+      }
+      if (stale) {
+        rmSync(lockDir, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) return null;
+      sleepSync(pollMs);
+    }
+  }
+}
+
+// Ports that currently hold a slot. A running process holds one, and so does a browser whose state
+// file exists with a live PID: launchChrome writes that file synchronously at spawn, but the process
+// takes a moment to appear in ps, and a concurrent start must not read the gap as a free slot.
+export function occupiedManagedSlotPorts({ processes = listManagedChromeProcesses() } = {}) {
+  const ports = new Set(processes.map((entry) => entry.port));
+  let entries = [];
+  try {
+    entries = readdirSync(browserToolsCacheDir(), { withFileTypes: true });
+  } catch {
+    return ports;
+  }
+  for (const entry of entries) {
+    const match = entry.name.match(/^chrome-(\d+)\.json$/);
+    if (!match || !entry.isFile()) continue;
+    const port = Number.parseInt(match[1], 10);
+    if (ports.has(port)) continue;
+    const state = readManagedState(stateFileForPort(port));
+    if (!state || state.managedBy !== 'browser-tools') continue;
+    if (Number.isInteger(Number(state.pid)) && processExists(Number(state.pid))) ports.add(port);
+  }
+  return ports;
 }
 
 export function managedBrowserCapacity({ processes = listManagedChromeProcesses(), max = maxManagedBrowsers() } = {}) {
@@ -1017,10 +1107,22 @@ export function reapOrphanedChromes({ dryRun = false, processes = listManagedChr
       reaped.push({ ...orphan, status: 'would-reap' });
       continue;
     }
+    // Recheck before every signal. The PID came from a scan taken moments ago; if that process has
+    // since exited and the PID been recycled, an unguarded kill lands on something unrelated.
+    // stopChrome already does this between SIGTERM and SIGKILL, and this path runs automatically on
+    // every start, so it must be at least as careful.
+    if (!verifyManagedChromePid(orphan.pid)) {
+      reaped.push({ ...orphan, status: processExists(orphan.pid) ? 'skipped-not-managed' : 'already-gone' });
+      continue;
+    }
     let status = 'reaped';
     try {
       process.kill(orphan.pid, 'SIGTERM');
       if (!waitForProcessExit(orphan.pid, 2000)) {
+        if (!verifyManagedChromePid(orphan.pid)) {
+          reaped.push({ ...orphan, status: 'skipped-not-managed' });
+          continue;
+        }
         process.kill(orphan.pid, 'SIGKILL');
         waitForProcessExit(orphan.pid, 1000);
         status = 'killed';
@@ -1053,7 +1155,8 @@ export function formatBrowserAge(ageMs) {
 function describeBrowserInventory(processes, { limit = 10, staleMaxAgeMs = STALE_BROWSER_AGE_MS } = {}) {
   const lines = processes.slice(0, limit).map((entry) => {
     const stale = Number.isFinite(entry.ageMs) && entry.ageMs >= staleMaxAgeMs;
-    return `    :${entry.port}  PID ${entry.pid}  up ${formatBrowserAge(entry.ageMs)}${stale ? '   <- idle over 2h, likely a leftover' : ''}`;
+    const pid = Number.isInteger(Number(entry.pid)) ? `PID ${entry.pid}` : 'PID unknown';
+    return `    :${entry.port}  ${pid}  up ${formatBrowserAge(entry.ageMs)}${stale ? '   <- idle over 2h, likely a leftover' : ''}`;
   });
   if (processes.length > limit) lines.push(`    ... and ${processes.length - limit} more`);
   return lines.join('\n');
@@ -1377,15 +1480,38 @@ export async function startChrome({
           }
         }
       }
-      const proc = launchChrome({
-        port: normalizedPort,
-        profileName: resolvedProfileName,
-        userDataDir,
-        ownerToken: effectiveOwnerToken,
-        ownerId: normalizedOwnerId,
-        headless,
-        includeGoogle,
-      });
+      // Reserve the slot and spawn under one cache-wide lock. The earlier check is only advisory:
+      // it runs before profile sync, which can take seconds, so on its own it lets two concurrent
+      // starts both observe 4 of 5 and both launch. This recount is the binding one, and it holds
+      // until launchChrome has written the state file that makes the new browser visible to others.
+      const launchLock = acquireLaunchLock();
+      if (!launchLock) {
+        throw new Error(
+          'Timed out waiting for the Browser Tools launch lock. Another start is reserving a browser slot; retry shortly.',
+        );
+      }
+      let proc;
+      try {
+        const live = listManagedChromeProcesses();
+        const occupied = occupiedManagedSlotPorts({ processes: live });
+        occupied.delete(normalizedPort);
+        assertManagedBrowserCapacity({
+          processes: [...occupied].map((p) =>
+            live.find((entry) => entry.port === p)
+            || { pid: readManagedState(stateFileForPort(p))?.pid ?? null, port: p, ageMs: null }),
+        });
+        proc = launchChrome({
+          port: normalizedPort,
+          profileName: resolvedProfileName,
+          userDataDir,
+          ownerToken: effectiveOwnerToken,
+          ownerId: normalizedOwnerId,
+          headless,
+          includeGoogle,
+        });
+      } finally {
+        launchLock.release();
+      }
       const ready = await waitForChromeReady(normalizedPort, { timeoutMs: CHROME_READY_TIMEOUT_MS });
       if (!ready) {
         stopChrome({ port: normalizedPort, ownerToken: effectiveOwnerToken, ignorePortLock: true });
