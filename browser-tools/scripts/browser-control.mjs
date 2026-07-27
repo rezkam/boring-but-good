@@ -38,6 +38,15 @@ export const OWNER_ID_ENV = 'BROWSER_TOOLS_OWNER_ID';
 export const OWNER_TOKEN_HASH_ALGORITHM = 'sha256';
 export const PORT_LOCK_STALE_MS = 30000;
 
+// Concurrency guardrails. A managed Chrome costs roughly 800 MB across a browser process and its
+// helpers, so an unbounded fan-out of `start` calls exhausts memory long before it exhausts ports.
+// The cap is deliberately small: agents should reuse or stop a browser, not accumulate them.
+export const DEFAULT_MAX_MANAGED_BROWSERS = 5;
+export const MAX_BROWSERS_ENV = 'BROWSER_TOOLS_MAX_BROWSERS';
+// A managed browser older than this is almost certainly a leftover from a finished agent session.
+export const STALE_BROWSER_AGE_MS = 2 * 60 * 60 * 1000;
+export const REAP_HINT = 'Run scripts/stop.mjs --reap to sweep managed browsers that no lifecycle file accounts for.';
+
 export function agentConfigRoot() {
   return process.env.AGENT_CONFIG_DIR || join(homedir(), '.agents');
 }
@@ -76,6 +85,7 @@ export function browserToolsRuntimeConfig({ configDir = browserToolsConfigDir() 
     chromeSourceDir: expandHomePath(process.env.BROWSER_TOOLS_CHROME_SOURCE_DIR || config.directories?.chromeSourceDir || config.sourceDir || DEFAULT_CHROME_SRC),
     cacheDir: expandHomePath(process.env.BROWSER_TOOLS_CACHE_DIR || config.directories?.cacheDir || DEFAULT_CACHE_DIR),
     artifactDir: expandHomePath(process.env.BROWSER_TOOLS_ARTIFACT_DIR || config.directories?.artifactDir || DEFAULT_ARTIFACT_DIR),
+    maxBrowsers: config.browser?.maxBrowsers ?? config.maxBrowsers ?? null,
   };
 }
 
@@ -907,6 +917,200 @@ export function managedBrowserForUserDataDir(userDataDir) {
   return null;
 }
 
+// Convert a ps etime field ("MM:SS", "HH:MM:SS", or "DD-HH:MM:SS") to milliseconds.
+export function parseProcessAgeMs(etime) {
+  const raw = String(etime ?? '').trim();
+  const match = raw.match(/^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/);
+  if (!match) return null;
+  const [, days, hours, minutes, seconds] = match;
+  const total = ((Number(days || 0) * 24 + Number(hours || 0)) * 60 + Number(minutes)) * 60 + Number(seconds);
+  return total * 1000;
+}
+
+// Parse `ps -axo pid=,etime=,command=` output into the managed *browser* processes only.
+//
+// Pure so the filtering rules stay testable without spawning Chrome. Two exclusions matter:
+// renderer/GPU/utility helpers inherit --user-data-dir and the managed token from their parent, so
+// counting them would inflate the browser count roughly tenfold; and a user-data-dir outside our
+// cache dir is somebody else's Chrome, which we must never count or kill.
+export function parseManagedChromeProcesses(psOutput, { cacheDir = browserToolsCacheDir(), chromeBin = browserToolsChromeBin() } = {}) {
+  const found = [];
+  for (const line of String(psOutput ?? '').split('\n')) {
+    const match = line.trim().match(/^(\d+)\s+(\S+)\s+(.*)$/);
+    if (!match) continue;
+    const [, pidText, etime, command] = match;
+    if (!command.includes(chromeBin)) continue;
+    if (/--type=/.test(command)) continue;
+    if (!command.includes('--pi-browser-tools-managed=')) continue;
+    const portMatch = command.match(/--remote-debugging-port=(\d+)/);
+    if (!portMatch) continue;
+    const dirMatch = command.match(/--user-data-dir=(\S+)/);
+    if (!dirMatch) continue;
+    const userDataDir = dirMatch[1];
+    if (!userDataDir.startsWith(`${cacheDir}/chrome-`)) continue;
+    found.push({
+      pid: Number.parseInt(pidText, 10),
+      port: normalizePort(portMatch[1]),
+      ageMs: parseProcessAgeMs(etime),
+      userDataDir,
+      command,
+    });
+  }
+  return found;
+}
+
+// The live inventory of managed browsers. This reads the process table rather than the lifecycle
+// files on purpose: the files can be deleted while a browser keeps running, which is precisely how
+// a previous leak became invisible to `stop`. Processes cannot lie about existing.
+export function listManagedChromeProcesses() {
+  const result = spawnSync('ps', ['-axo', 'pid=,etime=,command='], { encoding: 'utf-8' });
+  if (result.error || result.status !== 0) return [];
+  return parseManagedChromeProcesses(result.stdout);
+}
+
+export function maxManagedBrowsers(options = {}) {
+  const raw = process.env[MAX_BROWSERS_ENV] ?? browserToolsRuntimeConfig(options).maxBrowsers;
+  const parsed = Number.parseInt(String(raw ?? ''), 10);
+  if (!Number.isInteger(parsed) || parsed < 1) return DEFAULT_MAX_MANAGED_BROWSERS;
+  return parsed;
+}
+
+export function managedBrowserCapacity({ processes = listManagedChromeProcesses(), max = maxManagedBrowsers() } = {}) {
+  const count = processes.length;
+  return {
+    count,
+    max,
+    remaining: Math.max(0, max - count),
+    atCap: count >= max,
+    // Warn on the last free slot so the cap is never a surprise.
+    approaching: count > 0 && count === max - 1,
+    processes,
+  };
+}
+
+export function staleManagedBrowsers(processes = listManagedChromeProcesses(), { maxAgeMs = STALE_BROWSER_AGE_MS } = {}) {
+  return processes.filter((entry) => Number.isFinite(entry.ageMs) && entry.ageMs >= maxAgeMs);
+}
+
+// A managed browser whose lifecycle files no longer describe it. `stop --port N` cannot reach these,
+// so they would otherwise accumulate forever.
+export function orphanedManagedBrowsers(processes = listManagedChromeProcesses()) {
+  return processes.filter((entry) => {
+    // A concurrent start holds the port lock from before the spawn until the readiness probe passes,
+    // so there is a window where its browser is live but not yet written to a state file. Never reap
+    // inside that window or we would kill a healthy browser out from under another agent.
+    if (existsSync(portLockDirForPort(entry.port))) return false;
+    const state = readManagedState(stateFileForPort(entry.port));
+    if (!state || state.managedBy !== 'browser-tools') return true;
+    return Number(state.pid) !== Number(entry.pid);
+  });
+}
+
+// Kill managed browsers that no lifecycle file accounts for, then drop their leftover clone dirs.
+// Safe by construction: every target came from parseManagedChromeProcesses, so it carries our
+// managed token and a user-data-dir inside our cache dir.
+export function reapOrphanedChromes({ dryRun = false, processes = listManagedChromeProcesses() } = {}) {
+  const orphans = orphanedManagedBrowsers(processes);
+  const reaped = [];
+  for (const orphan of orphans) {
+    if (dryRun) {
+      reaped.push({ ...orphan, status: 'would-reap' });
+      continue;
+    }
+    let status = 'reaped';
+    try {
+      process.kill(orphan.pid, 'SIGTERM');
+      if (!waitForProcessExit(orphan.pid, 2000)) {
+        process.kill(orphan.pid, 'SIGKILL');
+        waitForProcessExit(orphan.pid, 1000);
+        status = 'killed';
+      }
+    } catch (e) {
+      status = e.code === 'ESRCH' ? 'already-gone' : 'failed';
+    }
+    reaped.push({ ...orphan, status });
+  }
+  return { reaped, dryRun };
+}
+
+function describePorts(processes, limit = 8) {
+  const ports = processes.map((entry) => `:${entry.port}`);
+  if (ports.length <= limit) return ports.join(', ');
+  return `${ports.slice(0, limit).join(', ')} and ${ports.length - limit} more`;
+}
+
+// Hard stop before a new launch. Refusing is better than allocating yet another port: an unbounded
+// fan-out of starts is exactly what filled memory and swap on a previous run.
+export function assertManagedBrowserCapacity({ processes = listManagedChromeProcesses(), max = maxManagedBrowsers() } = {}) {
+  const capacity = managedBrowserCapacity({ processes, max });
+  if (!capacity.atCap) return capacity;
+  throw new Error(
+    `Managed Chrome limit reached: ${capacity.count} of ${max} browsers are already running (${describePorts(processes)}).\n` +
+    `  Reuse one with --port <n> and its owner token, or free a slot first:\n` +
+    `    scripts/stop.mjs --status   list what is running and how old it is\n` +
+    `    scripts/stop.mjs --reap     sweep browsers no lifecycle file tracks\n` +
+    `    scripts/stop.mjs --prune    reap, then drop unused profile clones\n` +
+    `    scripts/stop.mjs --port <n> --owner-token "$${OWNER_TOKEN_ENV}"\n` +
+    `  Raise the ceiling deliberately with ${MAX_BROWSERS_ENV}=<n> if you genuinely need more.`,
+  );
+}
+
+// Non-fatal notices printed before a launch: one for the last free slot, one for browsers old enough
+// to be leftovers from a finished session.
+export function managedBrowserStartupWarnings({
+  processes = listManagedChromeProcesses(),
+  max = maxManagedBrowsers(),
+  staleMaxAgeMs = STALE_BROWSER_AGE_MS,
+} = {}) {
+  const warnings = [];
+  const capacity = managedBrowserCapacity({ processes, max });
+  if (capacity.approaching) {
+    warnings.push(
+      `${capacity.count} of ${max} managed Chrome browsers are running (${describePorts(processes)}); ` +
+      `${capacity.remaining} slot left before starts are refused. Stop what you no longer need.`,
+    );
+  }
+  const stale = staleManagedBrowsers(processes, { maxAgeMs: staleMaxAgeMs });
+  if (stale.length) {
+    const hours = Math.floor(staleMaxAgeMs / (60 * 60 * 1000));
+    warnings.push(
+      `${stale.length} managed browser${stale.length === 1 ? '' : 's'} ${stale.length === 1 ? 'has' : 'have'} been running over ${hours}h ` +
+      `(${describePorts(stale)}), likely left over from a finished session. ` +
+      `Review with scripts/stop.mjs --reap --dry-run, then clear with scripts/stop.mjs --prune.`,
+    );
+  }
+  return warnings;
+}
+
+// The one gate deciding whether an already-running managed browser may be adopted. Both the explicit
+// --port path and the auto-allocated path go through this: they used to diverge, and the
+// auto-allocated path skipped reuse entirely, so every bare `start` spawned another browser.
+export function managedBrowserReuseDecision({ safety, state, ownerToken, includeGoogle = false }) {
+  if (!safety?.ok) return { ok: false, reason: safety?.reason || 'missing-managed-state' };
+  const ownership = managedBrowserOwnershipSafety({ state, ownerToken });
+  if (!ownership.ok) return { ok: false, reason: ownership.reason, ownerId: ownership.ownerId };
+  // Never adopt across Google modes: a stripped start must not inherit a Google-included browser
+  // (logout risk for the source profile), and a Google workflow must not inherit a stripped one.
+  if (Boolean(state?.includeGoogle) !== Boolean(includeGoogle)) {
+    return { ok: false, reason: 'google-mode-mismatch', ownerId: ownership.ownerId };
+  }
+  return { ok: true, ownerId: ownership.ownerId, state };
+}
+
+// Find a live managed browser the caller can prove it owns, on any port. An auto-allocated start
+// begins at DEFAULT_PORT, so without this a session whose browser landed on :9301 would look at
+// :9222, find nothing, and launch a second browser on every subsequent start.
+export function findReusableManagedBrowser({ ownerToken, includeGoogle = false, processes = listManagedChromeProcesses() } = {}) {
+  if (!normalizeOwnerValue(ownerToken)) return null;
+  for (const entry of processes) {
+    const state = readManagedState(stateFileForPort(entry.port));
+    if (!state || Number(state.pid) !== Number(entry.pid)) continue;
+    const decision = managedBrowserReuseDecision({ safety: { ok: true }, state, ownerToken, includeGoogle });
+    if (decision.ok) return { ...entry, state };
+  }
+  return null;
+}
+
 function chromeBinCandidates(chromeBin) {
   if (String(chromeBin).includes('/')) return [chromeBin];
   const pathDirs = (process.env.PATH || '').split(delimiter).filter(Boolean);
@@ -1011,6 +1215,39 @@ export async function startChrome({
   const { requestedProfileName, resolvedProfileName } = resolveStartProfileName({ profileName, taskName, defaultProfileName });
   ensureCacheDir();
 
+  // Clean up before counting, so the cap reflects browsers that are actually reachable. Orphans are
+  // browsers no lifecycle file tracks: nothing can address or stop them, so they are pure garbage.
+  const reaped = reapOrphanedChromes();
+  if (reaped.reaped.length) {
+    console.error(`⟳ Reaped ${reaped.reaped.length} untracked managed browser${reaped.reaped.length === 1 ? '' : 's'} (${describePorts(reaped.reaped)})`);
+    try {
+      pruneChromeClones({ keepPorts: [normalizedPort] });
+    } catch {
+      // Best-effort disk cleanup must never block a launch.
+    }
+  }
+
+  const liveBrowsers = listManagedChromeProcesses();
+  for (const warning of managedBrowserStartupWarnings({ processes: liveBrowsers })) {
+    console.error(`⚠ ${warning}`);
+  }
+  // Prefer returning a browser the caller already owns over adding another. For an auto-allocated
+  // start that means searching every port, since the caller's browser may not be on DEFAULT_PORT.
+  // This is the single biggest source of the leak: every bare start used to mean one more Chrome.
+  let reusable = null;
+  if (providedOwnerToken) {
+    const candidates = autoAllocatePort ? liveBrowsers : liveBrowsers.filter((entry) => entry.port === normalizedPort);
+    const found = findReusableManagedBrowser({ ownerToken: providedOwnerToken, includeGoogle, processes: candidates });
+    if (found && await browserWSEndpoint(found.port)) {
+      reusable = found;
+      normalizedPort = found.port;
+    }
+  }
+
+  // Only a genuine reuse is exempt from the cap. A browser merely occupying the port we would start
+  // from is not reusable, so it must not buy a free pass past the limit.
+  if (!reusable) assertManagedBrowserCapacity({ processes: liveBrowsers });
+
   while (true) {
     const portLock = acquirePortLock(normalizedPort, { ownerId: normalizedOwnerId });
     if (!portLock) {
@@ -1024,36 +1261,38 @@ export async function startChrome({
 
       if (await browserWSEndpoint(normalizedPort)) {
         const safety = managedBrowserSafetyForPort(normalizedPort);
-        if (!autoAllocatePort) {
-          if (!safety.ok) {
-            throw new Error(
-              `Chrome DevTools is already listening on :${normalizedPort}, but it is not a Browser Tools managed browser (${safety.reason}). Use a different --port or stop that browser manually.`,
-            );
-          }
-          const state = readManagedStateForPort(normalizedPort);
-          const ownership = managedBrowserOwnershipSafety({ state, ownerToken: providedOwnerToken });
-          if (!ownership.ok) {
-            throw new Error(
-              `Chrome DevTools on :${normalizedPort} is owned by another Browser Tools agent (${ownership.reason}). Use a different --port or provide the correct --owner-token.`,
-            );
-          }
-          // Never reuse across a different Google mode: a default (stripped) start must not adopt a
-          // Google-included browser (logout risk), and a Google workflow must not adopt a stripped one.
-          if (Boolean(state?.includeGoogle) !== includeGoogle) {
-            throw new Error(
-              `Chrome on :${normalizedPort} is running with Google ${state?.includeGoogle ? 'included' : 'excluded'}, but this start requested Google ${includeGoogle ? 'included' : 'excluded'}. Stop it with scripts/stop.mjs --clean and start again.`,
-            );
-          }
+        const state = readManagedStateForPort(normalizedPort);
+        const reuse = managedBrowserReuseDecision({ safety, state, ownerToken: providedOwnerToken, includeGoogle });
+        // Reuse first, on both paths. An auto-allocated start used to skip this entirely and walk to
+        // the next free port, so a session that called start twice got two browsers instead of one.
+        if (reuse.ok) {
           return {
             status: 'reused',
             port: normalizedPort,
             headless: Boolean(state?.headless),
             includeGoogle: Boolean(state?.includeGoogle),
             ownerToken: effectiveOwnerToken,
-            ownerId: ownership.ownerId,
+            ownerId: reuse.ownerId,
             ownerTokenGenerated: false,
           };
         }
+        if (!autoAllocatePort) {
+          if (!safety.ok) {
+            throw new Error(
+              `Chrome DevTools is already listening on :${normalizedPort}, but it is not a Browser Tools managed browser (${safety.reason}). Use a different --port or stop that browser manually.`,
+            );
+          }
+          if (reuse.reason === 'google-mode-mismatch') {
+            throw new Error(
+              `Chrome on :${normalizedPort} is running with Google ${state?.includeGoogle ? 'included' : 'excluded'}, but this start requested Google ${includeGoogle ? 'included' : 'excluded'}. Stop it with scripts/stop.mjs --clean and start again.`,
+            );
+          }
+          throw new Error(
+            `Chrome DevTools on :${normalizedPort} is owned by another Browser Tools agent (${reuse.reason}). Use a different --port or provide the correct --owner-token.`,
+          );
+        }
+        // Cannot adopt it, so this really will be a new browser: it must fit under the cap.
+        assertManagedBrowserCapacity();
         normalizedPort = await findAvailablePort(normalizedPort + 1);
         continue;
       }
@@ -1156,6 +1395,20 @@ export function stopChrome({ port = DEFAULT_PORT, clean = false, dryRun = false,
     return { status: 'missing', port: normalizedPort, cleaned: false };
   }
   if (!hasPidFile || !hasStateFile) {
+    // A surviving pid file for a live process is the only handle we have on that browser. Deleting
+    // it strands the process where neither stop nor a future start can see it, so keep it and let
+    // the reaper deal with the process itself.
+    const strandedPid = hasPidFile ? Number.parseInt(readFileSync(paths.pidFile, 'utf-8').trim(), 10) : NaN;
+    if (Number.isInteger(strandedPid) && processExists(strandedPid)) {
+      return {
+        status: 'not-managed',
+        port: normalizedPort,
+        pid: strandedPid,
+        cleaned: false,
+        reason: 'incomplete-managed-state',
+        hint: REAP_HINT,
+      };
+    }
     rmSync(paths.pidFile, { force: true });
     rmSync(paths.stateFile, { force: true });
     return { status: 'not-managed', port: normalizedPort, cleaned: false, reason: 'incomplete-managed-state' };
@@ -1190,6 +1443,19 @@ export function stopChrome({ port = DEFAULT_PORT, clean = false, dryRun = false,
   }
 
   if (!safety.ok) {
+    // The process failed a safety check but is still running. Forgetting its lifecycle files here is
+    // what previously turned mismatched browsers into permanent orphans, so keep them.
+    if (processExists(pid)) {
+      return {
+        status: 'not-managed',
+        port: normalizedPort,
+        pid,
+        cleaned: false,
+        reason: safety.reason,
+        command: safety.command,
+        hint: REAP_HINT,
+      };
+    }
     rmSync(paths.pidFile, { force: true });
     rmSync(paths.stateFile, { force: true });
     return {

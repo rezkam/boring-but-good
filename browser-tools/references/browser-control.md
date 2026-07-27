@@ -11,7 +11,7 @@ Requires the `@rezkam/browser-tools` npm package (`npm install -g @rezkam/browse
 | `browser-tools config` | Create or refresh private Browser Tools config | `browser-tools config profiles --refresh` |
 | `browser-tools start` | Launch sandboxed Chrome | `browser-tools start`, `browser-tools start --profile "<Chrome profile folder or local alias>"`, `browser-tools start --task <task>`, or `browser-tools start --headless` |
 | `browser-tools status` | Report whether a managed Chrome instance is running for a port | `browser-tools status --port 9223 --json` |
-| `browser-tools stop` | Stop sandboxed Chrome | `browser-tools stop --dry-run` then `browser-tools stop --clean` |
+| `browser-tools stop` | Stop sandboxed Chrome, or sweep leftovers | `browser-tools stop --dry-run` then `browser-tools stop --clean`; `browser-tools stop --status`, `--reap`, `--prune` |
 | `browser-tools nav` | Navigate current tab or open a new tab | `browser-tools nav https://example.com --new` |
 | `browser-tools eval` | Run JavaScript in the active tab | `browser-tools eval 'document.title'` |
 | `browser-tools screenshot` | Capture visible or full-page screenshot | `browser-tools screenshot --full` |
@@ -51,12 +51,13 @@ The config can override:
     "artifactDir": "/tmp"
   },
   "browser": {
-    "chromeBin": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    "chromeBin": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "maxBrowsers": 5
   }
 }
 ```
 
-Environment variables take precedence: `BROWSER_TOOLS_CONFIG_DIR`, `BROWSER_TOOLS_CACHE_DIR`, `BROWSER_TOOLS_ARTIFACT_DIR`, `BROWSER_TOOLS_CHROME_SOURCE_DIR`, and `BROWSER_TOOLS_CHROME_BIN`.
+Environment variables take precedence: `BROWSER_TOOLS_CONFIG_DIR`, `BROWSER_TOOLS_CACHE_DIR`, `BROWSER_TOOLS_ARTIFACT_DIR`, `BROWSER_TOOLS_CHROME_SOURCE_DIR`, `BROWSER_TOOLS_CHROME_BIN`, and `BROWSER_TOOLS_MAX_BROWSERS`.
 
 ### Legacy profile config compatibility
 
@@ -82,7 +83,27 @@ The cached profile copy is not live. A site can be logged in in normal Chrome wh
 
 ### Cleanup
 
-Each clone lives in a per-port sandbox directory (about 400 MB per profile). Because starting without `--port` auto-allocates a new port, clones can accumulate over time. `browser-tools stop --clean` removes the clone data directory and its per-port sync-state file for the stopped browser. `browser-tools stop --prune` sweeps every cached clone that is not currently in use by a running managed Chrome, removing each stale clone directory along with its sync-state and lifecycle files; add `--dry-run` to preview. Prune keeps any clone still owned by a live process and never touches non-clone cache entries such as ai-chat data.
+Each clone lives in a per-port sandbox directory (about 400 MB per profile), and each running browser costs roughly 800 MB of memory across its process tree. `browser-tools stop --clean` removes the clone data directory and its per-port sync-state file for the stopped browser. `browser-tools stop --prune` first reaps untracked browsers, then sweeps every cached clone that is not currently in use by a running managed Chrome, removing each stale clone directory along with its sync-state and lifecycle files; add `--dry-run` to preview. Prune keeps any clone still owned by a live process and never touches non-clone cache entries such as ai-chat data.
+
+## Concurrency limits
+
+A managed browser is expensive, and nothing stops an agent session from calling `start` in a loop. Three guardrails bound that:
+
+- **A hard cap of 5 concurrent managed browsers.** A start that would exceed it fails with the list of occupied ports and the commands that free one. Override deliberately with `BROWSER_TOOLS_MAX_BROWSERS=<n>` or `browser.maxBrowsers` in the config file.
+- **A warning on the last free slot**, printed before the launch, so hitting the cap is never a surprise.
+- **A warning about leftovers.** Any managed browser running longer than two hours is reported at start time as a likely leftover from a finished session.
+
+The count comes from scanning the process table for browsers carrying the managed token and a user-data-dir inside the cache directory, not from the lifecycle files. Files can be deleted while a browser keeps running; processes cannot. Helper processes (renderers, GPU, utility) are excluded, so the count is browsers, not processes.
+
+### Reaping untracked browsers
+
+A managed browser whose lifecycle files no longer describe it is an **orphan**: `browser-tools stop --port <n>` cannot see it, and it holds both a memory slot and its clone directory indefinitely.
+
+- `browser-tools stop --status` lists every running managed browser with its port, PID, and age, plus the cap and any warnings.
+- `browser-tools stop --reap` kills the orphans. Add `--dry-run` to list them first.
+- `browser-tools start` reaps orphans automatically before counting against the cap, then prunes their clone dirs, so a leak self-heals on the next start.
+
+Reaping only ever targets processes carrying the Browser Tools managed token *and* a user-data-dir inside the cache directory, so the main Chrome and any unrelated browser are never candidates. A port held by a concurrent start's lock is skipped, because that browser exists before its state file does.
 
 ## Agent ownership
 
@@ -92,8 +113,10 @@ Every Managed Browser is owned by one agent token. For a user-supplied token, ex
 
 Ownership rules:
 
-- Starting without an explicit `--port` never reuses another listening browser. It auto-allocates the next free port and creates a new owned sandbox.
+- Starting without an explicit `--port` reuses a running browser that the caller's owner token already owns, on whatever port it landed on. Export `BROWSER_TOOLS_OWNER_TOKEN` after the first start and repeated starts in that session return the same browser instead of accumulating new ones.
+- Starting without an explicit `--port` and without an owner token cannot prove ownership of anything, so it auto-allocates the next free port and creates a new owned sandbox, subject to the concurrency cap.
 - Starting with an explicit `--port` reuses only when that browser is Browser Tools managed and the owner token matches.
+- Reuse never crosses Google modes: a default (stripped) start will not adopt a `--include-google` browser, or the reverse.
 - Browser Control, GIF recorders, and generic extractors refuse to connect when the owner token is missing or wrong.
 - `browser-tools stop` refuses to stop a live browser when the owner token is missing or wrong.
 - Per-port lock directories under the configured cache directory serialize concurrent starts so two agents do not claim the same port at the same time.
