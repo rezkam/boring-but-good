@@ -31,6 +31,14 @@ case "$tool" in
            printf 'Blocked: implementation-notes-*.md is a local record and is never staged.\n' >&2
            exit 2
          fi
+         # Commands that drop into $EDITOR and wait forever. One rebase --continue sat in
+         # vim for 1022 seconds before the run was killed, then finished in 0.3s once the
+         # editor was disabled. Not every harness sets GIT_EDITOR, so do not rely on it.
+         if printf '%s' "$cmd" | grep -qE '(^|[;&|] *)git +(rebase +--continue|merge |cherry-pick |revert |commit +--amend)' \
+            && ! printf '%s' "$cmd" | grep -qE 'GIT_EDITOR=|--no-edit|-m |--message|--file|-F '; then
+           printf 'Blocked: this git command opens an editor and will hang.\nPrefix it with GIT_EDITOR=true, or pass --no-edit or -m.\n' >&2
+           exit 2
+         fi
          # Blind staging pulls in work that is not yours.
          if printf '%s' "$cmd" | grep -qE 'git add (-A|--all|\.)( |$)|git commit[^|;]*( |^)(-[a-zA-Z]*a[a-zA-Z]*|--all)( |$)'; then
            printf 'Blocked: stage by explicit path. git add -A / git add . / git commit -a sweep up unrelated work.\n' >&2
@@ -62,7 +70,10 @@ violations=""
 add() { violations+="$1
 "; }
 
-if printf '%s' "$text" | grep -q '—'; then
+# Built from its codepoint on purpose. A literal here would make this file, and its
+# tests, unwritable by the very guard they implement.
+emdash=$(printf '\u2014')
+if printf '%s' "$text" | grep -qF "$emdash"; then
   add "Em dash found. Use a comma, a colon, parentheses, or a second sentence."
 fi
 
