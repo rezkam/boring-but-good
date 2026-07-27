@@ -1,88 +1,110 @@
 # Dispatch
 
-What every dispatch must establish, and who runs on what. The wording is yours: a dispatch succeeds when the subagent can do its one job without rediscovering anything you already knew, and its report can be verified without trusting it.
+Read this only when a unit cleared the DIRECT/DISPATCH gate in SKILL.md and is going out.
 
-## Model and effort matrix
+## Mechanism
 
-| Role         | Model                        | Effort                        | Used for                                                 |
-| ------------ | ---------------------------- | ----------------------------- | -------------------------------------------------------- |
-| Investigator | one tier below coordinator   | low; medium for tangled areas | read-only questions before or during the plan            |
-| Implementer  | one tier below coordinator   | high                          | landing one slice                                        |
-| Fixer        | one tier below coordinator   | medium                        | one confirmed finding, evidence attached                 |
-| Reviewer     | top tier (coordinator's own) | high                          | one adversarial pass over the whole diff, fresh context  |
+This differs by harness. Establish which one you are in before planning dispatches, and
+never assume a tool exists because another harness has it.
 
-Effort is set by the dispatch mechanism, and mechanisms differ in whether they expose it. A workflow-style dispatcher that takes an `effort` option, or a custom agent definition that carries an effort setting, can pin it. A bare subagent-spawn tool that exposes no effort control leaves effort inherited from the caller and unverifiable after the fact. So for effort-sensitive work, route through a mechanism that pins effort; if the only tool at hand cannot, do not assume the requested effort took: say it is inherited and fall back to encoding the expected depth in the prompt as a last resort. Likewise verify the model a dispatched agent actually ran on (the served model is usually recorded in its transcript or task metadata) rather than assuming the requested model took.
+**Claude Code.** `Workflow`'s `agent(prompt, {model, effort})` is the default: it is the
+only call that pins both values. `Agent` pins model only; use it solely when effort
+genuinely does not matter, or when dispatching a pre-defined agent type whose frontmatter
+already carries `model:` and `effort:`.
 
-## Mechanism facts
+**pi.** There is no `Workflow` tool. The `subagent` tool pins both values inside one
+string: `model: "<provider>/<model>:<effort>"`, for example
+`openai-codex/gpt-5.6-luna:medium`. See [harness.md](harness.md).
 
-- A long serial slice chain suits a Workflow script: one `agent()` per slice gives resume-from-cache on a killed run. Report schemas, when used, are a MINIMAL typed core per dispatch type (impl/fix: gates green?, in scope?, tests bite?, live-verify matches?, issues) plus a mandatory free-text what-changed narrative; never put long prose in required schema fields (oversized results hit the structured-output retry cap and abort completed work), and never accept placeholder values ("test", empty strings) as a report: a schema-valid but information-free report is a FAILED dispatch, re-dispatched or verified from disk. Verify/review/investigation agents return free text, always. Keep the per-type cores suggestive, not rigid: the workflow stays dynamic.
-- Single dispatches suit the Agent tool in background mode; SendMessage continues an agent with its context intact.
-- An investigator that already mapped a slice's ground can be continued as that slice's implementer. The context it built is capital; spend it instead of rebuilding it in a cold agent.
+**Codex.** No `Workflow` tool. Pin what the local spawn mechanism actually supports,
+verify it from the launched process rather than from the flag you passed, and state in
+the dispatch table which values are pinned and which are inherited. Do not describe an
+inherited effort as pinned.
 
-## Lanes
+**Any harness.** If neither model nor effort can be pinned for a stage, say so in the
+table and let the user decide, rather than launching and reporting as though the plan
+was honored.
 
-The default implementer is a subagent one model tier below the coordinator. When a standing project rule routes implementation elsewhere (for example "codex does all impl and fixes"), the implementer dispatch becomes a driver for that worker: same contract, same report. A worker that cannot commit reports its diff and the coordinator commits it after verifying. The driver drives; when the worker fails, it reports the failure instead of editing code itself.
+Verify what actually resolved. A same-name user or project agent definition can shadow a
+builtin, and a builtin's model summary may describe the hidden builtin rather than the
+definition you selected. Confirm the source path, model, effort, and tools before the
+first dispatch of a campaign and again after any worktree or dependency change.
 
-## Every dispatch establishes
+## Tier selection
 
-- the role, first: it is a subagent; a coordinator agent reviews its work on disk, owns git (commit/push), the living docs, and the campaign; its goal is solely its one job and an honest report. Prohibitions (no git, no live runs, no installs) then read as consequences of the role, not an arbitrary rule list
-- one job (a subagent given two jobs does both halfway)
-- the whole world, distilled and inline: FULL resolved absolute paths (the worktree path verbatim, never a variable), working directory and branch verified by the subagent before it changes anything, the task-scoped context the agent needs to DO the job (schemas, contracts, acceptance criteria, file anchors) inlined in the prompt, and the ENVIRONMENT FACTS: the traps you proved during setup, stated as verified facts with hard boundaries (baseline counts, install traps, scratch-vs-live data paths, signing fallbacks). Large plan or design documents are optional reference pointers, never required reading: the coordinator owns the plan and distills it. The completeness bar: the agent's first tool call should be task work, not environment discovery
-- git boundaries: implementers and fixers commit locally with conventional messages; only the coordinator pushes
-- the report contract below
+This applies only to work that already cleared the dispatch gate in SKILL.md. It is not a
+reason to dispatch something. A cheap tier existing does not make trivial work worth
+delegating: if the unit is on the never-dispatch list, no row here applies to it.
 
-## Pre-dispatch checks
+Use the least capable model that finishes the role correctly in few turns. Turn count
+costs more than token price: a cheap model that needs three times the turns is not cheap.
 
-- Lint the RENDERED prompt before dispatch: reject `undefined`, `null`, `NaN`, and empty interpolations (one unset template variable once shipped `cd undefined/<pkg>` to every agent in a workflow, under a "trust these, verified" header). Build prompt bodies from plain quoted strings; no backticks inside prompt text when the dispatch mechanism parses the script.
-- Snapshot the worktree (`git status --short` plus `git diff --stat`) immediately before every implementer or fixer dispatch and record it in the notes: it is the baseline for attributing partial state after a death, retry, or interrupted run.
-- After a workflow returns, read its journal: `started` without `result` = a dead (possibly silently retried) agent; handle per [recovery.md](recovery.md) before trusting any report.
+| Role | Claude | GPT |
+| --- | --- | --- |
+| A slice whose spec is complete and mechanical | `claude-sonnet-5` | `gpt-5.6-luna` |
+| Implementation from prose, integration work | `claude-sonnet-5` | `gpt-5.6-terra` |
+| Design judgment, long-horizon work | `claude-opus-5` | `gpt-5.6-sol` |
+| Final whole-branch review | `claude-fable-5` at high | `gpt-5.6-sol` at high |
 
-## The implementer's contract
+Implementers and fixers default to `medium` effort. Reviewer effort scales with risk;
+the final review is always high and always names its model explicitly, even when that
+model equals the session default.
 
-An implementer knows, before it starts:
+This table is policy, not proof of availability. Resolve the model before launch and
+report an unavailable tier rather than silently substituting one. Write the ID in the form
+the local dispatch mechanism requires: bare on Claude Code, provider-prefixed with the
+effort suffix on pi. Never carry a prefixed alias into a commit, a doc, or the PR.
 
-- the slice: acceptance criteria stated as observable behavior, file anchors, pre-verified facts about the data, and verify commands with expected outputs
-- scope is the slice, and the deviation clause verbatim: "If you hit an edge case that forces you to deviate from the plan, pick the conservative option, log it under 'Deviations', and keep going."
-- re-entry is idempotent: the campaign can resume, so work already landed is confirmed green and reported with its commit, never redone
-- tests are real: tdd where the behavior is testable; a test that guards a fix is proven to bite (revert the change, watch it fail, restore, watch it pass); a skipped or tautological test is a defect
-- the spec is authoritative: an acceptance threshold that fails on real data is reported with the measured value and logged as a deviation, never tuned green
-- gates before commit are typecheck plus the touched test files; the full suite belongs to the coordinator
-- the notes protocol: a Slice log entry with evidence, earlier entries left as written; the file is the user's local record and never gets staged or committed
+When a standing project rule routes implementation elsewhere ("codex does all impl"),
+the dispatch becomes a driver for that worker: same contract, same report. A worker that
+cannot commit reports its diff and you commit it after verifying. When the worker fails,
+the driver reports the failure instead of quietly implementing it itself.
 
-## The fixer's contract
+## What every implementation dispatch carries
 
-Everything above, narrowed to confirmed findings only: each finding arrives with its evidence (the failing command and verbatim output) and the expected post-fix output. A fixer taking over partial work judges the tree first (status and diff) and either builds on it or redoes it coherently.
+Give the agent a complete world. A dispatch missing any of these produces a report you
+cannot trust:
 
-## The investigator's contract
+- the full resolved worktree path, stated verbatim, and the branch name
+- the exact expected `HEAD` sha, with an instruction to STOP and report if it differs
+- the one slice, its acceptance criteria, and how it will be verified
+- the boundaries: what it may not touch, and that `implementation-notes-*.md` is never
+  staged
+- that the global instruction file's hard rules apply to it exactly as they apply to you,
+  and that its commit follows the `commit` skill. Name both rather than restating their
+  contents. If the harness cannot load skills inside a subagent, say so in the dispatch
+  table and paste the `commit` skill body into the prompt instead of paraphrasing it.
+- that it commits locally on its branch and **never pushes, never runs `gh`, never opens
+  a PR**. Pushing and PR state belong to the coordinator alone.
+- what to do on conflict: stop and report, do not improvise
 
-Read-only, one question. The answer carries file:line evidence, separates observed code from documented aspiration and observation from inference, and names any part of the question the repo cannot answer.
+Lint the rendered prompt before sending it. Reject `undefined`, `null`, `NaN`, and empty
+interpolations. One unset variable once shipped `cd undefined/<pkg>` to every agent in a
+fanout, under a header telling them the path was verified.
 
-## The reviewer's contract
+Do not give a mutating agent a hard turn or tool-call budget. A real task can legitimately
+use many turns and then be called failed after it already finished its edits. Split work
+that exceeds one context into serial milestones instead, and use elapsed time only as a
+liveness bound with generous margin.
 
-The reviewer runs the adversarial methodology in the sibling `code-review/` kit (`ADVERSARIAL_CODE_REVIEW_PROMPT.md`) itself, finders and refutation in one agent, review depth thorough: its job is to break the work, and everything it is given is verifiable on disk (verify, do not trust). It is asked to focus on the most important issues and problems, with severity, confidence, and what is worth reporting governed by the guide's rubric: trust over volume.
+## Parallel writers
 
-The same holds for every adversarial verify dispatch mid-loop, not only the review rounds: "adversarial" is defined by the canonical kit (`ADVERSARIAL_CODE_REVIEW_PROMPT.md`; `RUBRIC.md` for severity anchors, confidence, false-positive filters, and report thresholds; `REFUTER_PROMPT.md` for refute passes), never improvised per dispatch. The dispatch states what each verdict means and its threshold (for example CLEAN/SHIP = zero confirmed findings above the fix bar remaining; NEEDS-FIX/BLOCK = at least one confirmed finding above the bar with file:line evidence). Severity anchor that binds every reviewer: defects in public interfaces or CLI/tool contracts, runtime error paths, and silent data loss or truncation sit ABOVE the tracked-debt line (High/P2 minimum), regardless of how edge-case the trigger feels.
+Only in separate worktrees with disjoint file ownership, integrated one lane at a time in
+the approved order, with the touched gates re-run after each integration. Read-only
+agents may share a frozen revision. Two writers never share a worktree.
 
-It receives:
+Every dispatched agent stops immediately and reports `BLOCKED_CONCURRENT_MUTATION` if
+`HEAD`, `git status`, or file contents change in a way it cannot attribute to itself.
 
-- the guide's inputs: repository root (the worktree), change scope (the base..head diff, head pinned), the goal, and the validation commands
-- campaign context the guide cannot know: the commit-to-slice map, the scope rule for deferred slices (their absence is not a defect; committed code silently depending on them is), and the ENVIRONMENT FACTS
-- on rounds after the first: the prior round's findings and their fix commits, so each fix is judged as new work, since a partial fix is a new finding
+## Reading a returned report
 
-Campaign duties on top of the guide: acceptance per slice with each live-verify reproduced and its actual output quoted; gates re-run fresh with counts quoted; the hollow-test hunt; on every "done" claim the three checks (defined in a doc vs enforced by a failing test, written vs actually read downstream, referenced vs executable end-to-end); cross-slice seams; and the deviations audit.
+The report is a claim. The tree is the evidence. Judge by the diff and your own gate runs.
 
-Its report: verdict SHIP / SHIP WITH FIXES / BLOCK with the head SHA the verdict covers; findings ranked most severe first, each as file:line, severity, the defect in one sentence, the concrete failure scenario, and the verification evidence (command plus output snippet); observed facts separated from inference; categories with no findings declared as such.
-
-## The report contract (implementers and fixers)
-
-A report proves, compactly (outcome lines and short snippets, never pasted logs):
-
-1. what changed, at behavior level
-2. status per acceptance criterion
-3. live-verify: the exact commands run plus the observed output proving each acceptance
-4. what was observed vs what is inferred, separated
-5. deviations (or "none")
-6. what remains unverified
-7. deviations are not just listed: each one is input to the coordinator's adjudication (ratified or remediated) before the slice closes
-
-A report missing its evidence is unverifiable and goes back.
+- A schema-valid but information-free report ("test", empty strings) is a failed dispatch.
+- After a `Workflow` returns, read its journal: a `started` with no matching `result`
+  means an agent died and may have been silently retried. Attribute the tree state by
+  diffing against your pre-dispatch snapshot before trusting anything. See
+  [recovery.md](recovery.md).
+- Every deviation the agent reports is adjudicated before the slice closes: ratified and
+  logged with why, or reverted and fixed. A filed but unjudged deviation is an open scope
+  decision hiding as a note.
