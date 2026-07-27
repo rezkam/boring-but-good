@@ -8,7 +8,8 @@
     "artifactDir": "/tmp"
   },
   "browser": {
-    "chromeBin": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    "chromeBin": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "maxBrowsers": 5
   },
   "profiles": {
     "<Chrome profile folder>": {
