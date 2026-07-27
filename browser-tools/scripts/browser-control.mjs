@@ -539,9 +539,12 @@ export function buildBrowserToolsConfig({ sourceDir = browserToolsChromeSourceDi
       chromeBin: existingBrowser.chromeBin || browserToolsChromeBin(),
       // Only carry an explicitly configured cap. Writing a default here would freeze the value and
       // silently override a later change to the built-in limit.
-      ...(existingBrowser.maxBrowsers === undefined || existingBrowser.maxBrowsers === null
-        ? {}
-        : { maxBrowsers: existingBrowser.maxBrowsers }),
+      // browserToolsRuntimeConfig also honours a legacy top-level maxBrowsers, so carry that form
+      // through too. Nested wins when both exist, matching how the value is read.
+      ...(() => {
+        const cap = existingBrowser.maxBrowsers ?? existing?.maxBrowsers;
+        return cap === undefined || cap === null ? {} : { maxBrowsers: cap };
+      })(),
     },
     profiles: Object.fromEntries(profiles.map((profile) => [profile.folder, profile])),
     aliases: buildAliases(profiles),
@@ -1138,7 +1141,14 @@ export function orphanedManagedBrowsers(processes = listManagedChromeProcesses()
     const pidFile = pidFileForPort(entry.port);
     if (!existsSync(pidFile)) return true;
     const recordedPid = Number.parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
-    return recordedPid !== Number(entry.pid);
+    if (recordedPid !== Number(entry.pid)) return true;
+    // A PID match alone is not tracking. stopChrome also verifies the managed token, clone dir and
+    // port, refuses the browser when they disagree, and points at --reap; if this predicate stopped
+    // at the PID, --reap would disagree and the browser would have no cleanup path at all.
+    if (Number(state.port) !== Number(entry.port)) return true;
+    if (state.userDataDir !== entry.userDataDir) return true;
+    if (state.managedToken && entry.managedToken && state.managedToken !== entry.managedToken) return true;
+    return false;
   });
 }
 
@@ -1762,7 +1772,14 @@ export function stopChrome({ port = DEFAULT_PORT, clean = false, dryRun = false,
 // Removes the clone data dir plus its per-port sync-state and lifecycle files. A clone whose
 // user-data-dir is still owned by a live managed Chrome is kept. Never touches non-clone cache
 // entries (for example ai-chat data), because every path comes from the per-port helpers.
-export function pruneChromeClones({ dryRun = false, keepPorts = [] } = {}) {
+export function reapExitCode(reaped = []) {
+  return reaped.some((entry) => entry?.status === 'failed') ? 1 : 0;
+}
+
+export function pruneChromeClones({ dryRun = false, keepPorts = [], assumeStoppedPorts = [] } = {}) {
+  // Ports a preceding reap has freed, or would free in a dry run. Without this a `--prune --dry-run`
+  // reports those clones as still in use and hides the removals the real command performs.
+  const assumeStopped = new Set(assumeStoppedPorts.map((value) => Number.parseInt(value, 10)));
   const cacheDir = browserToolsCacheDir();
   const keep = new Set(keepPorts.map((value) => Number.parseInt(value, 10)));
   const removed = [];
@@ -1799,8 +1816,8 @@ export function pruneChromeClones({ dryRun = false, keepPorts = [] } = {}) {
     const freshDir = freshProfileDirForPort(port);
     // Both a stale profiled clone and a live fresh clone can share a port, so check each candidate
     // dir for a live owner. Removing either dir while one is in use would corrupt a running browser.
-    const runningData = existsSync(dataDir) ? managedBrowserForUserDataDir(dataDir) : null;
-    const runningFresh = existsSync(freshDir) ? managedBrowserForUserDataDir(freshDir) : null;
+    const runningData = !assumeStopped.has(port) && existsSync(dataDir) ? managedBrowserForUserDataDir(dataDir) : null;
+    const runningFresh = !assumeStopped.has(port) && existsSync(freshDir) ? managedBrowserForUserDataDir(freshDir) : null;
     const running = runningData || runningFresh;
     if (running) {
       kept.push({ port, reason: 'running', pid: running.pid, dir: runningData ? dataDir : freshDir });

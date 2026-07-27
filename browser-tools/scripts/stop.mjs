@@ -22,6 +22,7 @@ import {
   parseOwnerToken,
   parsePort,
   pruneChromeClones,
+  reapExitCode,
   reapOrphanedChromes,
   stopChrome,
 } from './browser-control.mjs';
@@ -59,7 +60,8 @@ if (hasFlag(args, '--status')) {
 if (hasFlag(args, '--reap')) {
   const result = reapOrphanedChromes({ dryRun });
   reportReaped(result.reaped, dryRun);
-  process.exit(0);
+  // A caller reaping to free a slot must be able to tell that a browser survived.
+  process.exit(reapExitCode(result.reaped));
 }
 
 if (hasFlag(args, '--prune')) {
@@ -67,7 +69,12 @@ if (hasFlag(args, '--prune')) {
   // how 2.4 GB of clones survived every prune during the leak.
   const reaped = reapOrphanedChromes({ dryRun });
   reportReaped(reaped.reaped, dryRun);
-  const prune = pruneChromeClones({ dryRun });
+  // A real prune reclaims the clones of the browsers just reaped. Tell the dry run to assume the
+  // same, otherwise the preview reports those clones as in use and understates what will be removed.
+  const freedPorts = reaped.reaped
+    .filter((entry) => entry.status === 'would-reap' || entry.status === 'reaped' || entry.status === 'killed' || entry.status === 'already-gone')
+    .map((entry) => entry.port);
+  const prune = pruneChromeClones({ dryRun, assumeStoppedPorts: freedPorts });
   if (!prune.removed.length && !prune.kept.length) {
     console.log('No cached Chrome clones found.');
   }
@@ -78,7 +85,7 @@ if (hasFlag(args, '--prune')) {
     const count = entry.paths.length;
     console.log(`${dryRun ? '• Would remove' : '✓ Removed'} clone for :${entry.port} (${count} item${count === 1 ? '' : 's'})`);
   }
-  process.exit(0);
+  process.exit(reapExitCode(reaped.reaped));
 }
 
 const result = stopChrome({ port, clean, dryRun, ownerToken });
