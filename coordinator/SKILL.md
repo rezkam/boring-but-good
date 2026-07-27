@@ -43,11 +43,12 @@ or work is not running and you start some.
 
 ## 2. Pinning model and effort is mechanical
 
-**The `Agent` tool has no `effort` parameter.** It takes `subagent_type`, `model`,
-`isolation`, `run_in_background`. Nothing else. An agent launched through `Agent` inherits
-the session's reasoning effort, whatever the plan said.
+Every dispatch states a model and an effort. A call that cannot express both is a fact for
+the dispatch table, never a detail to leave out.
 
-On Claude Code there are exactly two ways to pin effort:
+**Claude Code.** The `Agent` tool has no `effort` parameter: `subagent_type`, `model`,
+`isolation`, `run_in_background`, nothing else. Agents launched through it inherit the
+session's reasoning effort whatever the plan said. Two ways to pin it:
 
 1. **`Workflow`**, whose `agent(prompt, {model, effort})` accepts both. Default for any
    dispatch where effort matters. One `agent()` per slice also gives resume-from-cache if
@@ -55,8 +56,29 @@ On Claude Code there are exactly two ways to pin effort:
 2. **A pre-defined agent type** with `model:` and `effort:` in its frontmatter under
    `~/.claude/agents/`, dispatched by name.
 
-On other harnesses, pin what the local mechanism actually supports and see
-[harness.md](harness.md).
+**pi.** `subagent` pins both inside one string: `model: "<provider>/<model>:<effort>"`, as
+in `openai-codex/gpt-5.6-sol:high`. **The batch form takes no per-task model.** In
+`subagent({tasks: [...]})` the `model` key sits on the call, not inside a task, so a fan-out
+of mixed roles either shares one model or goes out as one call per task. Leaving it off
+inherits silently, and every builtin pi agent inherits the session model by default: a real
+campaign fanned out three read-only investigations with no `model` key anywhere and two of
+them ran at thinking `low`.
+
+**Codex.** Pin what the local spawn mechanism supports, read it back off the launched
+process rather than off the flag you passed, and never call an inherited effort pinned.
+
+**A harness model recommender is input, not authority.** pi's
+`subagent action:"watchdog.recommend-model"`, and anything like it, answers a different
+question than the tier table in [dispatch.md](dispatch.md): it does not know the slice, the
+budget, or the routing plan. Read it, then decide, then write the model you chose and why
+into the table. Asking the harness what to run is not routing.
+
+**Never give a dispatched agent a hard turn or tool-call budget.** Read-only agents
+included. Turn count does not measure progress: one fan-out set `maxTurns: 4` and killed
+two of its three investigations at turns 6 and 7, after both had already written their
+findings, while the survivor was forced into an answer it labelled partial. Bound liveness
+with elapsed time and a generous margin instead. Work that will not fit one context becomes
+serial milestones, not a shorter leash.
 
 **Routing is planned before and proved after.** Name the stage, model, and effort in one
 line each before the first dispatch. If you have not, you have not decided the routing and
