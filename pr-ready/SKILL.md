@@ -30,17 +30,24 @@ verdict you print. Printing READY_TO_MERGE over a script that said UNCOMMITTED_W
 the disagreement explained underneath, has already happened once and it made a blocked PR
 look finished.
 
-## Optional first step: isolate
+## First step: isolate
 
-If the user asked for an isolated worktree, or the change is substantial and the current
-checkout is the user's main working tree, create it before touching anything:
+Any work that needs a new branch gets a worktree, before anything is committed:
 
 ```bash
 git worktree add ~/.agents/worktrees/<slug>-<yyyymmdd> -b <type>/<slug> origin/<base>
 ```
 
+This is the default, not a judgment call. Branch inside the user's own checkout only when
+they asked for that specifically. A branch created in their working tree puts their
+in-flight edits one `git switch` away from disappearing, and it blocks them from using
+their own checkout while your work sits on it.
+
 Never `/tmp`, never `$TMPDIR`, never `/private/var/folders`. Move only the files you
 changed into the worktree, not everything the tree shows as dirty.
+
+If a branch already exists in their checkout and the work is committed and pushed, leave
+it there and say so. Moving it is churn, not safety.
 
 ## The loop
 
