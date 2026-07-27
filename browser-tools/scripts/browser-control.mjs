@@ -45,6 +45,7 @@ export const DEFAULT_MAX_MANAGED_BROWSERS = 5;
 export const MAX_BROWSERS_ENV = 'BROWSER_TOOLS_MAX_BROWSERS';
 // A managed browser older than this is almost certainly a leftover from a finished agent session.
 export const STALE_BROWSER_AGE_MS = 2 * 60 * 60 * 1000;
+export const PENDING_BROWSER_STATE_MAX_AGE_MS = 5000;
 export const REAP_HINT = 'Run scripts/stop.mjs --reap to sweep managed browsers that no lifecycle file accounts for.';
 
 export function agentConfigRoot() {
@@ -296,8 +297,7 @@ export function portLockDirForPort(port) {
   return join(browserToolsCacheDir(), `chrome-${normalizePort(port)}.lock`);
 }
 
-export function portLockIsActive(port = DEFAULT_PORT, { staleMs = PORT_LOCK_STALE_MS } = {}) {
-  const lockDir = portLockDirForPort(port);
+function lockDirectoryIsActive(lockDir, { staleMs = PORT_LOCK_STALE_MS } = {}) {
   if (!existsSync(lockDir)) return false;
 
   let lockState = null;
@@ -306,16 +306,24 @@ export function portLockIsActive(port = DEFAULT_PORT, { staleMs = PORT_LOCK_STAL
   } catch {
     lockState = null;
   }
-  let stale = false;
-  if (lockState?.pid && !processExists(Number(lockState.pid))) stale = true;
-  try {
-    if (Date.now() - statSync(lockDir).mtimeMs > staleMs) stale = true;
-  } catch {
-    stale = true;
+  const ownerPid = Number(lockState?.pid);
+  let stale;
+  if (Number.isInteger(ownerPid) && ownerPid > 0) {
+    stale = !processExists(ownerPid);
+  } else {
+    try {
+      stale = Date.now() - statSync(lockDir).mtimeMs > staleMs;
+    } catch {
+      stale = true;
+    }
   }
   if (!stale) return true;
   rmSync(lockDir, { recursive: true, force: true });
   return false;
+}
+
+export function portLockIsActive(port = DEFAULT_PORT, options = {}) {
+  return lockDirectoryIsActive(portLockDirForPort(port), options);
 }
 
 export function chromePaths(port = DEFAULT_PORT) {
@@ -1064,23 +1072,7 @@ export function acquireLaunchLock({ staleMs = PORT_LOCK_STALE_MS, waitMs = 30000
       return { lockDir, release() { rmSync(lockDir, { recursive: true, force: true }); } };
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
-      let lockState = null;
-      try {
-        lockState = safeReadJson(join(lockDir, 'lock.json'));
-      } catch {
-        lockState = null;
-      }
-      let stale = false;
-      if (lockState?.pid && !processExists(Number(lockState.pid))) stale = true;
-      try {
-        if (Date.now() - statSync(lockDir).mtimeMs > staleMs) stale = true;
-      } catch {
-        stale = true;
-      }
-      if (stale) {
-        rmSync(lockDir, { recursive: true, force: true });
-        continue;
-      }
+      if (!lockDirectoryIsActive(lockDir, { staleMs })) continue;
       if (Date.now() >= deadline) return null;
       sleepSync(pollMs);
     }
@@ -1105,7 +1097,20 @@ export function occupiedManagedSlotPorts({ processes = listManagedChromeProcesse
     if (ports.has(port)) continue;
     const state = readManagedState(stateFileForPort(port));
     if (!state || state.managedBy !== 'browser-tools') continue;
-    if (Number.isInteger(Number(state.pid)) && processExists(Number(state.pid))) ports.add(port);
+    const pid = Number(state.pid);
+    if (!Number.isInteger(pid) || readManagedPid(pidFileForPort(port)) !== pid || !processExists(pid)) continue;
+    if (verifyManagedChromeProcess({ pid, port, state }).ok) {
+      ports.add(port);
+      continue;
+    }
+    const startedAtMs = Date.parse(state.startedAt);
+    const stateAgeMs = Date.now() - startedAtMs;
+    const isPendingProcessScan =
+      Number.isFinite(startedAtMs) &&
+      stateAgeMs >= 0 &&
+      stateAgeMs <= PENDING_BROWSER_STATE_MAX_AGE_MS &&
+      managedChromeLifecycleStateSafety({ pid, port, state }).ok;
+    if (isPendingProcessScan) ports.add(port);
   }
   return ports;
 }
@@ -1127,6 +1132,15 @@ export function staleManagedBrowsers(processes = listManagedChromeProcesses(), {
   return processes.filter((entry) => Number.isFinite(entry.ageMs) && entry.ageMs >= maxAgeMs);
 }
 
+function readManagedPid(pidFile) {
+  try {
+    const pid = Number.parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
+    return Number.isInteger(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
 // A managed browser whose lifecycle files no longer describe it. `stop --port N` cannot reach these,
 // so they would otherwise accumulate forever.
 export function orphanedManagedBrowsers(processes = listManagedChromeProcesses()) {
@@ -1141,8 +1155,7 @@ export function orphanedManagedBrowsers(processes = listManagedChromeProcesses()
     // Both lifecycle files must be present and agree. stopChrome refuses to manage a half-written
     // pair, so sparing one here would leave the browser unreachable by stop *and* by reap.
     const pidFile = pidFileForPort(entry.port);
-    if (!existsSync(pidFile)) return true;
-    const recordedPid = Number.parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
+    const recordedPid = readManagedPid(pidFile);
     if (recordedPid !== Number(entry.pid)) return true;
     // A PID match alone is not tracking. Apply the same lifecycle-state validation as stopChrome,
     // then compare the recorded identity with the process inventory.
@@ -1151,6 +1164,10 @@ export function orphanedManagedBrowsers(processes = listManagedChromeProcesses()
     if (state.managedToken !== entry.managedToken) return true;
     return false;
   });
+}
+
+export function forcedKillStatus(exited) {
+  return exited ? 'killed' : 'failed';
 }
 
 // Kill managed browsers that no lifecycle file accounts for, then drop their leftover clone dirs.
@@ -1181,8 +1198,7 @@ export function reapOrphanedChromes({ dryRun = false, processes = listManagedChr
           continue;
         }
         process.kill(orphan.pid, 'SIGKILL');
-        waitForProcessExit(orphan.pid, 1000);
-        status = 'killed';
+        status = forcedKillStatus(waitForProcessExit(orphan.pid, 1000));
       }
     } catch (e) {
       status = e.code === 'ESRCH' ? 'already-gone' : 'failed';
@@ -1781,7 +1797,9 @@ export function reapExitCode(reaped = []) {
 export function pruneChromeClones({ dryRun = false, keepPorts = [], assumeStoppedPorts = [] } = {}) {
   // Ports a preceding reap has freed, or would free in a dry run. Without this a `--prune --dry-run`
   // reports those clones as still in use and hides the removals the real command performs.
-  const assumeStopped = new Set(assumeStoppedPorts.map((value) => Number.parseInt(value, 10)));
+  const assumeStopped = new Set(
+    (dryRun ? assumeStoppedPorts : []).map((value) => Number.parseInt(value, 10)),
+  );
   const cacheDir = browserToolsCacheDir();
   const keep = new Set(keepPorts.map((value) => Number.parseInt(value, 10)));
   const removed = [];

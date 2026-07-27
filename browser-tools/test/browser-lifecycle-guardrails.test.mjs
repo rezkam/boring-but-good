@@ -6,7 +6,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,6 +15,7 @@ import {
   DEFAULT_MAX_MANAGED_BROWSERS,
   assertManagedBrowserCapacity,
   buildBrowserToolsConfig,
+  forcedKillStatus,
   isBrowserToolsUserDataDir,
   managedBrowserIdentityMatches,
   findReusableManagedBrowser,
@@ -611,9 +612,21 @@ test('occupied slots include a just-launched browser that ps has not listed yet'
   // The cap is only sound if a browser counts the instant its state file exists. Otherwise a second
   // start can read a stale count during the window before the new process appears in ps.
   withTempCache((tmp) => {
+    const userDataDir = join(tmp, 'chrome-data-9401');
+    const managedToken = 'tok-9401';
     writeFileSync(join(tmp, `chrome-9401.pid`), String(process.pid));
     writeFileSync(join(tmp, `chrome-9401.json`), JSON.stringify({
-      managedBy: 'browser-tools', pid: process.pid, port: 9401,
+      managedBy: 'browser-tools',
+      pid: process.pid,
+      port: 9401,
+      userDataDir,
+      managedToken,
+      args: [
+        '--remote-debugging-port=9401',
+        `--user-data-dir=${userDataDir}`,
+        `--pi-browser-tools-managed=${managedToken}`,
+      ],
+      startedAt: new Date().toISOString(),
     }));
     // a tracked port whose pid is long dead must NOT hold a slot
     writeFileSync(join(tmp, `chrome-9402.pid`), '999999');
@@ -628,6 +641,35 @@ test('occupied slots include a just-launched browser that ps has not listed yet'
   });
 });
 
+test('a stale state whose PID was recycled by another process does not reserve a slot', () => {
+  withTempCache((tmp) => {
+    const port = 9403;
+    const userDataDir = join(tmp, `chrome-data-${port}`);
+    const managedToken = `tok-${port}`;
+    writeFileSync(join(tmp, `chrome-${port}.pid`), String(process.pid));
+    writeFileSync(join(tmp, `chrome-${port}.json`), JSON.stringify({
+      managedBy: 'browser-tools',
+      pid: process.pid,
+      port,
+      userDataDir,
+      managedToken,
+      args: [
+        `--remote-debugging-port=${port}`,
+        `--user-data-dir=${userDataDir}`,
+        `--pi-browser-tools-managed=${managedToken}`,
+      ],
+      startedAt: new Date(Date.now() - 60_000).toISOString(),
+    }));
+
+    const ports = occupiedManagedSlotPorts({ processes: [] });
+    assert.equal(
+      ports.has(port),
+      false,
+      'an old state must not count merely because an unrelated process now owns its PID',
+    );
+  });
+});
+
 test('the launch lock serialises slot reservation and is released', () => {
   withTempCache(() => {
     const first = acquireLaunchLock();
@@ -637,6 +679,26 @@ test('the launch lock serialises slot reservation and is released', () => {
     const second = acquireLaunchLock({ waitMs: 0 });
     assert.ok(second, 'the lock is reusable after release');
     second.release();
+  });
+});
+
+test('a live launch-lock owner never ages out', () => {
+  withTempCache((tmp) => {
+    const lockDir = join(tmp, 'launch.lock');
+    mkdirSync(lockDir);
+    writeFileSync(join(lockDir, 'lock.json'), JSON.stringify({
+      pid: process.pid,
+      createdAt: new Date(0).toISOString(),
+    }));
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockDir, old, old);
+
+    assert.equal(
+      acquireLaunchLock({ staleMs: 1, waitMs: 0 }),
+      null,
+      'age recovery must not replace a lock whose recorded owner is still alive',
+    );
+    assert.equal(existsSync(lockDir), true, 'the live owner must retain its lock directory');
   });
 });
 
@@ -748,6 +810,34 @@ test('a browser with a half-written lifecycle pair counts as an orphan', () => {
     ];
     const orphans = orphanedManagedBrowsers(processes).map((o) => o.port);
     assert.deepEqual(orphans, [9601], 'the half-tracked browser must be reapable; the fully tracked one must not');
+  });
+});
+
+test('a disappearing or unreadable PID file cannot abort orphan classification', () => {
+  withTempCache((tmp) => {
+    const port = 9603;
+    const userDataDir = join(tmp, `chrome-data-${port}`);
+    const managedToken = `tok-${port}`;
+    mkdirSync(join(tmp, `chrome-${port}.pid`));
+    writeFileSync(join(tmp, `chrome-${port}.json`), JSON.stringify({
+      managedBy: 'browser-tools',
+      pid: 4244,
+      port,
+      userDataDir,
+      managedToken,
+      args: [
+        `--remote-debugging-port=${port}`,
+        `--user-data-dir=${userDataDir}`,
+        `--pi-browser-tools-managed=${managedToken}`,
+      ],
+    }));
+
+    assert.deepEqual(
+      orphanedManagedBrowsers([{ pid: 4244, port, ageMs: 1000, userDataDir, managedToken }])
+        .map((entry) => entry.port),
+      [port],
+      'a PID file read failure must make the browser reapable instead of aborting the sweep',
+    );
   });
 });
 
@@ -906,6 +996,34 @@ test('a prune dry-run models the reap that a real prune performs first', () => {
   });
 });
 
+test('a real prune never trusts dry-run stopped-port assumptions', () => {
+  withTempCache((tmp) => {
+    const port = 9902;
+    const dataDir = join(tmp, `chrome-data-${port}`);
+    const binDir = join(tmp, 'bin');
+    mkdirSync(dataDir);
+    mkdirSync(binDir);
+    writeFileSync(
+      join(binDir, 'ps'),
+      `#!/bin/sh\nprintf '%s\\n' '4242 /opt/browser-v1 --remote-debugging-port=${port} --user-data-dir=${dataDir} --pi-browser-tools-managed=tok-${port}'\n`,
+      { mode: 0o755 },
+    );
+
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${previousPath}`;
+    try {
+      const result = pruneChromeClones({ assumeStoppedPorts: [port] });
+      assert.equal(existsSync(dataDir), true, 'a live replacement browser must keep its clone');
+      assert.ok(
+        result.kept.some((entry) => entry.port === port && entry.reason === 'running'),
+        'real prune must rescan live ownership even after a preceding reap',
+      );
+    } finally {
+      process.env.PATH = previousPath;
+    }
+  });
+});
+
 test('stop --reap exits non-zero when a browser could not be reaped', () => {
   // A script that runs `stop --reap` to free a slot must be able to tell that it did not work.
   const stopScript = new URL('../scripts/stop.mjs', import.meta.url).pathname;
@@ -927,4 +1045,11 @@ test('stop --reap exits non-zero when a browser could not be reaped', () => {
   assert.equal(reapExitCode([{ status: 'reaped' }, { status: 'already-gone' }]), 0);
   assert.equal(reapExitCode([{ status: 'skipped-not-managed' }]), 0, 'a safety refusal is not a failure');
   assert.equal(reapExitCode([{ status: 'reaped' }, { status: 'failed' }]), 1, 'a failed kill must surface');
+});
+
+test('reaping fails when a browser remains alive after SIGKILL', () => {
+  assert.equal(forcedKillStatus(true), 'killed');
+  const status = forcedKillStatus(false);
+  assert.equal(status, 'failed', 'a surviving process still occupies its browser slot');
+  assert.equal(reapExitCode([{ status }]), 1, 'the CLI must receive a failing exit status');
 });
