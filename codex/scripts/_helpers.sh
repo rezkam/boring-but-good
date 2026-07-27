@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 REVIEW_HOME="${CODEX_REVIEW_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/codex-review}"
 REVIEW_RUNS_DIR="$REVIEW_HOME/runs"
@@ -520,6 +521,7 @@ codex_skill_status_json() {
     local codex_pid="${19:-none}"
     local network_active="${20:-unknown}"
     local child_cmd_running="${21:-false}"
+    local error_file="${22:-}"
 
     jq -n \
         --arg run_id "$run_id" \
@@ -532,6 +534,7 @@ codex_skill_status_json() {
         --arg workdir "$workdir" \
         --arg log_file "$log_file" \
         --arg report_file "$report_file" \
+        --arg error_file "$error_file" \
         --arg baseline_commit "$baseline_commit" \
         --arg baseline_dirty "$baseline_dirty" \
         --arg turn_count "$turn_count" \
@@ -554,7 +557,48 @@ codex_skill_status_json() {
           codex_pid: (if $codex_pid == "" or $codex_pid == "none" or $codex_pid == "null" then null else ($codex_pid | tonumber) end),
           network_active: (if $network_active == "unknown" then "unknown" else ($network_active == "true") end),
           child_cmd_running: $child_cmd_running,
-          workdir: $workdir, log_file: $log_file, report_file: $report_file}'
+          workdir: $workdir, log_file: $log_file,
+          error_log: (if $error_file == "" or $error_file == "null" then null else $error_file end),
+          report_file: $report_file}'
+}
+
+# Persist completion when a tracked turn waiter disappeared after App Server
+# accepted the turn but the persistent host finished it. New App Server runs
+# record the short waiter separately from the long-lived host. Legacy runs do
+# not, so they retain the old dead-pid plus report fallback.
+codex_skill_reconcile_orphaned_run() {
+    local run_id="$1"
+    local meta_file kind status report_file turn_client_pid session_dir legacy_pid
+
+    meta_file="$(codex_review_meta_file "$run_id")"
+    [[ -f "$meta_file" ]] || return 0
+    kind="$(jq -r '.kind // "review"' "$meta_file")"
+    status="$(codex_review_get_meta_field "$run_id" status)"
+    [[ "$kind" == "exec" || "$kind" == "review" ]] || return 0
+    [[ "$status" == "running" || "$status" == "queued" ]] || return 0
+
+    report_file="$(codex_review_get_meta_field "$run_id" report_file)"
+    [[ -n "$report_file" && "$report_file" != "null" && -s "$report_file" ]] || return 0
+
+    turn_client_pid="$(codex_review_get_meta_field "$run_id" turn_client_pid)"
+    if [[ -n "$turn_client_pid" && "$turn_client_pid" != "null" ]]; then
+        kill -0 "$turn_client_pid" 2>/dev/null && return 0
+        session_dir="$(codex_review_get_meta_field "$run_id" session_dir)"
+        [[ -n "$session_dir" && "$session_dir" != "null" && -f "$session_dir/state.json" ]] || return 0
+        jq -e '
+            (.status == "ready" or .status == "closing" or .status == "closed")
+            and ((.activeTurns // []) | length == 0)
+            and ((.pendingRequests // []) | length == 0)
+            and (.leaseCount == 0)
+        ' "$session_dir/state.json" >/dev/null 2>&1 || return 0
+        codex_review_update_status "$run_id" "completed"
+        return 0
+    fi
+
+    legacy_pid="$(codex_review_get_meta_field "$run_id" pid)"
+    if [[ -z "$legacy_pid" || "$legacy_pid" == "null" ]] || ! kill -0 "$legacy_pid" 2>/dev/null; then
+        codex_review_update_status "$run_id" "completed"
+    fi
 }
 
 # Gather liveness + progress for a run of ANY kind and print it, either as the
@@ -575,32 +619,17 @@ codex_emit_status() {
         return 1
     fi
 
-    local kind meta_status
-    kind="$(jq -r '.kind // "review"' "$meta_file")"
-    meta_status="$(codex_review_get_meta_field "$run_id" status)"
+    codex_skill_reconcile_orphaned_run "$run_id"
 
-    # Reconcile an orphaned run: the wrapper is gone but a non-empty report
-    # was left behind, so the work actually finished. Persist it as completed
-    # instead of reporting it dead.
-    if [[ "$kind" == "exec" || "$kind" == "review" ]] && [[ "$meta_status" == "running" || "$meta_status" == "queued" ]]; then
-        local pid_r report_r pid_alive_r="false"
-        pid_r="$(codex_review_get_meta_field "$run_id" pid)"
-        report_r="$(codex_review_get_meta_field "$run_id" report_file)"
-        if [[ -n "$pid_r" && "$pid_r" != "null" ]] && kill -0 "$pid_r" 2>/dev/null; then
-            pid_alive_r="true"
-        fi
-        if [[ "$pid_alive_r" != "true" && -s "$report_r" ]]; then
-            codex_review_update_status "$run_id" "completed"
-        fi
-    fi
-
+    local kind
     kind="$(jq -r '.kind // "review"' "$meta_file")"
-    local status pid thread_id log_file report_file created_at exit_code workdir
+    local status pid thread_id log_file error_file report_file created_at exit_code workdir
     local baseline_commit baseline_dirty turn_count
     status="$(codex_review_get_meta_field "$run_id" status)"
     pid="$(codex_review_get_meta_field "$run_id" pid)"
     thread_id="$(codex_review_get_meta_field "$run_id" thread_id)"
     log_file="$(codex_review_get_meta_field "$run_id" log_file)"
+    error_file="$(codex_review_get_meta_field "$run_id" error_log)"
     report_file="$(codex_review_get_meta_field "$run_id" report_file)"
     created_at="$(codex_review_get_meta_field "$run_id" created_at 0)"
     exit_code="$(codex_review_get_meta_field "$run_id" exit_code)"
@@ -659,11 +688,32 @@ codex_emit_status() {
         advice_code="$(printf '%s' "$decision_json" | jq -r '.advice_code // ""')"
     fi
 
+    local session_dir host_status="none" active_turns=0 pending_requests=0
+    session_dir="$(codex_review_get_meta_field "$run_id" session_dir)"
+    if [[ -n "$session_dir" && "$session_dir" != "null" && -f "$session_dir/state.json" ]]; then
+        host_status="$(jq -r '.status // "unknown"' "$session_dir/state.json" 2>/dev/null || echo unknown)"
+        active_turns="$(jq -r '.activeTurns | length' "$session_dir/state.json" 2>/dev/null || echo 0)"
+        pending_requests="$(jq -r '.pendingRequests | length' "$session_dir/state.json" 2>/dev/null || echo 0)"
+        if [[ "$status" == "running" && "$pending_requests" -gt 0 ]]; then
+            verdict="waiting"
+            advice_code=""
+        fi
+    fi
+
     local advice
     advice="$(codex_skill_liveness_advice "$kind" "$advice_code" "$run_id" "$age" "$log_age" "$log_file" "$last_event")"
+    if [[ "$pending_requests" -gt 0 ]]; then
+        advice="Answer $pending_requests pending App Server request(s) with codex-app-server.mjs pending/respond for session $session_dir"
+    fi
 
     local status_json
-    status_json="$(codex_skill_status_json "$run_id" "$kind" "$status" "$verdict" "$thread_id" "$last_event" "$advice" "$workdir" "$log_file" "$report_file" "$baseline_commit" "$baseline_dirty" "$turn_count" "$pid_alive" "$age" "$log_age" "$event_count" "${exit_code:-null}" "$codex_pid" "$network_active" "$child_cmd_running")"
+    status_json="$(codex_skill_status_json "$run_id" "$kind" "$status" "$verdict" "$thread_id" "$last_event" "$advice" "$workdir" "$log_file" "$report_file" "$baseline_commit" "$baseline_dirty" "$turn_count" "$pid_alive" "$age" "$log_age" "$event_count" "${exit_code:-null}" "$codex_pid" "$network_active" "$child_cmd_running" "$error_file")"
+    status_json="$(printf '%s' "$status_json" | jq \
+        --arg session_dir "$session_dir" \
+        --arg host_status "$host_status" \
+        --argjson active_turns "$active_turns" \
+        --argjson pending_requests "$pending_requests" \
+        '. + {session_dir: (if $session_dir == "" or $session_dir == "null" then null else $session_dir end), host_status: $host_status, active_turns: $active_turns, pending_requests: $pending_requests}')"
 
     if [[ "$json" == "true" ]]; then
         printf '%s\n' "$status_json"
@@ -676,6 +726,7 @@ codex_emit_status() {
     echo "status: $status"
     echo "pid_alive: $pid_alive"
     echo "activity: net=$network_active child_cmd=$child_cmd_running codex_pid=$codex_pid"
+    echo "app_server: status=$host_status active_turns=$active_turns pending_requests=$pending_requests"
     echo "thread_id: ${thread_id:-unknown}"
     if [[ -n "$baseline_commit" && "$baseline_commit" != "null" && "$baseline_commit" != "none" ]]; then
         if [[ "$baseline_dirty" == "true" ]]; then
@@ -686,6 +737,7 @@ codex_emit_status() {
     fi
     echo "workdir: $workdir"
     echo "log_file: $log_file"
+    [[ -n "$error_file" && "$error_file" != "null" ]] && echo "error_log: $error_file"
     echo "report_file: $report_file"
     if [[ "$kind" == "mcp" ]]; then
         echo "turn_count: ${turn_count:-0}"

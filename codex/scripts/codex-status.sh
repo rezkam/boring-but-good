@@ -18,6 +18,7 @@ Verdicts:
   running    pid alive and healthy for this run kind
   quiet      exec/review pid alive, session exists, log is idle, and network
              or child command activity is visible
+  waiting    App Server has a reverse request that needs a response
   wedged     exec/review pid alive but no codex session appeared in time
   stalled    exec/review pid alive but no network or command activity is
              visible while the log is idle, or the stall window was reached

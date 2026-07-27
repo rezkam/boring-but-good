@@ -5,14 +5,10 @@
 #            lifecycle (guards, --force against a live pid, --last, --all),
 #            and every exec liveness verdict (wedged/stalled/dead) against
 #            fabricated metadata with real pids. No codex API calls.
-#   LIVE     every feature end to end against the real codex CLI: review
-#            start (--wait and background, direct and exec runner), status,
-#            report, converse continuation, exec worker delegation (launch,
-#            liveness poll to completion, produced-change proof, follow-up,
-#            stop), list, MCP server start, multi turn conversation with
-#            context continuity AND new-thread isolation proofs, status,
-#            stop, the documented disk-resume recovery path, and delete of
-#            real finished runs.
+#   LIVE     App Server discovery, new and resumed turns, same-connection
+#            steering and interruption, native review, tracked review and exec
+#            wrappers, status, reports, worker output, continuation, stop, list,
+#            and deletion of real finished runs.
 #
 # Run everything:      tests/run-tests.sh
 # Offline only (free): tests/run-tests.sh --offline
@@ -45,6 +41,7 @@ done
 
 WORK="$(mktemp -d /tmp/codex-skill-tests.XXXXXX)"
 export CODEX_REVIEW_HOME="$WORK/home"
+export CODEX_APP_SERVER_AUTH_ROOT="$WORK/app-server-auth"
 FIXTURE_REPO="$WORK/fixture-repo"
 
 PASS=0
@@ -85,6 +82,10 @@ assert_exit_nonzero() {
     fi
 }
 
+mode_bits() {
+    stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
+}
+
 make_fixture_repo() {
     mkdir -p "$FIXTURE_REPO"
     git -C "$FIXTURE_REPO" init -q
@@ -116,16 +117,6 @@ VALID_EFFORTS="minimal, low, medium, high, or xhigh"
 
 out="$("$SCRIPTS_DIR/codex-review-start.sh" --preset bogus 2>&1)"; code=$?
 assert_exit_nonzero "review-start rejects unknown preset" "$code" "$out" "Unknown preset"
-
-out="$("$SCRIPTS_DIR/codex-review-start.sh" --effort bogus 2>&1)"; code=$?
-assert_exit_nonzero "review-start rejects unknown effort" "$code" "$out" "$VALID_EFFORTS"
-
-# codex-cli 0.142.5 parse-time conflict: scope flags vs [PROMPT]. The script
-# must refuse base/commit scope with a prompt instead of silently dropping it.
-out="$("$SCRIPTS_DIR/codex-review-start.sh" --base main --preset adversarial 2>&1)"; code=$?
-assert_exit_nonzero "review-start refuses preset with base scope" "$code" "$out" "mutually exclusive"
-out="$("$SCRIPTS_DIR/codex-review-start.sh" --commit HEAD --prompt "check auth" 2>&1)"; code=$?
-assert_exit_nonzero "review-start refuses custom prompt with commit scope" "$code" "$out" "mutually exclusive"
 
 out="$("$SCRIPTS_DIR/codex-mcp-start.sh" --sandbox bogus 2>&1)"; code=$?
 assert_exit_nonzero "mcp-start rejects unknown sandbox" "$code" "$out" "Unknown sandbox"
@@ -196,9 +187,6 @@ assert_exit_nonzero "exec-start rejects missing prompt" "$code" "$out" "No task 
 out="$("$SCRIPTS_DIR/codex-exec-start.sh" --sandbox bogus "do things" 2>&1)"; code=$?
 assert_exit_nonzero "exec-start rejects unknown sandbox" "$code" "$out" "Unknown sandbox"
 
-out="$("$SCRIPTS_DIR/codex-exec-start.sh" --effort bogus "do things" 2>&1)"; code=$?
-assert_exit_nonzero "exec-start rejects unknown effort" "$code" "$out" "$VALID_EFFORTS"
-
 out="$("$SCRIPTS_DIR/codex-exec-start.sh" --workdir /nonexistent-dir-xyz "do things" 2>&1)"; code=$?
 assert_exit_nonzero "exec-start rejects missing workdir" "$code" "$out" "Workdir not found"
 
@@ -209,16 +197,1268 @@ FAKE_CODEX_BIN="$WORK/fake-codex-bin"
 FAKE_CODEX_PID_FILE="$WORK/fake-codex.pids"
 NONBLOCK_REPO="$WORK/nonblock-repo"
 mkdir -p "$FAKE_CODEX_BIN" "$NONBLOCK_REPO"
-cat > "$FAKE_CODEX_BIN/codex" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$$" >> "$FAKE_CODEX_PID_FILE"
-printf '{"thread_id":"00000000-0000-0000-0000-000000000001"}\n'
-sleep 30
-SH
-chmod +x "$FAKE_CODEX_BIN/codex"
+ln -s "$TESTS_DIR/fake-codex-app-server.mjs" "$FAKE_CODEX_BIN/codex"
+
+fake_client() {
+    local scenario="$1"
+    shift
+    PATH="$FAKE_CODEX_BIN:$PATH" \
+        FAKE_CODEX_PID_FILE="$FAKE_CODEX_PID_FILE" \
+        FAKE_APP_SERVER_SCENARIO="$scenario" \
+        FAKE_APP_SERVER_LOG="${FAKE_APP_SERVER_LOG:-}" \
+        node "$SCRIPTS_DIR/codex-app-server.mjs" "$@"
+}
+
+APP_SERVER_LOG="$WORK/app-server-client.jsonl"
+APP_SERVER_EVENTS="$WORK/app-server-events.jsonl"
+APP_SERVER_REPORT="$WORK/app-server-report.md"
+APP_SERVER_THREAD="$WORK/app-server-thread.id"
+export FAKE_APP_SERVER_LOG="$APP_SERVER_LOG"
+
+app_server_out="$(fake_client complete turn --new --prompt "fake protocol turn" --sandbox read-only \
+    --events "$APP_SERVER_EVENTS" --report "$APP_SERVER_REPORT" --thread-out "$APP_SERVER_THREAD" 2>&1)"; code=$?
+if [[ "$code" -eq 0 ]]; then
+    assert_contains "app-server client completes a fake bidirectional turn" "$app_server_out" "APP_SERVER_FAKE_OK"
+else
+    check "app-server client completes a fake bidirectional turn" 1 "exit=$code output: $(printf '%s' "$app_server_out" | head -c 200)"
+fi
+if [[ "$(sed -n '1p' "$APP_SERVER_LOG" | jq -r '.method')" == "initialize" ]] \
+    && [[ "$(sed -n '2p' "$APP_SERVER_LOG" | jq -r '.method')" == "initialized" ]] \
+    && [[ "$(sed -n '3p' "$APP_SERVER_LOG" | jq -r '.method')" == "thread/start" ]]; then
+    check "app-server performs initialize handshake before thread requests" 0
+else
+    check "app-server performs initialize handshake before thread requests" 1 "log: $(head -c 300 "$APP_SERVER_LOG")"
+fi
+jq -e 'select(.method == "turn/start") | .params.input[0].type == "text" and .params.sandboxPolicy.type == "readOnly"' "$APP_SERVER_LOG" >/dev/null 2>&1
+check "turn/start sends typed input and sandbox policy" $?
+if [[ "$(tr -d '[:space:]' < "$APP_SERVER_THREAD")" == "00000000-0000-0000-0000-000000000001" ]]; then
+    check "new turn persists durable thread id" 0
+else
+    check "new turn persists durable thread id" 1
+fi
+grep -qx "APP_SERVER_FAKE_OK" "$APP_SERVER_REPORT"
+check "new turn writes final report" $?
+jq -e 'select(.method == "item/completed")' "$APP_SERVER_EVENTS" >/dev/null 2>&1 \
+    && jq -e 'select(.method == "turn/completed")' "$APP_SERVER_EVENTS" >/dev/null 2>&1
+check "event archive includes item and terminal notifications" $?
+
+: > "$APP_SERVER_LOG"
+isolated_workspace_out="$(fake_client complete turn --new --prompt "isolated workspace" \
+    --workdir "$NONBLOCK_REPO" --sandbox workspace-write 2>&1)"; isolated_workspace_code=$?
+if [[ "$isolated_workspace_code" -eq 0 ]] \
+    && printf '%s' "$isolated_workspace_out" | grep -qF "APP_SERVER_FAKE_OK" \
+    && jq -e 'select(.method == "turn/start") | .params.sandboxPolicy.type == "workspaceWrite"' \
+        "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "direct isolated workspace-write remains available without managed controller validation" 0
+else
+    check "direct isolated workspace-write remains available without managed controller validation" 1 \
+        "exit=$isolated_workspace_code output=$(printf '%s' "$isolated_workspace_out" | head -c 180)"
+fi
+
+DIRECT_MODE_DIR="$WORK/direct-sensitive-modes"
+(
+    umask 022
+    mkdir -p "$DIRECT_MODE_DIR"
+    : > "$DIRECT_MODE_DIR/events.jsonl"
+    : > "$DIRECT_MODE_DIR/report.md"
+    : > "$DIRECT_MODE_DIR/thread.id"
+    chmod 644 "$DIRECT_MODE_DIR/events.jsonl" "$DIRECT_MODE_DIR/report.md" "$DIRECT_MODE_DIR/thread.id"
+    fake_client complete turn --new --prompt "mode check" --sandbox read-only \
+        --events "$DIRECT_MODE_DIR/events.jsonl" \
+        --report "$DIRECT_MODE_DIR/report.md" \
+        --thread-out "$DIRECT_MODE_DIR/thread.id" >/dev/null 2>&1
+)
+direct_modes_ok="true"
+for sensitive_file in "$DIRECT_MODE_DIR/events.jsonl" "$DIRECT_MODE_DIR/report.md" "$DIRECT_MODE_DIR/thread.id"; do
+    [[ "$(mode_bits "$sensitive_file")" == "600" ]] || direct_modes_ok="false"
+done
+if [[ "$direct_modes_ok" == "true" ]]; then
+    check "direct App Server artifacts are private under a permissive umask" 0
+else
+    check "direct App Server artifacts are private under a permissive umask" 1 \
+        "events=$(mode_bits "$DIRECT_MODE_DIR/events.jsonl") report=$(mode_bits "$DIRECT_MODE_DIR/report.md") thread=$(mode_bits "$DIRECT_MODE_DIR/thread.id")"
+fi
+
+: > "$APP_SERVER_LOG"
+app_server_out="$(fake_client complete turn --new --prompt "advertised max effort" --sandbox read-only \
+    --effort max 2>&1)"; code=$?
+if [[ "$code" -eq 0 ]] \
+    && jq -e 'select(.method == "model/list") | .params == {"includeHidden":true}' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && jq -e 'select(.method == "turn/start") | .params.effort == "max" and .params.model == "fake-default-model"' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "app-server accepts max when the default model advertises it" 0
+else
+    check "app-server accepts max when the default model advertises it" 1 \
+        "exit=$code output: $(printf '%s' "$app_server_out" | head -c 200)"
+fi
+
+: > "$APP_SERVER_LOG"
+app_server_out="$(fake_client model-pagination turn --new --prompt "hidden model" --sandbox read-only \
+    --model fake-explicit-model --effort ultra 2>&1)"; code=$?
+if [[ "$code" -eq 0 ]] \
+    && [[ "$(jq -r 'select(.method == "model/list") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "2" ]] \
+    && jq -e 'select(.method == "model/list" and .params.cursor == "hidden-page-2") | .params.includeHidden == true' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && jq -e 'select(.method == "turn/start") | .params.model == "fake-explicit-model" and .params.effort == "ultra"' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "model discovery follows cursors to explicit hidden models" 0
+else
+    check "model discovery follows cursors to explicit hidden models" 1 \
+        "exit=$code output: $(printf '%s' "$app_server_out" | head -c 200) log: $(tail -c 400 "$APP_SERVER_LOG")"
+fi
+
+: > "$APP_SERVER_LOG"
+app_server_out="$(fake_client model-pagination-loop turn --new --prompt "cursor loop" --sandbox read-only \
+    --effort high 2>&1)"; code=$?
+if [[ "$code" -ne 0 ]] \
+    && printf '%s' "$app_server_out" | grep -qF "repeated cursor" \
+    && [[ "$(jq -r 'select(.method == "model/list") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "2" ]] \
+    && ! jq -e 'select(.method == "thread/start" or .method == "turn/start")' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "model discovery rejects repeated pagination cursors" 0
+else
+    check "model discovery rejects repeated pagination cursors" 1 \
+        "exit=$code output: $(printf '%s' "$app_server_out" | head -c 200)"
+fi
+
+: > "$APP_SERVER_LOG"
+app_server_out="$(fake_client model-malformed turn --new --prompt "malformed models" --sandbox read-only \
+    --effort high 2>&1)"; code=$?
+assert_exit_nonzero "model discovery rejects malformed response pagination" \
+    "$code" "$app_server_out" "invalid nextCursor"
+
+: > "$APP_SERVER_LOG"
+app_server_out="$(fake_client notification-race turn --new --prompt "race" --sandbox read-only 2>&1)"; code=$?
+if [[ "$code" -eq 0 ]] && printf '%s' "$app_server_out" | grep -qF "EARLY_NOTIFICATION_OK"; then
+    check "turn handles terminal notifications before start response" 0
+else
+    check "turn handles terminal notifications before start response" 1 "exit=$code output: $(printf '%s' "$app_server_out" | head -c 200)"
+fi
+
+: > "$APP_SERVER_LOG"
+app_server_out="$(fake_client complete turn --thread "00000000-0000-0000-0000-000000000001" --prompt "resume" --sandbox read-only 2>&1)"; code=$?
+if [[ "$code" -eq 0 ]] && jq -e 'select(.method == "thread/resume")' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "turn resumes a durable thread on a fresh connection" 0
+else
+    check "turn resumes a durable thread on a fresh connection" 1 "exit=$code"
+fi
+
+: > "$APP_SERVER_LOG"
+app_server_out="$(fake_client review review --scope base --scope-value main --workdir "$NONBLOCK_REPO" \
+    --prompt "review lens" --sandbox read-only 2>&1)"; code=$?
+if [[ "$code" -eq 0 ]] && printf '%s' "$app_server_out" | grep -qF "NATIVE_REVIEW_OK"; then
+    check "native review returns exitedReviewMode output" 0
+else
+    check "native review returns exitedReviewMode output" 1 "exit=$code output: $(printf '%s' "$app_server_out" | head -c 200)"
+fi
+jq -e 'select(.method == "thread/start") | .params.developerInstructions == "review lens"' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && jq -e 'select(.method == "review/start") | .params.target == {"type":"baseBranch","branch":"main"}' "$APP_SERVER_LOG" >/dev/null 2>&1
+check "native review combines base scope with developer instructions" $?
+
+for scope_args in "uncommitted" "commit HEAD"; do
+    : > "$APP_SERVER_LOG"
+    read -r scope scope_value <<< "$scope_args"
+    review_args=(review --scope "$scope" --workdir "$NONBLOCK_REPO" --sandbox read-only)
+    [[ -n "${scope_value:-}" ]] && review_args+=(--scope-value "$scope_value")
+    fake_client review "${review_args[@]}" >/dev/null 2>&1; code=$?
+    if [[ "$scope" == "uncommitted" ]]; then
+        jq -e 'select(.method == "review/start") | .params.target.type == "uncommittedChanges"' "$APP_SERVER_LOG" >/dev/null 2>&1
+    else
+        jq -e 'select(.method == "review/start") | .params.target.type == "commit" and .params.target.sha == "HEAD"' "$APP_SERVER_LOG" >/dev/null 2>&1
+    fi
+    target_code=$?
+    if [[ "$code" -eq 0 && "$target_code" -eq 0 ]]; then
+        check "native review maps $scope target" 0
+    else
+        check "native review maps $scope target" 1 "exit=$code"
+    fi
+done
+: > "$APP_SERVER_LOG"
+fake_client review review --scope custom --prompt "custom review target" --workdir "$NONBLOCK_REPO" --sandbox read-only >/dev/null 2>&1; code=$?
+if [[ "$code" -eq 0 ]] && jq -e 'select(.method == "review/start") | .params.target == {"type":"custom","instructions":"custom review target"}' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "native review maps custom target" 0
+else
+    check "native review maps custom target" 1 "exit=$code"
+fi
+
+: > "$APP_SERVER_LOG"
+CONTROL_DIR="$WORK/active-turn-control"
+CONTROL_TURN_OUT="$WORK/control-turn.out"
+(fake_client control-steer turn --new --prompt "wait for steering" --sandbox read-only \
+    --control-dir "$CONTROL_DIR") >"$CONTROL_TURN_OUT" 2>&1 &
+CONTROL_TURN_PID=$!
+for _ in $(seq 1 100); do [[ -f "$CONTROL_DIR/state.json" ]] && break; sleep 0.02; done
+app_server_out="$(node "$SCRIPTS_DIR/codex-app-server.mjs" steer --control-dir "$CONTROL_DIR" \
+    --thread "00000000-0000-0000-0000-000000000001" \
+    --turn "00000000-0000-0000-0000-000000000002" --prompt "steer now" 2>&1)"; code=$?
+if wait "$CONTROL_TURN_PID"; then control_turn_code=0; else control_turn_code=$?; fi
+if [[ "$code" -eq 0 && "$control_turn_code" -eq 0 ]] \
+    && jq -e 'select(.method == "turn/steer") | .params.expectedTurnId == "00000000-0000-0000-0000-000000000002" and (.params | has("turnId") | not)' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && grep -qF "STEERED_ON_ACTIVE_CONNECTION" "$CONTROL_TURN_OUT"; then
+    check "steer controls the active turn on its owning connection" 0
+else
+    check "steer controls the active turn on its owning connection" 1 "control_exit=$code turn_exit=$control_turn_code output: $(printf '%s' "$app_server_out" | head -c 200)"
+fi
+
+: > "$APP_SERVER_LOG"
+(fake_client control-interrupt turn --new --prompt "wait for interrupt" --sandbox read-only \
+    --control-dir "$CONTROL_DIR") >"$CONTROL_TURN_OUT" 2>&1 &
+CONTROL_TURN_PID=$!
+for _ in $(seq 1 100); do [[ -f "$CONTROL_DIR/state.json" ]] && break; sleep 0.02; done
+app_server_out="$(node "$SCRIPTS_DIR/codex-app-server.mjs" interrupt --control-dir "$CONTROL_DIR" \
+    --thread "00000000-0000-0000-0000-000000000001" \
+    --turn "00000000-0000-0000-0000-000000000002" 2>&1)"; code=$?
+if wait "$CONTROL_TURN_PID"; then control_turn_code=0; else control_turn_code=$?; fi
+if [[ "$code" -eq 0 && "$control_turn_code" -ne 0 ]] && jq -e 'select(.method == "turn/interrupt")' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "interrupt controls the active turn on its owning connection" 0
+else
+    check "interrupt controls the active turn on its owning connection" 1 "control_exit=$code turn_exit=$control_turn_code"
+fi
+
+: > "$APP_SERVER_LOG"
+app_server_out="$(fake_client complete request --method model/list 2>&1)"; code=$?
+if [[ "$code" -eq 0 ]] && printf '%s' "$app_server_out" | jq -e '.result.data[0].id == "fake-default-model"' >/dev/null 2>&1; then
+    check "generic request returns protocol result" 0
+else
+    check "generic request returns protocol result" 1 "exit=$code output: $(printf '%s' "$app_server_out" | head -c 200)"
+fi
+: > "$APP_SERVER_LOG"
+fake_client complete request --method account/logout --no-params >/dev/null 2>&1; code=$?
+if [[ "$code" -eq 0 ]] && jq -e 'select(.method == "account/logout") | has("params") | not' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "generic request can omit params" 0
+else
+    check "generic request can omit params" 1 "exit=$code"
+fi
+
+: > "$APP_SERVER_LOG"
+app_server_out="$(fake_client approvals turn --new --prompt "approvals" --sandbox read-only --approval decline 2>&1)"; code=$?
+if [[ "$code" -eq 0 ]] \
+    && jq -e 'select(.id == 901) | .result == {"decision":"decline"}' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && jq -e 'select(.id == 902) | .result == {"decision":"decline"}' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && jq -e 'select(.id == 903) | .result == {"permissions":{},"scope":"turn"}' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && jq -e 'select(.id == 904) | .result == {"answers":{}}' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && jq -e 'select(.id == 905) | .result == {"action":"cancel","content":null,"_meta":null}' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && jq -e 'select(.id == 906) | .result.success == false' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "server-initiated requests receive schema-valid safe responses" 0
+else
+    check "server-initiated requests receive schema-valid safe responses" 1 "exit=$code log: $(tail -c 500 "$APP_SERVER_LOG")"
+fi
+for approval_mode in accept accept-for-session; do
+    : > "$APP_SERVER_LOG"
+    fake_client approvals turn --new --prompt "approvals" --sandbox read-only --approval "$approval_mode" >/dev/null 2>&1; code=$?
+    expected_decision="accept"
+    [[ "$approval_mode" == "accept-for-session" ]] && expected_decision="acceptForSession"
+    expected_scope="turn"
+    [[ "$approval_mode" == "accept-for-session" ]] && expected_scope="session"
+    if [[ "$code" -eq 0 ]] \
+        && jq -e --arg decision "$expected_decision" 'select(.id == 901 or .id == 902) | .result.decision == $decision' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+        && jq -e --arg scope "$expected_scope" '
+            select(.id == 903)
+            | .result.scope == $scope
+              and .result.permissions == {
+                "fileSystem": {
+                  "entries": [{"access":"write","path":{"type":"path","path":"/tmp/fake-app-server-output"}}],
+                  "globScanMaxDepth": 3
+                },
+                "network": {"enabled":true}
+              }' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+        check "approval mode $approval_mode maps to protocol decision" 0
+    else
+        check "approval mode $approval_mode maps to protocol decision" 1 "exit=$code"
+    fi
+done
+
+: > "$APP_SERVER_LOG"
+app_server_out="$(fake_client close-recovered turn --new --prompt "close" --sandbox read-only 2>&1)"; code=$?
+if [[ "$code" -eq 0 ]] && printf '%s' "$app_server_out" | grep -qF "RECOVERED_AFTER_CLOSE"; then
+    check "client recovers a completed assistant item after transport close" 0
+else
+    check "client recovers a completed assistant item after transport close" 1 "exit=$code output: $(printf '%s' "$app_server_out" | head -c 200)"
+fi
+
+MANAGED_TIMEOUT_DIR="$WORK/managed-timeout-no-completion"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=timeout-no-completion \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_TIMEOUT_DIR" \
+    --approval decline >/dev/null 2>&1
+timeout_started_at=$SECONDS
+managed_timeout_out="$(timeout 8 node "$SCRIPTS_DIR/codex-app-server.mjs" turn \
+    --session-dir "$MANAGED_TIMEOUT_DIR" --new --prompt "timeout without completion" \
+    --sandbox read-only --timeout 0.01 2>&1)"; managed_timeout_code=$?
+managed_timeout_elapsed=$((SECONDS - timeout_started_at))
+for _ in $(seq 1 100); do
+    [[ "$(jq -r '.status' "$MANAGED_TIMEOUT_DIR/state.json" 2>/dev/null)" == "closed" ]] && break
+    sleep 0.02
+done
+managed_timeout_status="$(jq -r '.status' "$MANAGED_TIMEOUT_DIR/state.json" 2>/dev/null)"
+if [[ "$managed_timeout_code" -ne 0 && "$managed_timeout_code" -ne 124 && "$managed_timeout_elapsed" -lt 8 ]] \
+    && printf '%s' "$managed_timeout_out" | grep -qF "was not replayed" \
+    && [[ "$managed_timeout_status" == "closed" ]] \
+    && [[ "$(jq -r 'select(.method == "turn/start") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "1" ]] \
+    && [[ "$(jq -r 'select(.method == "turn/interrupt") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "1" ]]; then
+    check "managed timeout invalidates host when interrupt has no completion" 0
+else
+    check "managed timeout invalidates host when interrupt has no completion" 1 \
+        "exit=$managed_timeout_code elapsed=$managed_timeout_elapsed status=$managed_timeout_status output: $(printf '%s' "$managed_timeout_out" | head -c 200)"
+fi
+if [[ "$managed_timeout_status" != "closed" ]]; then
+    timeout 2 node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown \
+        --session-dir "$MANAGED_TIMEOUT_DIR" --force >/dev/null 2>&1 || true
+    managed_timeout_host_pid="$(jq -r '.pid // empty' "$MANAGED_TIMEOUT_DIR/state.json" 2>/dev/null)"
+    [[ -n "$managed_timeout_host_pid" ]] && kill "$managed_timeout_host_pid" 2>/dev/null || true
+fi
+app_server_out="$(fake_client close-unresolved turn --new --prompt "close unsafe" --sandbox read-only 2>&1)"; code=$?
+if [[ "$code" -ne 0 ]] && ! printf '%s' "$app_server_out" | grep -q '"status":"completed"'; then
+    check "client rejects close recovery with unresolved side effects" 0
+else
+    check "client rejects close recovery with unresolved side effects" 1 "exit=$code output: $(printf '%s' "$app_server_out" | head -c 200)"
+fi
+app_server_out="$(fake_client close-commentary turn --new --prompt "close commentary" --sandbox read-only 2>&1)"; code=$?
+if [[ "$code" -ne 0 ]] && ! printf '%s' "$app_server_out" | grep -q '"status":"completed"'; then
+    check "client does not recover commentary as a final answer" 0
+else
+    check "client does not recover commentary as a final answer" 1 "exit=$code output: $(printf '%s' "$app_server_out" | head -c 200)"
+fi
+app_server_out="$(fake_client malformed-json turn --new --prompt "malformed" --sandbox read-only 2>&1)"; code=$?
+assert_exit_nonzero "malformed server JSON closes the client instead of hanging" "$code" "$app_server_out" "invalid JSON from codex app-server"
+
+: > "$APP_SERVER_LOG"
+app_server_out="$(fake_client timeout turn --new --prompt "timeout" --sandbox read-only --timeout 0.01 2>&1)"; code=$?
+if [[ "$code" -ne 0 ]] && printf '%s' "$app_server_out" | grep -qF "was not replayed" \
+    && [[ "$(jq -r 'select(.method == "turn/start") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "1" ]] \
+    && jq -e 'select(.method == "turn/interrupt")' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "timeout interrupts once and never replays the turn" 0
+else
+    check "timeout interrupts once and never replays the turn" 1 "exit=$code output: $(printf '%s' "$app_server_out" | head -c 200)"
+fi
+
+app_server_out="$(fake_client rpc-error turn --new --prompt "rpc" --sandbox read-only 2>&1)"; code=$?
+assert_exit_nonzero "RPC errors name the failing method" "$code" "$app_server_out" "turn/start failed: bad turn params"
+app_server_out="$(fake_client complete turn --new --thread thread-1 --prompt "ambiguous" 2>&1)"; code=$?
+assert_exit_nonzero "turn rejects conflicting thread selectors" "$code" "$app_server_out" "either --new or --thread"
+app_server_out="$(fake_client complete turn --new --prompt "approval" --approval unsafe 2>&1)"; code=$?
+assert_exit_nonzero "client rejects unknown approval modes" "$code" "$app_server_out" "--approval must be"
+app_server_out="$(fake_client complete turn --new --prompt "sandbox" --sandbox misspelled 2>&1)"; code=$?
+assert_exit_nonzero "client rejects unknown sandbox instead of falling through" "$code" "$app_server_out" "--sandbox must be"
+app_server_out="$(fake_client complete turn --new --prompt "effort" --effort enormous 2>&1)"; code=$?
+assert_exit_nonzero "client rejects effort not advertised by the selected model" "$code" "$app_server_out" "not advertised for model 'fake-default-model'"
+app_server_out="$(fake_client complete turn --new --prompt "one" --prompt-file "$WORK/missing" 2>&1)"; code=$?
+assert_exit_nonzero "client rejects conflicting prompt sources" "$code" "$app_server_out" "either --prompt or --prompt-file"
+printf '%s\n' '[]' > "$WORK/invalid-params.json"
+app_server_out="$(fake_client complete request --method model/list --params-file "$WORK/invalid-params.json" 2>&1)"; code=$?
+assert_exit_nonzero "generic request rejects non-object params" "$code" "$app_server_out" "must contain one JSON object"
+
+# A managed session must keep one initialized App Server connection across
+# completed turns and later requests. The local command clients never own or
+# replace that transport.
+MANAGED_DIR="$WORK/managed-session"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=complete \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_DIR" \
+    --events "$MANAGED_DIR/events.jsonl" --approval decline >/dev/null 2>&1; code=$?
+managed_turn="$(node "$SCRIPTS_DIR/codex-app-server.mjs" turn --session-dir "$MANAGED_DIR" \
+    --new --prompt "managed turn" --sandbox read-only 2>&1)"; turn_code=$?
+managed_thread="$(printf '%s' "$managed_turn" | jq -r '.threadId')"
+managed_followup="$(node "$SCRIPTS_DIR/codex-app-server.mjs" turn --session-dir "$MANAGED_DIR" \
+    --thread "$managed_thread" --prompt "managed follow-up" --sandbox read-only 2>&1)"; followup_code=$?
+managed_models="$(node "$SCRIPTS_DIR/codex-app-server.mjs" request --session-dir "$MANAGED_DIR" \
+    --method model/list 2>&1)"; request_code=$?
+managed_status="$(node "$SCRIPTS_DIR/codex-app-server.mjs" status --session-dir "$MANAGED_DIR" 2>&1)"; status_code=$?
+if [[ "$code" -eq 0 && "$turn_code" -eq 0 && "$followup_code" -eq 0 && "$request_code" -eq 0 && "$status_code" -eq 0 ]] \
+    && [[ "$(jq -r 'select(.method == "initialize") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "1" ]] \
+    && [[ "$(jq -r 'select(.method == "turn/start") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "2" ]] \
+    && [[ "$(jq -r 'select(.method == "thread/resume") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "0" ]] \
+    && printf '%s' "$managed_status" | jq -e '.status == "ready" and .processAlive == true and (.threads | length) == 1' >/dev/null 2>&1 \
+    && printf '%s' "$managed_models" | jq -e '.data[0].id == "fake-default-model"' >/dev/null 2>&1; then
+    check "managed session reuses one initialized connection across operations" 0
+else
+    check "managed session reuses one initialized connection across operations" 1 "turn=$managed_turn followup=$managed_followup status=$managed_status"
+fi
+jq -s -e '([.[]._session.sequence] == ([.[]._session.sequence] | sort)) and (.[0]._session.sequence == 1)' "$MANAGED_DIR/events.jsonl" >/dev/null 2>&1
+check "managed session gives archived events a stable sequence" $?
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_DIR" >/dev/null 2>&1
+for _ in $(seq 1 100); do [[ "$(jq -r '.status' "$MANAGED_DIR/state.json")" == "closed" ]] && break; sleep 0.02; done
+if [[ "$(jq -r '.status' "$MANAGED_DIR/state.json")" == "closed" ]]; then
+    check "managed session shuts down cleanly after its leases finish" 0
+else
+    check "managed session shuts down cleanly after its leases finish" 1
+fi
+
+# Managed workspace-write must keep its controller and HMAC credential out of
+# every effective writable root. The fake session root is under /tmp, and the
+# second session is also nested directly inside the requested workdir. Both
+# must fail before any durable thread or turn/review RPC is accepted.
+UNSAFE_TMP_SESSION="$WORK/unsafe-workspace-session"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=complete \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$UNSAFE_TMP_SESSION" \
+    --approval decline >/dev/null 2>&1
+: > "$APP_SERVER_LOG"
+unsafe_turn_out="$(node "$SCRIPTS_DIR/codex-app-server.mjs" turn \
+    --session-dir "$UNSAFE_TMP_SESSION" --new --prompt "unsafe placement" \
+    --workdir "$NONBLOCK_REPO" --sandbox workspace-write 2>&1)"; unsafe_turn_code=$?
+if [[ "$unsafe_turn_code" -ne 0 ]] \
+    && printf '%s' "$unsafe_turn_out" | grep -qF "managed workspace-write" \
+    && ! jq -e 'select(.method == "thread/start" or .method == "turn/start")' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "managed workspace-write rejects a controller under canonical /tmp before thread RPCs" 0
+else
+    check "managed workspace-write rejects a controller under canonical /tmp before thread RPCs" 1 \
+        "exit=$unsafe_turn_code output=$(printf '%s' "$unsafe_turn_out" | head -c 180) rpc=$(tail -c 300 "$APP_SERVER_LOG")"
+fi
+: > "$APP_SERVER_LOG"
+danger_turn_out="$(node "$SCRIPTS_DIR/codex-app-server.mjs" turn \
+    --session-dir "$UNSAFE_TMP_SESSION" --new --prompt "explicit danger placement" \
+    --workdir "$NONBLOCK_REPO" --sandbox danger-full-access 2>&1)"; danger_turn_code=$?
+if [[ "$danger_turn_code" -eq 0 ]] \
+    && jq -e 'select(.method == "turn/start") | .params.sandboxPolicy.type == "dangerFullAccess"' \
+        "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "managed danger-full-access permits an explicitly selected controller placement" 0
+else
+    check "managed danger-full-access permits an explicitly selected controller placement" 1 \
+        "exit=$danger_turn_code output=$(printf '%s' "$danger_turn_out" | head -c 180)"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$UNSAFE_TMP_SESSION" >/dev/null 2>&1 || true
+
+UNSAFE_WORKDIR_SESSION="$NONBLOCK_REPO/unsafe-review-session"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=review \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$UNSAFE_WORKDIR_SESSION" \
+    --approval decline >/dev/null 2>&1
+: > "$APP_SERVER_LOG"
+unsafe_review_out="$(node "$SCRIPTS_DIR/codex-app-server.mjs" review \
+    --session-dir "$UNSAFE_WORKDIR_SESSION" --scope uncommitted \
+    --workdir "$NONBLOCK_REPO" --sandbox workspace-write 2>&1)"; unsafe_review_code=$?
+if [[ "$unsafe_review_code" -ne 0 ]] \
+    && printf '%s' "$unsafe_review_out" | grep -qF "managed workspace-write" \
+    && ! jq -e 'select(.method == "thread/start" or .method == "review/start")' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "managed native workspace-write review rejects a controller inside its workdir before review RPCs" 0
+else
+    check "managed native workspace-write review rejects a controller inside its workdir before review RPCs" 1 \
+        "exit=$unsafe_review_code output=$(printf '%s' "$unsafe_review_out" | head -c 180) rpc=$(tail -c 300 "$APP_SERVER_LOG")"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$UNSAFE_WORKDIR_SESSION" >/dev/null 2>&1 || true
+
+safe_placement_out="$(node --input-type=module -e '
+    import { pathToFileURL } from "node:url";
+    const module = await import(pathToFileURL(process.argv[1]));
+    await module.validateManagedControllerPlacement({
+      sandbox: "workspace-write",
+      workdir: process.argv[2],
+      sessionDir: "/usr/bin",
+      credentialPath: "/etc/hosts",
+      tmpdir: "/tmp",
+    });
+    process.stdout.write("SAFE_PLACEMENT_OK");
+  ' "$SCRIPTS_DIR/app-server-placement.mjs" "$NONBLOCK_REPO" 2>&1)"; safe_placement_code=$?
+if [[ "$safe_placement_code" -eq 0 && "$safe_placement_out" == "SAFE_PLACEMENT_OK" ]]; then
+    check "managed workspace-write placement validator accepts controller paths outside writable roots" 0
+else
+    check "managed workspace-write placement validator accepts controller paths outside writable roots" 1 \
+        "exit=$safe_placement_code output=$(printf '%s' "$safe_placement_out" | head -c 180)"
+fi
+
+unsafe_session_out="$(node --input-type=module -e '
+    import { pathToFileURL } from "node:url";
+    const module = await import(pathToFileURL(process.argv[1]));
+    await module.validateManagedControllerPlacement({
+      sandbox: "workspace-write",
+      workdir: "/usr/share",
+      sessionDir: process.argv[2],
+      credentialPath: "/etc/hosts",
+      tmpdir: "/tmp",
+    });
+  ' "$SCRIPTS_DIR/app-server-placement.mjs" "$NONBLOCK_REPO" 2>&1)"; unsafe_session_code=$?
+CANONICAL_TMP="$(cd /tmp && pwd -P)"
+if [[ "$unsafe_session_code" -ne 0 ]] \
+    && printf '%s' "$unsafe_session_out" | grep -qF "managed workspace-write" \
+    && printf '%s' "$unsafe_session_out" | grep -qF "$CANONICAL_TMP"; then
+    check "managed workspace-write placement rejects an unsafe canonical session with a safe credential" 0
+else
+    check "managed workspace-write placement rejects an unsafe canonical session with a safe credential" 1 \
+        "exit=$unsafe_session_code canonical_tmp=$CANONICAL_TMP output=$(printf '%s' "$unsafe_session_out" | head -c 180)"
+fi
+
+PLACEMENT_KEY="$NONBLOCK_REPO/controller.key"
+printf 'key\n' > "$PLACEMENT_KEY"
+unsafe_key_out="$(node --input-type=module -e '
+    import { pathToFileURL } from "node:url";
+    const module = await import(pathToFileURL(process.argv[1]));
+    await module.validateManagedControllerPlacement({
+      sandbox: "workspace-write",
+      workdir: process.argv[2],
+      sessionDir: "/usr/bin",
+      credentialPath: process.argv[3],
+      tmpdir: "/tmp",
+    });
+  ' "$SCRIPTS_DIR/app-server-placement.mjs" "$NONBLOCK_REPO" "$PLACEMENT_KEY" 2>&1)"; unsafe_key_code=$?
+if [[ "$unsafe_key_code" -ne 0 ]] \
+    && printf '%s' "$unsafe_key_out" | grep -qF "managed workspace-write" \
+    && printf '%s' "$unsafe_key_out" | grep -qF "controller.key"; then
+    check "managed workspace-write placement rejects a credential inside its workdir" 0
+else
+    check "managed workspace-write placement rejects a credential inside its workdir" 1 \
+        "exit=$unsafe_key_code output=$(printf '%s' "$unsafe_key_out" | head -c 180)"
+fi
+
+# A generic request holds a host lease after its command file is accepted.
+# Non-force shutdown must not close the shared transport until that lease is
+# released, even when there is no active turn or reverse request.
+MANAGED_LEASE_DIR="$WORK/managed-lease-shutdown"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=delayed-request \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_LEASE_DIR" \
+    --approval decline >/dev/null 2>&1
+timeout 5 node "$SCRIPTS_DIR/codex-app-server.mjs" request \
+    --session-dir "$MANAGED_LEASE_DIR" --method account/logout --no-params \
+    >"$WORK/managed-delayed-request.json" 2>&1 &
+MANAGED_DELAYED_PID=$!
+for _ in $(seq 1 100); do
+    jq -e '.leaseCount == 1' "$MANAGED_LEASE_DIR/state.json" >/dev/null 2>&1 && break
+    sleep 0.02
+done
+managed_lease_shutdown="$(timeout 5 node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown \
+    --session-dir "$MANAGED_LEASE_DIR" 2>&1)"; managed_lease_shutdown_code=$?
+if wait "$MANAGED_DELAYED_PID"; then managed_delayed_code=0; else managed_delayed_code=$?; fi
+managed_after_lease="$(timeout 5 node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown \
+    --session-dir "$MANAGED_LEASE_DIR" 2>&1)"; managed_after_lease_code=$?
+for _ in $(seq 1 100); do
+    [[ "$(jq -r '.status' "$MANAGED_LEASE_DIR/state.json" 2>/dev/null)" == "closed" ]] && break
+    sleep 0.02
+done
+if [[ "$managed_lease_shutdown_code" -ne 0 && "$managed_delayed_code" -eq 0 && "$managed_after_lease_code" -eq 0 ]] \
+    && printf '%s' "$managed_lease_shutdown" | grep -qF "command lease" \
+    && [[ "$(jq -r '.status' "$MANAGED_LEASE_DIR/state.json")" == "closed" ]]; then
+    check "managed shutdown waits for every other command lease" 0
+else
+    check "managed shutdown waits for every other command lease" 1 \
+        "first=$managed_lease_shutdown_code request=$managed_delayed_code second=$managed_after_lease_code first_out=$managed_lease_shutdown second_out=$managed_after_lease"
+    timeout 5 node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown \
+        --session-dir "$MANAGED_LEASE_DIR" --force >/dev/null 2>&1 || true
+fi
+
+# Filesystem clients authenticate each command with a per-session credential
+# outside the session tree. A process that can only write the workspace must
+# not be able to forge generic RPCs, replay a captured request, or turn an id
+# into an outbox traversal.
+MANAGED_AUTH_DIR="$WORK/managed-auth-security"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=complete \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_AUTH_DIR" \
+    --approval decline >/dev/null 2>&1
+AUTH_CREDENTIAL_FILE="$(find "$CODEX_APP_SERVER_AUTH_ROOT" -type f 2>/dev/null | head -n 1)"
+AUTH_CREDENTIAL_MODE="$(stat -c %a "$AUTH_CREDENTIAL_FILE" 2>/dev/null || stat -f %Lp "$AUTH_CREDENTIAL_FILE" 2>/dev/null)"
+if [[ -n "$AUTH_CREDENTIAL_FILE" && "$AUTH_CREDENTIAL_FILE" != "$MANAGED_AUTH_DIR"/* ]] \
+    && [[ "$AUTH_CREDENTIAL_MODE" == "600" ]] \
+    && ! find "$MANAGED_AUTH_DIR" -type f -exec grep -F -f "$AUTH_CREDENTIAL_FILE" {} + >/dev/null 2>&1; then
+    check "managed session keeps its command credential outside the IPC tree" 0
+else
+    check "managed session keeps its command credential outside the IPC tree" 1 \
+        "credential=${AUTH_CREDENTIAL_FILE:-missing}"
+fi
+
+# A writable outbox is untrusted. Stop the host, let a legitimate client
+# submit one signed request, then plant an unsigned success before the host
+# can answer. The client must ignore it without replaying the command and
+# accept only the later authenticated host response.
+MANAGED_FORGED_OUTBOX_DIR="$WORK/managed-forged-outbox"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=delayed-request \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_FORGED_OUTBOX_DIR" \
+    --approval decline >/dev/null 2>&1
+FORGED_OUTBOX_HOST_PID="$(jq -r '.pid' "$MANAGED_FORGED_OUTBOX_DIR/state.json")"
+kill -STOP "$FORGED_OUTBOX_HOST_PID"
+node "$SCRIPTS_DIR/codex-app-server.mjs" request --session-dir "$MANAGED_FORGED_OUTBOX_DIR" \
+    --method account/logout --no-params >"$WORK/forged-outbox-client.json" 2>&1 &
+FORGED_OUTBOX_CLIENT_PID=$!
+FORGED_OUTBOX_NAME=""
+for _ in $(seq 1 100); do
+    FORGED_OUTBOX_NAME="$(find "$MANAGED_FORGED_OUTBOX_DIR/inbox" -maxdepth 1 -type f -name '*.json' -exec basename {} \; | head -n 1)"
+    [[ -n "$FORGED_OUTBOX_NAME" ]] && break
+    sleep 0.02
+done
+kill -STOP "$FORGED_OUTBOX_CLIENT_PID"
+FORGED_OUTBOX_ID="${FORGED_OUTBOX_NAME%.json}"
+jq -n --arg id "$FORGED_OUTBOX_ID" '{id:$id,result:{forged:true}}' > "$WORK/forged-outbox.tmp"
+mv "$WORK/forged-outbox.tmp" "$MANAGED_FORGED_OUTBOX_DIR/outbox/$FORGED_OUTBOX_NAME"
+kill -CONT "$FORGED_OUTBOX_CLIENT_PID"
+sleep 0.1
+if [[ -f "$MANAGED_FORGED_OUTBOX_DIR/outbox/$FORGED_OUTBOX_NAME" ]]; then
+    forged_outbox_retained="true"
+else
+    forged_outbox_retained="false"
+fi
+kill -CONT "$FORGED_OUTBOX_HOST_PID"
+if wait "$FORGED_OUTBOX_CLIENT_PID"; then forged_outbox_code=0; else forged_outbox_code=$?; fi
+for _ in $(seq 1 100); do
+    [[ "$(jq -r 'select(.method == "account/logout") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "1" ]] && break
+    sleep 0.02
+done
+forged_outbox_calls="$(jq -r 'select(.method == "account/logout") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')"
+if [[ "$forged_outbox_code" -eq 0 && "$forged_outbox_calls" == "1" && "$forged_outbox_retained" == "true" ]] \
+    && jq -e '. == {}' "$WORK/forged-outbox-client.json" >/dev/null 2>&1; then
+    check "managed client ignores forged outbox success and accepts one authenticated host response" 0
+else
+    check "managed client ignores forged outbox success and accepts one authenticated host response" 1 \
+        "exit=$forged_outbox_code calls=$forged_outbox_calls retained=$forged_outbox_retained output=$(head -c 180 "$WORK/forged-outbox-client.json")"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_FORGED_OUTBOX_DIR" --force >/dev/null 2>&1 || true
+
+ATOMIC_TEMP_NAME="44444444-4444-4444-8444-444444444444.json.12345.55555555-5555-4555-8555-555555555555.tmp"
+printf 'atomic writer temporary bytes\n' > "$MANAGED_AUTH_DIR/inbox/$ATOMIC_TEMP_NAME"
+node "$SCRIPTS_DIR/codex-app-server.mjs" request --session-dir "$MANAGED_AUTH_DIR" \
+    --method model/list >/dev/null 2>&1
+if [[ -f "$MANAGED_AUTH_DIR/inbox/$ATOMIC_TEMP_NAME" ]]; then
+    check "managed inbox scan ignores atomic writer temporary files" 0
+else
+    check "managed inbox scan ignores atomic writer temporary files" 1
+fi
+rm -f "$MANAGED_AUTH_DIR/inbox/$ATOMIC_TEMP_NAME"
+
+: > "$APP_SERVER_LOG"
+UNSIGNED_ID="11111111-1111-4111-8111-111111111111"
+jq -n --arg id "$UNSIGNED_ID" '{id:$id,action:"request",payload:{method:"account/logout"},submittedAt:"2026-01-01T00:00:00.000Z"}' \
+    > "$WORK/unsigned-command.tmp"
+mv "$WORK/unsigned-command.tmp" "$MANAGED_AUTH_DIR/inbox/$UNSIGNED_ID.json"
+for _ in $(seq 1 100); do [[ -f "$MANAGED_AUTH_DIR/outbox/$UNSIGNED_ID.json" ]] && break; sleep 0.02; done
+unsigned_response="$(jq -r '.error.message // empty' "$MANAGED_AUTH_DIR/outbox/$UNSIGNED_ID.json" 2>/dev/null)"
+if [[ "$(jq -r 'select(.method == "account/logout") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "0" ]] \
+    && printf '%s' "$unsigned_response" | grep -qiF "authentication" \
+    && jq -e '.auth.algorithm == "hmac-sha256" and (.auth.mac | length == 64)' \
+        "$MANAGED_AUTH_DIR/outbox/$UNSIGNED_ID.json" >/dev/null 2>&1; then
+    check "managed host rejects unsigned generic commands" 0
+else
+    check "managed host rejects unsigned generic commands" 1 "response=$unsigned_response log=$(tail -c 200 "$APP_SERVER_LOG")"
+fi
+
+: > "$APP_SERVER_LOG"
+FORGED_ID="22222222-2222-4222-8222-222222222222"
+jq -n --arg id "$FORGED_ID" '{id:$id,action:"request",payload:{method:"account/logout"},submittedAt:"2026-01-01T00:00:00.000Z",auth:{algorithm:"hmac-sha256",mac:"00"}}' \
+    > "$WORK/forged-command.tmp"
+mv "$WORK/forged-command.tmp" "$MANAGED_AUTH_DIR/inbox/$FORGED_ID.json"
+for _ in $(seq 1 100); do [[ -f "$MANAGED_AUTH_DIR/outbox/$FORGED_ID.json" ]] && break; sleep 0.02; done
+forged_response="$(jq -r '.error.message // empty' "$MANAGED_AUTH_DIR/outbox/$FORGED_ID.json" 2>/dev/null)"
+if [[ "$(jq -r 'select(.method == "account/logout") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "0" ]] \
+    && printf '%s' "$forged_response" | grep -qiF "authentication" \
+    && jq -e '.auth.algorithm == "hmac-sha256" and (.auth.mac | length == 64)' \
+        "$MANAGED_AUTH_DIR/outbox/$FORGED_ID.json" >/dev/null 2>&1; then
+    check "managed host rejects forged command signatures" 0
+else
+    check "managed host rejects forged command signatures" 1 "response=$forged_response log=$(tail -c 200 "$APP_SERVER_LOG")"
+fi
+
+printf '{}\n' > "$WORK/malformed-command-name.tmp"
+mv "$WORK/malformed-command-name.tmp" "$MANAGED_AUTH_DIR/inbox/not-a-uuid.json"
+for _ in $(seq 1 100); do [[ ! -e "$MANAGED_AUTH_DIR/inbox/not-a-uuid.json" ]] && break; sleep 0.02; done
+if [[ ! -e "$MANAGED_AUTH_DIR/inbox/not-a-uuid.json" && ! -e "$MANAGED_AUTH_DIR/outbox/not-a-uuid.json" ]]; then
+    check "managed host removes malformed command filenames without constructing an outbox path" 0
+else
+    check "managed host removes malformed command filenames without constructing an outbox path" 1
+fi
+
+: > "$APP_SERVER_LOG"
+TRAVERSAL_FILE_ID="33333333-3333-4333-8333-333333333333"
+TRAVERSAL_BODY_ID="../../escaped-auth-command"
+rm -f "$WORK/escaped-auth-command.json"
+jq -n --arg id "$TRAVERSAL_BODY_ID" '{id:$id,action:"request",payload:{method:"account/logout"},submittedAt:"2026-01-01T00:00:00.000Z"}' \
+    > "$WORK/traversal-command.tmp"
+mv "$WORK/traversal-command.tmp" "$MANAGED_AUTH_DIR/inbox/$TRAVERSAL_FILE_ID.json"
+for _ in $(seq 1 100); do
+    [[ -f "$MANAGED_AUTH_DIR/outbox/$TRAVERSAL_FILE_ID.json" || -f "$WORK/escaped-auth-command.json" ]] && break
+    sleep 0.02
+done
+if [[ ! -e "$WORK/escaped-auth-command.json" ]] \
+    && [[ "$(jq -r 'select(.method == "account/logout") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "0" ]] \
+    && [[ -f "$MANAGED_AUTH_DIR/outbox/$TRAVERSAL_FILE_ID.json" ]] \
+    && jq -e '.auth.algorithm == "hmac-sha256" and (.auth.mac | length == 64)' \
+        "$MANAGED_AUTH_DIR/outbox/$TRAVERSAL_FILE_ID.json" >/dev/null 2>&1; then
+    check "managed host validates command ids before constructing outbox paths" 0
+else
+    check "managed host validates command ids before constructing outbox paths" 1 \
+        "escaped=$(test -e "$WORK/escaped-auth-command.json" && echo yes || echo no) log=$(tail -c 200 "$APP_SERVER_LOG")"
+fi
+timeout 5 node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_AUTH_DIR" >/dev/null 2>&1 || true
+for _ in $(seq 1 100); do [[ "$(jq -r '.status' "$MANAGED_AUTH_DIR/state.json" 2>/dev/null)" == "closed" ]] && break; sleep 0.02; done
+if [[ -n "$AUTH_CREDENTIAL_FILE" && ! -e "$AUTH_CREDENTIAL_FILE" ]]; then
+    check "managed host removes its command credential on terminal shutdown" 0
+else
+    check "managed host removes its command credential on terminal shutdown" 1 "credential=${AUTH_CREDENTIAL_FILE:-missing}"
+fi
+
+# Capture one legitimate signed command before the stopped host can consume
+# it, then submit the exact bytes again after the first response is consumed.
+MANAGED_REPLAY_DIR="$WORK/managed-auth-replay"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=complete \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_REPLAY_DIR" \
+    --approval decline >/dev/null 2>&1
+REPLAY_HOST_PID="$(jq -r '.pid' "$MANAGED_REPLAY_DIR/state.json")"
+kill -STOP "$REPLAY_HOST_PID"
+timeout 8 node "$SCRIPTS_DIR/codex-app-server.mjs" request --session-dir "$MANAGED_REPLAY_DIR" \
+    --method account/logout --no-params >"$WORK/replay-client.out" 2>&1 &
+REPLAY_CLIENT_PID=$!
+for _ in $(seq 1 100); do
+    REPLAY_NAME="$(find "$MANAGED_REPLAY_DIR/inbox" -maxdepth 1 -type f -name '*.json' -exec basename {} \; | head -n 1)"
+    [[ -n "$REPLAY_NAME" ]] && break
+    sleep 0.02
+done
+cp "$MANAGED_REPLAY_DIR/inbox/$REPLAY_NAME" "$WORK/replay-command.json"
+replay_has_mac="$(jq -r '.auth.algorithm == "hmac-sha256" and (.auth.mac | length == 64)' "$WORK/replay-command.json" 2>/dev/null)"
+kill -CONT "$REPLAY_HOST_PID"
+if wait "$REPLAY_CLIENT_PID"; then replay_first_code=0; else replay_first_code=$?; fi
+kill -STOP "$REPLAY_HOST_PID"
+cp "$WORK/replay-command.json" "$MANAGED_REPLAY_DIR/inbox/$REPLAY_NAME"
+kill -CONT "$REPLAY_HOST_PID"
+for _ in $(seq 1 100); do [[ -f "$MANAGED_REPLAY_DIR/outbox/$REPLAY_NAME" ]] && break; sleep 0.02; done
+replay_response="$(jq -r '.error.message // empty' "$MANAGED_REPLAY_DIR/outbox/$REPLAY_NAME" 2>/dev/null)"
+if [[ "$replay_first_code" -eq 0 && "$replay_has_mac" == "true" ]] \
+    && [[ "$(jq -r 'select(.method == "account/logout") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "1" ]] \
+    && printf '%s' "$replay_response" | grep -qiF "replay" \
+    && jq -e '.auth.algorithm == "hmac-sha256" and (.auth.mac | length == 64)' \
+        "$MANAGED_REPLAY_DIR/outbox/$REPLAY_NAME" >/dev/null 2>&1; then
+    check "managed host rejects replay without executing the RPC twice" 0
+else
+    check "managed host rejects replay without executing the RPC twice" 1 \
+        "first=$replay_first_code mac=$replay_has_mac response=$replay_response calls=$(jq -r 'select(.method == "account/logout") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')"
+fi
+timeout 5 node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_REPLAY_DIR" >/dev/null 2>&1 || true
+
+# If shutdown and another authenticated command are already in one inbox
+# scan, accepting shutdown closes the gate before the later file is leased.
+MANAGED_ATOMIC_DIR="$WORK/managed-atomic-shutdown"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=complete \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_ATOMIC_DIR" \
+    --approval decline >/dev/null 2>&1
+ATOMIC_HOST_PID="$(jq -r '.pid' "$MANAGED_ATOMIC_DIR/state.json")"
+kill -STOP "$ATOMIC_HOST_PID"
+atomic_pair_ready="false"
+for _ in $(seq 1 12); do
+    node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_ATOMIC_DIR" \
+        >"$WORK/atomic-shutdown.out" 2>&1 & ATOMIC_SHUTDOWN_PID=$!
+    node "$SCRIPTS_DIR/codex-app-server.mjs" request --session-dir "$MANAGED_ATOMIC_DIR" \
+        --method account/logout --no-params >"$WORK/atomic-request.out" 2>&1 & ATOMIC_REQUEST_PID=$!
+    for _poll in $(seq 1 100); do
+        [[ "$(find "$MANAGED_ATOMIC_DIR/inbox" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')" == "2" ]] && break
+        sleep 0.01
+    done
+    shutdown_name="$(jq -r 'select(.action == "shutdown") | input_filename' "$MANAGED_ATOMIC_DIR"/inbox/*.json 2>/dev/null | xargs -n1 basename)"
+    request_name="$(jq -r 'select(.action == "request") | input_filename' "$MANAGED_ATOMIC_DIR"/inbox/*.json 2>/dev/null | xargs -n1 basename)"
+    if [[ -n "$shutdown_name" && -n "$request_name" && "$shutdown_name" < "$request_name" ]]; then
+        atomic_pair_ready="true"
+        break
+    fi
+    kill -9 "$ATOMIC_SHUTDOWN_PID" "$ATOMIC_REQUEST_PID" 2>/dev/null || true
+    wait "$ATOMIC_SHUTDOWN_PID" 2>/dev/null || true
+    wait "$ATOMIC_REQUEST_PID" 2>/dev/null || true
+    rm -f "$MANAGED_ATOMIC_DIR"/inbox/*.json
+done
+kill -CONT "$ATOMIC_HOST_PID"
+if wait "$ATOMIC_SHUTDOWN_PID"; then atomic_shutdown_code=0; else atomic_shutdown_code=$?; fi
+if wait "$ATOMIC_REQUEST_PID"; then atomic_request_code=0; else atomic_request_code=$?; fi
+for _ in $(seq 1 100); do [[ "$(jq -r '.status' "$MANAGED_ATOMIC_DIR/state.json" 2>/dev/null)" == "closed" ]] && break; sleep 0.02; done
+if [[ "$atomic_pair_ready" == "true" && "$atomic_shutdown_code" -eq 0 && "$atomic_request_code" -ne 0 ]] \
+    && grep -qF "no longer accepts commands" "$WORK/atomic-request.out" \
+    && [[ "$(jq -r 'select(.method == "account/logout") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "0" ]] \
+    && [[ "$(jq -r '.status' "$MANAGED_ATOMIC_DIR/state.json")" == "closed" ]]; then
+    check "accepted shutdown rejects later commands from the same inbox scan" 0
+else
+    check "accepted shutdown rejects later commands from the same inbox scan" 1 \
+        "pair=$atomic_pair_ready shutdown=$atomic_shutdown_code request=$atomic_request_code request_out=$(head -c 160 "$WORK/atomic-request.out")"
+    kill -CONT "$ATOMIC_HOST_PID" 2>/dev/null || true
+    kill "$ATOMIC_HOST_PID" 2>/dev/null || true
+fi
+
+FAILED_AUTH_ROOT="$WORK/failed-start-auth"
+failed_start_out="$(CODEX_APP_SERVER_AUTH_ROOT="$FAILED_AUTH_ROOT" PATH="$FAKE_CODEX_BIN:$PATH" \
+    FAKE_APP_SERVER_SCENARIO=startup-close timeout 8 node "$SCRIPTS_DIR/codex-app-server.mjs" start \
+    --session-dir "$WORK/managed-failed-start" --approval decline 2>&1)"; failed_start_code=$?
+if [[ "$failed_start_code" -ne 0 ]] \
+    && [[ "$(find "$FAILED_AUTH_ROOT" -type f 2>/dev/null | wc -l | tr -d ' ')" == "0" ]]; then
+    check "failed managed startup removes its command credential" 0
+else
+    check "failed managed startup removes its command credential" 1 \
+        "exit=$failed_start_code files=$(find "$FAILED_AUTH_ROOT" -type f 2>/dev/null | wc -l | tr -d ' ') output=$(printf '%s' "$failed_start_out" | head -c 160)"
+fi
+
+# Explicit efforts are validated against model/list on the host connection.
+# Every advertised value must pass, and repeated managed turns must reuse the
+# first normalized capability result instead of querying once per turn.
+MANAGED_EFFORT_DIR="$WORK/managed-efforts"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=complete \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_EFFORT_DIR" \
+    --approval decline >/dev/null 2>&1
+managed_effort_failures=0
+for advertised_effort in minimal low medium high xhigh max ultra; do
+    node "$SCRIPTS_DIR/codex-app-server.mjs" turn --session-dir "$MANAGED_EFFORT_DIR" \
+        --new --prompt "managed $advertised_effort" --sandbox read-only \
+        --effort "$advertised_effort" >/dev/null 2>&1 || managed_effort_failures=$((managed_effort_failures + 1))
+done
+managed_explicit_model="$(node "$SCRIPTS_DIR/codex-app-server.mjs" turn \
+    --session-dir "$MANAGED_EFFORT_DIR" --new --prompt "explicit model" --sandbox read-only \
+    --model fake-explicit-model --effort ultra 2>&1)"; managed_explicit_model_code=$?
+if [[ "$managed_effort_failures" -eq 0 ]] \
+    && jq -s -e '[.[] | select(.method == "turn/start" and .params.model == "fake-default-model") | .params.effort] | sort == ["high","low","max","medium","minimal","ultra","xhigh"]' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "managed turns accept every effort advertised by the default model" 0
+else
+    check "managed turns accept every effort advertised by the default model" 1 \
+        "failures=$managed_effort_failures rpc: $(tail -c 400 "$APP_SERVER_LOG")"
+fi
+if [[ "$(jq -r 'select(.method == "model/list") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "1" ]] \
+    && [[ "$(jq -r 'select(.method == "thread/start" and .params.model == "fake-default-model") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "7" ]]; then
+    check "managed effort validation caches model capabilities and selects the default model" 0
+else
+    check "managed effort validation caches model capabilities and selects the default model" 1 \
+        "model/list=$(jq -r 'select(.method == "model/list") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')"
+fi
+if [[ "$managed_explicit_model_code" -eq 0 ]] \
+    && jq -e 'select(.method == "turn/start") | .params.model == "fake-explicit-model" and .params.effort == "ultra"' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "managed effort validation selects an explicit advertised model" 0
+else
+    check "managed effort validation selects an explicit advertised model" 1 \
+        "exit=$managed_explicit_model_code output: $(printf '%s' "$managed_explicit_model" | head -c 160)"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_EFFORT_DIR" >/dev/null 2>&1
+
+# A managed review host can start without a process-wide effort override. The
+# validated review effort must be attached to its new thread, where native
+# review execution inherits it, and must not be invented on review/start.
+MANAGED_REVIEW_EFFORT_DIR="$WORK/managed-review-effort"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=review \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_REVIEW_EFFORT_DIR" \
+    --approval decline >/dev/null 2>&1
+managed_review_effort="$(node "$SCRIPTS_DIR/codex-app-server.mjs" review \
+    --session-dir "$MANAGED_REVIEW_EFFORT_DIR" --scope uncommitted \
+    --workdir "$NONBLOCK_REPO" --sandbox read-only --effort ultra 2>&1)"; managed_review_effort_code=$?
+if [[ "$managed_review_effort_code" -eq 0 ]] \
+    && printf '%s' "$managed_review_effort" | jq -e '.model == "fake-default-model" and .effort == "ultra"' >/dev/null 2>&1 \
+    && jq -e 'select(.method == "thread/start") | .params.config.model_reasoning_effort == "ultra"' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && jq -e 'select(.method == "review/start") | (.params | has("effort") | not)' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && ! jq -e 'select(.method == "fake/appServerArgs") | .params.args[] == "model_reasoning_effort=ultra"' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "managed native review applies effort through new thread config" 0
+else
+    check "managed native review applies effort through new thread config" 1 \
+        "exit=$managed_review_effort_code output: $(printf '%s' "$managed_review_effort" | head -c 200) log: $(tail -c 400 "$APP_SERVER_LOG")"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_REVIEW_EFFORT_DIR" >/dev/null 2>&1
+
+# Capability failures must be terminal before any operation starts. Use one
+# host to also prove failed validations share the same cached model list.
+MANAGED_INVALID_EFFORT_DIR="$WORK/managed-invalid-efforts"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=complete \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_INVALID_EFFORT_DIR" \
+    --approval decline >/dev/null 2>&1
+unsupported_effort_out="$(node "$SCRIPTS_DIR/codex-app-server.mjs" turn \
+    --session-dir "$MANAGED_INVALID_EFFORT_DIR" --new --prompt "unsupported" \
+    --sandbox read-only --effort impossible 2>&1)"; unsupported_effort_code=$?
+unknown_model_out="$(node "$SCRIPTS_DIR/codex-app-server.mjs" review \
+    --session-dir "$MANAGED_INVALID_EFFORT_DIR" --scope uncommitted \
+    --workdir "$NONBLOCK_REPO" --model missing-model --effort high 2>&1)"; unknown_model_code=$?
+assert_exit_nonzero "unsupported effort fails with the selected model's advertised values" \
+    "$unsupported_effort_code" "$unsupported_effort_out" \
+    "not advertised for model 'fake-default-model'"
+assert_exit_nonzero "unknown explicit model fails with the advertised model ids" \
+    "$unknown_model_code" "$unknown_model_out" \
+    "Model 'missing-model' is not advertised by model/list"
+if [[ "$(jq -r 'select(.method == "model/list") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "1" ]] \
+    && ! jq -e 'select(.method == "thread/start" or .method == "turn/start" or .method == "review/start")' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "capability failures stop before thread, turn, or review start" 0
+else
+    check "capability failures stop before thread, turn, or review start" 1 \
+        "rpc: $(tail -c 400 "$APP_SERVER_LOG")"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_INVALID_EFFORT_DIR" >/dev/null 2>&1
+
+# Native review can advertise a provisional turn id in turn/started while
+# review/start and turn/completed use the real id. Completing that review must
+# clear only aliases on its thread, without disturbing another active thread.
+MANAGED_REVIEW_MISMATCH_DIR="$WORK/managed-review-mismatch"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=review-turn-id-mismatch-with-other \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_REVIEW_MISMATCH_DIR" --approval decline >/dev/null 2>&1
+managed_review_mismatch="$(node "$SCRIPTS_DIR/codex-app-server.mjs" review \
+    --session-dir "$MANAGED_REVIEW_MISMATCH_DIR" --scope uncommitted \
+    --workdir "$NONBLOCK_REPO" --sandbox read-only 2>&1)"; review_mismatch_code=$?
+managed_review_mismatch_status="$(node "$SCRIPTS_DIR/codex-app-server.mjs" status \
+    --session-dir "$MANAGED_REVIEW_MISMATCH_DIR" 2>&1)"; review_mismatch_status_code=$?
+if [[ "$review_mismatch_code" -eq 0 && "$review_mismatch_status_code" -eq 0 ]] \
+    && printf '%s' "$managed_review_mismatch_status" | jq -e \
+        '.activeTurns == [{"threadId":"00000000-0000-0000-0000-000000000004","turnId":"00000000-0000-0000-0000-000000000005","startedAt":.activeTurns[0].startedAt}]' >/dev/null 2>&1; then
+    check "completed review clears mismatched turn id without touching other threads" 0
+else
+    check "completed review clears mismatched turn id without touching other threads" 1 \
+        "review_exit=$review_mismatch_code status_exit=$review_mismatch_status_code status=$managed_review_mismatch_status"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_REVIEW_MISMATCH_DIR" --force >/dev/null 2>&1
+
+# A native review can become idle without emitting turn/completed for its
+# provisional id. Idle status clears aliases only on that thread and retains
+# an independently active turn on another thread.
+MANAGED_THREAD_IDLE_DIR="$WORK/managed-thread-idle"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=thread-idle-with-other-active \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_THREAD_IDLE_DIR" --approval decline >/dev/null 2>&1
+managed_thread_idle_request="$(node "$SCRIPTS_DIR/codex-app-server.mjs" request \
+    --session-dir "$MANAGED_THREAD_IDLE_DIR" --method model/list 2>&1)"; thread_idle_request_code=$?
+managed_thread_idle_status="$(node "$SCRIPTS_DIR/codex-app-server.mjs" status \
+    --session-dir "$MANAGED_THREAD_IDLE_DIR" 2>&1)"; thread_idle_status_code=$?
+if [[ "$thread_idle_request_code" -eq 0 && "$thread_idle_status_code" -eq 0 ]] \
+    && printf '%s' "$managed_thread_idle_status" | jq -e \
+        '.activeTurns == [{"threadId":"00000000-0000-0000-0000-000000000004","turnId":"00000000-0000-0000-0000-000000000005","startedAt":.activeTurns[0].startedAt}]' >/dev/null 2>&1; then
+    check "idle thread clears provisional turn without touching other threads" 0
+else
+    check "idle thread clears provisional turn without touching other threads" 1 \
+        "request_exit=$thread_idle_request_code status_exit=$thread_idle_status_code status=$managed_thread_idle_status request=$managed_thread_idle_request"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_THREAD_IDLE_DIR" --force >/dev/null 2>&1
+
+# Steering and interruption enter through separate local clients, but the
+# host sends both RPCs over the connection that owns the active turn.
+MANAGED_STEER_DIR="$WORK/managed-steer"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=control-steer \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_STEER_DIR" --approval decline >/dev/null 2>&1
+node "$SCRIPTS_DIR/codex-app-server.mjs" turn --session-dir "$MANAGED_STEER_DIR" \
+    --new --prompt "wait" --sandbox read-only >"$WORK/managed-steer-turn.json" 2>&1 &
+MANAGED_TURN_PID=$!
+for _ in $(seq 1 100); do jq -e '.activeTurns | length == 1' "$MANAGED_STEER_DIR/state.json" >/dev/null 2>&1 && break; sleep 0.02; done
+managed_steer="$(node "$SCRIPTS_DIR/codex-app-server.mjs" steer --session-dir "$MANAGED_STEER_DIR" --prompt "redirect" 2>&1)"; code=$?
+if wait "$MANAGED_TURN_PID"; then managed_turn_code=0; else managed_turn_code=$?; fi
+if [[ "$code" -eq 0 && "$managed_turn_code" -eq 0 ]] \
+    && jq -e 'select(.method == "turn/steer") | .params.expectedTurnId == "00000000-0000-0000-0000-000000000002"' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && grep -qF "STEERED_ON_ACTIVE_CONNECTION" "$WORK/managed-steer-turn.json"; then
+    check "managed session routes steering to the owning connection" 0
+else
+    check "managed session routes steering to the owning connection" 1 "exit=$code turn=$managed_turn_code output=$managed_steer"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_STEER_DIR" >/dev/null 2>&1
+
+MANAGED_INTERRUPT_DIR="$WORK/managed-interrupt"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=control-interrupt \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_INTERRUPT_DIR" --approval decline >/dev/null 2>&1
+node "$SCRIPTS_DIR/codex-app-server.mjs" turn --session-dir "$MANAGED_INTERRUPT_DIR" \
+    --new --prompt "wait" --sandbox read-only >"$WORK/managed-interrupt-turn.json" 2>&1 &
+MANAGED_TURN_PID=$!
+for _ in $(seq 1 100); do jq -e '.activeTurns | length == 1' "$MANAGED_INTERRUPT_DIR/state.json" >/dev/null 2>&1 && break; sleep 0.02; done
+shutdown_active="$(node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_INTERRUPT_DIR" 2>&1)"; shutdown_code=$?
+managed_interrupt="$(node "$SCRIPTS_DIR/codex-app-server.mjs" interrupt --session-dir "$MANAGED_INTERRUPT_DIR" 2>&1)"; interrupt_code=$?
+if wait "$MANAGED_TURN_PID"; then managed_turn_code=0; else managed_turn_code=$?; fi
+if [[ "$shutdown_code" -ne 0 && "$interrupt_code" -eq 0 && "$managed_turn_code" -ne 0 ]] \
+    && printf '%s' "$shutdown_active" | grep -qF "active turn" \
+    && jq -e 'select(.method == "turn/interrupt")' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "managed session refuses unsafe shutdown and interrupts without replay" 0
+else
+    check "managed session refuses unsafe shutdown and interrupts without replay" 1 "shutdown=$shutdown_code interrupt=$interrupt_code turn=$managed_turn_code"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_INTERRUPT_DIR" >/dev/null 2>&1
+
+# Interactive hosts expose every server request until another process answers
+# it. This proves two-way communication beyond turn steering.
+MANAGED_APPROVAL_DIR="$WORK/managed-approvals"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=approvals \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_APPROVAL_DIR" --approval interactive >/dev/null 2>&1
+node "$SCRIPTS_DIR/codex-app-server.mjs" turn --session-dir "$MANAGED_APPROVAL_DIR" \
+    --new --prompt "approvals" --sandbox read-only >"$WORK/managed-approval-turn.json" 2>&1 &
+MANAGED_TURN_PID=$!
+for _ in $(seq 1 100); do jq -e '.pendingRequests | length == 6' "$MANAGED_APPROVAL_DIR/state.json" >/dev/null 2>&1 && break; sleep 0.02; done
+managed_pending="$(node "$SCRIPTS_DIR/codex-app-server.mjs" pending --session-dir "$MANAGED_APPROVAL_DIR" 2>&1)"; pending_code=$?
+jq -n '{decision:"decline"}' > "$WORK/managed-decision.json"
+jq -n '{permissions:{},scope:"turn"}' > "$WORK/managed-permissions.json"
+jq -n '{answers:{}}' > "$WORK/managed-answers.json"
+jq -n '{action:"cancel",content:null,_meta:null}' > "$WORK/managed-cancel.json"
+jq -n '{success:false,contentItems:[]}' > "$WORK/managed-tool.json"
+for request_spec in \
+    "901:$WORK/managed-decision.json" "902:$WORK/managed-decision.json" \
+    "903:$WORK/managed-permissions.json" "904:$WORK/managed-answers.json" \
+    "905:$WORK/managed-cancel.json" "906:$WORK/managed-tool.json"; do
+    request_id="${request_spec%%:*}"
+    response_file="${request_spec#*:}"
+    node "$SCRIPTS_DIR/codex-app-server.mjs" respond --session-dir "$MANAGED_APPROVAL_DIR" \
+        --request "$request_id" --result-file "$response_file" >/dev/null 2>&1
+done
+if wait "$MANAGED_TURN_PID"; then managed_turn_code=0; else managed_turn_code=$?; fi
+if [[ "$pending_code" -eq 0 && "$managed_turn_code" -eq 0 ]] \
+    && printf '%s' "$managed_pending" | jq -e '(length == 6) and ((map(.method) | index("item/tool/requestUserInput")) != null)' >/dev/null 2>&1 \
+    && grep -qF "APPROVALS_HANDLED" "$WORK/managed-approval-turn.json" \
+    && jq -e 'select(.id == 901) | .result.decision == "decline"' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "managed session exposes and resolves bidirectional server requests" 0
+else
+    check "managed session exposes and resolves bidirectional server requests" 1 "pending=$managed_pending turn=$managed_turn_code"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_APPROVAL_DIR" >/dev/null 2>&1
+
+# The reverse-request broker registers before event archival. If that archive
+# then fails, the connection must become terminal so the registered request is
+# rejected and removed instead of leaving a ready host permanently waiting.
+MANAGED_ARCHIVE_FAILURE_DIR="$WORK/managed-archive-failure"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=approvals \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_ARCHIVE_FAILURE_DIR" --approval interactive >/dev/null 2>&1
+rm -f "$MANAGED_ARCHIVE_FAILURE_DIR/events.jsonl"
+mkdir "$MANAGED_ARCHIVE_FAILURE_DIR/events.jsonl"
+archive_failure_out="$(timeout 8 node "$SCRIPTS_DIR/codex-app-server.mjs" turn \
+    --session-dir "$MANAGED_ARCHIVE_FAILURE_DIR" --new --prompt "archive failure" \
+    --sandbox read-only 2>&1)"; archive_failure_code=$?
+for _ in $(seq 1 100); do
+    [[ "$(jq -r '.status // empty' "$MANAGED_ARCHIVE_FAILURE_DIR/state.json" 2>/dev/null)" == "closed" ]] && break
+    sleep 0.02
+done
+archive_failure_status="$(jq -c '{status,pendingRequests,error}' "$MANAGED_ARCHIVE_FAILURE_DIR/state.json" 2>/dev/null)"
+if [[ "$archive_failure_code" -ne 0 && "$archive_failure_code" -ne 124 ]] \
+    && printf '%s' "$archive_failure_status" | jq -e '.status == "closed" and .pendingRequests == []' >/dev/null 2>&1 \
+    && ! jq -e 'select((.id >= 901 and .id <= 906) and has("method") == false and has("result"))' \
+        "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "reverse-request archival failure closes the host and rejects registered waiters" 0
+else
+    check "reverse-request archival failure closes the host and rejects registered waiters" 1 \
+        "exit=$archive_failure_code status=$(printf '%s' "$archive_failure_status" | head -c 220) output=$(printf '%s' "$archive_failure_out" | head -c 160)"
+fi
+timeout 8 node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown \
+    --session-dir "$MANAGED_ARCHIVE_FAILURE_DIR" --force >/dev/null 2>&1 || true
+
+MANAGED_AUTO_DIR="$WORK/managed-auto-resolution"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=auto-resolve \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_AUTO_DIR" --approval interactive >/dev/null 2>&1
+managed_auto="$(node "$SCRIPTS_DIR/codex-app-server.mjs" turn --session-dir "$MANAGED_AUTO_DIR" \
+    --new --prompt "auto" --sandbox read-only 2>&1)"; auto_code=$?
+if [[ "$auto_code" -eq 0 ]] && printf '%s' "$managed_auto" | grep -qF "AUTO_RESOLVED_INPUT" \
+    && jq -e 'select(.id == 904) | .result == {"answers":{}}' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "managed session honors user-input auto-resolution deadlines" 0
+else
+    check "managed session honors user-input auto-resolution deadlines" 1 "exit=$auto_code output=$managed_auto"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_AUTO_DIR" >/dev/null 2>&1
+
+MANAGED_CLEARED_DIR="$WORK/managed-cleared-request"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=request-cleared \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_CLEARED_DIR" --approval interactive >/dev/null 2>&1
+managed_cleared="$(node "$SCRIPTS_DIR/codex-app-server.mjs" turn --session-dir "$MANAGED_CLEARED_DIR" \
+    --new --prompt "cleared" --sandbox read-only 2>&1)"; cleared_code=$?
+for _ in $(seq 1 100); do jq -e '.pendingRequests == []' "$MANAGED_CLEARED_DIR/state.json" >/dev/null 2>&1 && break; sleep 0.02; done
+cleared_status="$(node "$SCRIPTS_DIR/codex-app-server.mjs" status --session-dir "$MANAGED_CLEARED_DIR" 2>&1)"
+if [[ "$cleared_code" -eq 0 ]] && printf '%s' "$managed_cleared" | grep -qF "REQUEST_CLEARED" \
+    && printf '%s' "$cleared_status" | jq -e '.pendingRequests == []' >/dev/null 2>&1 \
+    && ! jq -e 'select(.id == 904 and has("method") == false)' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "managed session removes server-cleared requests without a late response" 0
+else
+    check "managed session removes server-cleared requests without a late response" 1 "exit=$cleared_code status=$cleared_status"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_CLEARED_DIR" >/dev/null 2>&1
+
+# Delay archival for longer than the old one-second cleared-id cache. The
+# broker must still learn about the reverse request before the matching
+# request-cleared notification can arrive, and it must never send a response.
+MANAGED_DELAYED_CLEAR_DIR="$WORK/managed-delayed-cleared-request"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=request-cleared \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_DELAYED_CLEAR_DIR" --approval interactive >/dev/null 2>&1
+rm -f "$MANAGED_DELAYED_CLEAR_DIR/events.jsonl"
+mkfifo "$MANAGED_DELAYED_CLEAR_DIR/events.jsonl"
+chmod 600 "$MANAGED_DELAYED_CLEAR_DIR/events.jsonl"
+timeout 10 node "$SCRIPTS_DIR/codex-app-server.mjs" turn --session-dir "$MANAGED_DELAYED_CLEAR_DIR" \
+    --new --prompt "delayed cleared" --sandbox read-only >"$WORK/managed-delayed-cleared-turn.json" 2>&1 &
+MANAGED_DELAYED_CLEAR_TURN_PID=$!
+sleep 1.3
+timeout 10 bash -c 'while cat "$1"; do :; done' _ "$MANAGED_DELAYED_CLEAR_DIR/events.jsonl" \
+    >"$WORK/managed-delayed-cleared-events.jsonl" &
+MANAGED_DELAYED_CLEAR_DRAIN_PID=$!
+if wait "$MANAGED_DELAYED_CLEAR_TURN_PID"; then delayed_clear_code=0; else delayed_clear_code=$?; fi
+for _ in $(seq 1 100); do
+    jq -e '.pendingRequests == []' "$MANAGED_DELAYED_CLEAR_DIR/state.json" >/dev/null 2>&1 && break
+    sleep 0.02
+done
+delayed_clear_status="$(node "$SCRIPTS_DIR/codex-app-server.mjs" status --session-dir "$MANAGED_DELAYED_CLEAR_DIR" 2>&1)"
+if [[ "$delayed_clear_code" -eq 0 ]] \
+    && grep -qF "REQUEST_CLEARED" "$WORK/managed-delayed-cleared-turn.json" \
+    && printf '%s' "$delayed_clear_status" | jq -e '.pendingRequests == []' >/dev/null 2>&1 \
+    && ! jq -e 'select(.id == 904 and has("method") == false)' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "reverse requests are registered before delayed archival and cleared without a late response" 0
+else
+    check "reverse requests are registered before delayed archival and cleared without a late response" 1 \
+        "exit=$delayed_clear_code status=$(printf '%s' "$delayed_clear_status" | head -c 180)"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_DELAYED_CLEAR_DIR" --force >/dev/null 2>&1 || true
+kill "$MANAGED_DELAYED_CLEAR_DRAIN_PID" 2>/dev/null || true
+wait "$MANAGED_DELAYED_CLEAR_DRAIN_PID" 2>/dev/null || true
+
+MANAGED_CLOSE_DIR="$WORK/managed-close"
+: > "$APP_SERVER_LOG"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=close-commentary \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_CLOSE_DIR" --approval decline >/dev/null 2>&1
+managed_close="$(node "$SCRIPTS_DIR/codex-app-server.mjs" turn --session-dir "$MANAGED_CLOSE_DIR" \
+    --new --prompt "close" --sandbox read-only 2>&1)"; close_code=$?
+for _ in $(seq 1 100); do [[ "$(jq -r '.status' "$MANAGED_CLOSE_DIR/state.json")" == "closed" ]] && break; sleep 0.02; done
+managed_restart="$(PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=complete \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MANAGED_CLOSE_DIR" --approval decline 2>&1)"; restart_code=$?
+if [[ "$close_code" -ne 0 && "$restart_code" -ne 0 ]] \
+    && [[ "$(jq -r '.status' "$MANAGED_CLOSE_DIR/state.json")" == "closed" ]] \
+    && [[ "$(jq -r 'select(.method == "turn/start") | .method' "$APP_SERVER_LOG" | wc -l | tr -d ' ')" == "1" ]] \
+    && printf '%s' "$managed_close" | grep -qF "exited" \
+    && printf '%s' "$managed_restart" | grep -qF "stale commands cannot be replayed"; then
+    check "managed transport close rejects waiters and stale sessions never replay" 0
+else
+    check "managed transport close rejects waiters and stale sessions never replay" 1 "close=$close_code restart=$restart_code output=$managed_close"
+fi
+
+: > "$APP_SERVER_LOG"
+review_wrapper_out="$(PATH="$FAKE_CODEX_BIN:$PATH" FAKE_CODEX_PID_FILE="$FAKE_CODEX_PID_FILE" \
+    FAKE_APP_SERVER_SCENARIO=review FAKE_APP_SERVER_LOG="$APP_SERVER_LOG" \
+    "$SCRIPTS_DIR/codex-review-start.sh" --wait --base main --prompt "wrapper lens" \
+    --workdir "$NONBLOCK_REPO" 2>&1)"; code=$?
+if [[ "$code" -eq 0 ]] && printf '%s' "$review_wrapper_out" | grep -qF "NATIVE_REVIEW_OK" \
+    && jq -e 'select(.method == "review/start") | .params.target.branch == "main"' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "tracked review wrapper uses native App Server review" 0
+else
+    check "tracked review wrapper uses native App Server review" 1 "exit=$code output: $(printf '%s' "$review_wrapper_out" | head -c 200)"
+fi
+FAKE_REVIEW_RUN_ID="$("$SCRIPTS_DIR/codex-review-list.sh" 2 | awk -F'\t' 'NR>1 && $2=="review" {print $1; exit}')"
+if [[ -n "$FAKE_REVIEW_RUN_ID" ]] \
+    && [[ "$(jq -r '.runner' "$CODEX_REVIEW_HOME/runs/$FAKE_REVIEW_RUN_ID/meta.json")" == "codex-app-server-review" ]] \
+    && [[ "$(jq -r '.session_dir' "$CODEX_REVIEW_HOME/runs/$FAKE_REVIEW_RUN_ID/meta.json")" == "$CODEX_REVIEW_HOME/runs/$FAKE_REVIEW_RUN_ID/app-server-session" ]]; then
+    check "tracked review records persistent App Server session" 0
+else
+    check "tracked review records persistent App Server session" 1
+fi
+[[ -n "$FAKE_REVIEW_RUN_ID" ]] && "$SCRIPTS_DIR/codex-delete.sh" "$FAKE_REVIEW_RUN_ID" >/dev/null 2>&1
+
+: > "$APP_SERVER_LOG"
+review_ultra_out="$(PATH="$FAKE_CODEX_BIN:$PATH" FAKE_CODEX_PID_FILE="$FAKE_CODEX_PID_FILE" \
+    FAKE_APP_SERVER_SCENARIO=review FAKE_APP_SERVER_LOG="$APP_SERVER_LOG" \
+    "$SCRIPTS_DIR/codex-review-start.sh" --wait --uncommitted --effort ultra \
+    --workdir "$NONBLOCK_REPO" 2>&1)"; review_ultra_code=$?
+FAKE_ULTRA_REVIEW_RUN_ID=""
+if [[ "$review_ultra_code" -eq 0 ]]; then
+    FAKE_ULTRA_REVIEW_RUN_ID="$("$SCRIPTS_DIR/codex-review-list.sh" 2 | awk -F'\t' 'NR>1 && $2=="review" {print $1; exit}')"
+fi
+if [[ "$review_ultra_code" -eq 0 && -n "$FAKE_ULTRA_REVIEW_RUN_ID" ]] \
+    && [[ "$(jq -r '.effort // ""' "$CODEX_REVIEW_HOME/runs/$FAKE_ULTRA_REVIEW_RUN_ID/meta.json")" == "ultra" ]] \
+    && jq -e 'select(.method == "fake/appServerArgs") | .params.args | index("model_reasoning_effort=ultra") != null' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && jq -e 'select(.method == "thread/start") | .params.model == "fake-default-model"' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "tracked review accepts ultra and configures the host with it" 0
+else
+    check "tracked review accepts ultra and configures the host with it" 1 \
+        "exit=$review_ultra_code output: $(printf '%s' "$review_ultra_out" | head -c 200)"
+fi
+[[ -n "$FAKE_ULTRA_REVIEW_RUN_ID" ]] && "$SCRIPTS_DIR/codex-delete.sh" "$FAKE_ULTRA_REVIEW_RUN_ID" >/dev/null 2>&1
+
+: > "$APP_SERVER_LOG"
+exec_max_out="$(PATH="$FAKE_CODEX_BIN:$PATH" FAKE_CODEX_PID_FILE="$FAKE_CODEX_PID_FILE" \
+    FAKE_APP_SERVER_SCENARIO=complete FAKE_APP_SERVER_LOG="$APP_SERVER_LOG" \
+    "$SCRIPTS_DIR/codex-exec-start.sh" --wait --workdir "$NONBLOCK_REPO" \
+    --sandbox read-only --effort max "tracked max effort" 2>&1)"; exec_max_code=$?
+FAKE_MAX_EXEC_RUN_ID=""
+if [[ "$exec_max_code" -eq 0 ]]; then
+    FAKE_MAX_EXEC_RUN_ID="$("$SCRIPTS_DIR/codex-review-list.sh" 2 | awk -F'\t' 'NR>1 && $2=="exec" {print $1; exit}')"
+fi
+if [[ "$exec_max_code" -eq 0 && -n "$FAKE_MAX_EXEC_RUN_ID" ]] \
+    && [[ "$(jq -r '.effort // ""' "$CODEX_REVIEW_HOME/runs/$FAKE_MAX_EXEC_RUN_ID/meta.json")" == "max" ]] \
+    && jq -e 'select(.method == "turn/start") | .params.model == "fake-default-model" and .params.effort == "max"' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "tracked exec accepts and records advertised max effort" 0
+else
+    check "tracked exec accepts and records advertised max effort" 1 \
+        "exit=$exec_max_code output: $(printf '%s' "$exec_max_out" | head -c 200)"
+fi
+
+if [[ -n "$FAKE_MAX_EXEC_RUN_ID" ]]; then
+    : > "$APP_SERVER_LOG"
+    converse_ultra_out="$("$SCRIPTS_DIR/codex-review-converse.sh" "$FAKE_MAX_EXEC_RUN_ID" \
+        --effort ultra "continue at ultra" 2>&1)"; converse_ultra_code=$?
+    if [[ "$converse_ultra_code" -eq 0 ]] \
+        && [[ "$(jq -r '.effort // ""' "$CODEX_REVIEW_HOME/runs/$FAKE_MAX_EXEC_RUN_ID/meta.json")" == "ultra" ]] \
+        && jq -e 'select(.method == "turn/start") | .params.model == "fake-default-model" and .params.effort == "ultra"' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+        check "continuation wrapper accepts and records advertised ultra effort" 0
+    else
+        check "continuation wrapper accepts and records advertised ultra effort" 1 \
+            "exit=$converse_ultra_code output: $(printf '%s' "$converse_ultra_out" | head -c 200)"
+    fi
+    "$SCRIPTS_DIR/codex-delete.sh" "$FAKE_MAX_EXEC_RUN_ID" >/dev/null 2>&1
+else
+    check "continuation wrapper accepts and records advertised ultra effort" 1 "tracked exec setup failed"
+fi
+
+TRACKED_MODE_OUT="$(
+    umask 022
+    PATH="$FAKE_CODEX_BIN:$PATH" FAKE_CODEX_PID_FILE="$FAKE_CODEX_PID_FILE" \
+        FAKE_APP_SERVER_SCENARIO=complete FAKE_APP_SERVER_LOG="$APP_SERVER_LOG" \
+        "$SCRIPTS_DIR/codex-exec-start.sh" --workdir "$NONBLOCK_REPO" \
+        --sandbox read-only "tracked private modes" 2>&1
+)"
+TRACKED_MODE_CODE=$?
+TRACKED_MODE_RUN_ID="$(printf '%s' "$TRACKED_MODE_OUT" | awk '/^run_id:/ {print $2; exit}')"
+TRACKED_MODE_RUN_DIR="$CODEX_REVIEW_HOME/runs/$TRACKED_MODE_RUN_ID"
+for _ in $(seq 1 100); do
+    [[ "$(jq -r '.status // empty' "$TRACKED_MODE_RUN_DIR/meta.json" 2>/dev/null)" == "completed" ]] && break
+    sleep 0.02
+done
+tracked_modes_ok="true"
+while IFS= read -r tracked_dir; do
+    tracked_mode="$(mode_bits "$tracked_dir")"
+    [[ ! -e "$tracked_dir" || "$tracked_mode" == "700" ]] || tracked_modes_ok="false"
+done < <(find "$TRACKED_MODE_RUN_DIR" -type d 2>/dev/null)
+while IFS= read -r tracked_file; do
+    tracked_mode="$(mode_bits "$tracked_file")"
+    [[ ! -e "$tracked_file" || "$tracked_mode" == "600" ]] || tracked_modes_ok="false"
+done < <(find "$TRACKED_MODE_RUN_DIR" -type f 2>/dev/null)
+if [[ "$TRACKED_MODE_CODE" -eq 0 && -n "$TRACKED_MODE_RUN_ID" && "$tracked_modes_ok" == "true" ]]; then
+    check "tracked run files and directories are private under a permissive umask" 0
+else
+    check "tracked run files and directories are private under a permissive umask" 1 \
+        "exit=$TRACKED_MODE_CODE run=$TRACKED_MODE_RUN_ID modes=$(find "$TRACKED_MODE_RUN_DIR" -printf '%m %p ' 2>/dev/null | head -c 220)"
+fi
+[[ -n "$TRACKED_MODE_RUN_ID" ]] \
+    && "$SCRIPTS_DIR/codex-delete.sh" "$TRACKED_MODE_RUN_ID" --force >/dev/null 2>&1 || true
+
+# Exercise the full tracked-review lifecycle with the native provisional id
+# mismatch. An idle completed review must continue with a new turn and delete
+# cleanly instead of treating the stale provisional id as active.
+: > "$APP_SERVER_LOG"
+review_mismatch_wrapper_out="$(PATH="$FAKE_CODEX_BIN:$PATH" FAKE_CODEX_PID_FILE="$FAKE_CODEX_PID_FILE" \
+    FAKE_APP_SERVER_SCENARIO=review-turn-id-mismatch FAKE_APP_SERVER_LOG="$APP_SERVER_LOG" \
+    "$SCRIPTS_DIR/codex-review-start.sh" --wait --uncommitted \
+    --workdir "$NONBLOCK_REPO" 2>&1)"; review_mismatch_wrapper_code=$?
+FAKE_MISMATCH_REVIEW_RUN_ID="$("$SCRIPTS_DIR/codex-review-list.sh" 2 | awk -F'\t' 'NR>1 && $2=="review" {print $1; exit}')"
+FAKE_MISMATCH_REVIEW_DIR="$CODEX_REVIEW_HOME/runs/$FAKE_MISMATCH_REVIEW_RUN_ID"
+FAKE_MISMATCH_REVIEW_SESSION="$(jq -r '.session_dir // ""' "$FAKE_MISMATCH_REVIEW_DIR/meta.json" 2>/dev/null)"
+FAKE_MISMATCH_REVIEW_HOST_PID="$(jq -r '.pid // ""' "$FAKE_MISMATCH_REVIEW_DIR/meta.json" 2>/dev/null)"
+review_mismatch_host_status="$(node "$SCRIPTS_DIR/codex-app-server.mjs" status \
+    --session-dir "$FAKE_MISMATCH_REVIEW_SESSION" 2>&1)"; review_mismatch_host_status_code=$?
+if [[ "$review_mismatch_wrapper_code" -eq 0 && "$review_mismatch_host_status_code" -eq 0 ]] \
+    && printf '%s' "$review_mismatch_host_status" | jq -e '.activeTurns == []' >/dev/null 2>&1; then
+    check "completed tracked review has no active turn after mismatched start id" 0
+else
+    check "completed tracked review has no active turn after mismatched start id" 1 \
+        "review_exit=$review_mismatch_wrapper_code status=$review_mismatch_host_status output=$(printf '%s' "$review_mismatch_wrapper_out" | head -c 120)"
+fi
+
+: > "$APP_SERVER_LOG"
+review_mismatch_converse_out="$("$SCRIPTS_DIR/codex-review-converse.sh" \
+    "$FAKE_MISMATCH_REVIEW_RUN_ID" "continue after review" 2>&1)"; review_mismatch_converse_code=$?
+if [[ "$review_mismatch_converse_code" -eq 0 ]] \
+    && jq -e 'select(.method == "turn/start") | .params.input[0].text == "continue after review"' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+    && ! jq -e 'select(.method == "turn/steer")' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+    check "converse starts a new turn after mismatched review completion" 0
+else
+    check "converse starts a new turn after mismatched review completion" 1 \
+        "exit=$review_mismatch_converse_code output=$(printf '%s' "$review_mismatch_converse_out" | head -c 160)"
+fi
+
+review_mismatch_delete_out="$("$SCRIPTS_DIR/codex-delete.sh" "$FAKE_MISMATCH_REVIEW_RUN_ID" 2>&1)"; review_mismatch_delete_code=$?
+if [[ "$review_mismatch_delete_code" -eq 0 && ! -d "$FAKE_MISMATCH_REVIEW_DIR" ]] \
+    && [[ -n "$FAKE_MISMATCH_REVIEW_HOST_PID" ]] \
+    && ! kill -0 "$FAKE_MISMATCH_REVIEW_HOST_PID" 2>/dev/null; then
+    check "delete shuts down idle host after mismatched review completion" 0
+else
+    check "delete shuts down idle host after mismatched review completion" 1 \
+        "exit=$review_mismatch_delete_code output=$(printf '%s' "$review_mismatch_delete_out" | head -c 160)"
+    [[ -n "$FAKE_MISMATCH_REVIEW_RUN_ID" ]] \
+        && "$SCRIPTS_DIR/codex-delete.sh" "$FAKE_MISMATCH_REVIEW_RUN_ID" --force >/dev/null 2>&1 || true
+fi
+
 nonblock_out="$(
-    PATH="$FAKE_CODEX_BIN:$PATH" FAKE_CODEX_PID_FILE="$FAKE_CODEX_PID_FILE" timeout 10 bash -c '
-        out="$("$1/codex-exec-start.sh" --workdir "$2" "fake slow worker")"
+    PATH="$FAKE_CODEX_BIN:$PATH" FAKE_CODEX_PID_FILE="$FAKE_CODEX_PID_FILE" FAKE_APP_SERVER_SCENARIO=hold timeout 10 bash -c '
+        out="$("$1/codex-exec-start.sh" --workdir "$2" --sandbox read-only "fake slow worker")"
         printf "%s\n" "$out"
     ' _ "$SCRIPTS_DIR" "$NONBLOCK_REPO" 2>&1
 )"
@@ -230,9 +1470,92 @@ else
     check "exec-start command substitution returns before worker finishes" 1 "exit=$code output: $(printf '%s' "$nonblock_out" | head -c 200)"
 fi
 if [[ -n "$NONBLOCK_RUN_ID" ]]; then
+    NONBLOCK_CONTROL_DIR="$(jq -r '.session_dir // ""' "$CODEX_REVIEW_HOME/runs/$NONBLOCK_RUN_ID/meta.json")"
+    if [[ "$NONBLOCK_CONTROL_DIR" == "$CODEX_REVIEW_HOME/runs/$NONBLOCK_RUN_ID/app-server-session" && -f "$NONBLOCK_CONTROL_DIR/state.json" ]]; then
+        check "tracked exec exposes its persistent App Server session" 0
+    else
+        check "tracked exec exposes its persistent App Server session" 1 "dir=$NONBLOCK_CONTROL_DIR"
+    fi
+    active_converse_out="$("$SCRIPTS_DIR/codex-review-converse.sh" "$NONBLOCK_RUN_ID" "focus on the active test" 2>&1)"; code=$?
+    if [[ "$code" -eq 0 ]] && jq -e 'select(.method == "turn/steer") | .params.input[0].text == "focus on the active test"' "$APP_SERVER_LOG" >/dev/null 2>&1; then
+        check "converse steers a running turn on its owning connection" 0
+    else
+        check "converse steers a running turn on its owning connection" 1 "exit=$code output: $(printf '%s' "$active_converse_out" | head -c 200)"
+    fi
     "$SCRIPTS_DIR/codex-exec-stop.sh" "$NONBLOCK_RUN_ID" >/dev/null 2>&1 || true
     "$SCRIPTS_DIR/codex-delete.sh" "$NONBLOCK_RUN_ID" --force >/dev/null 2>&1 || true
 fi
+
+# The tracked wrapper records the persistent host in pid and its short-lived
+# turn waiter in turn_client_pid. If only that waiter is killed after turn
+# acceptance, the host still finishes the accepted work and writes the report.
+# Status may reconcile only after the host proves every turn, request, and
+# local lease is idle.
+orphan_out="$(
+    PATH="$FAKE_CODEX_BIN:$PATH" FAKE_CODEX_PID_FILE="$FAKE_CODEX_PID_FILE" \
+        FAKE_APP_SERVER_SCENARIO=delayed-complete timeout 10 \
+        "$SCRIPTS_DIR/codex-exec-start.sh" --workdir "$NONBLOCK_REPO" --sandbox read-only \
+        "finish after the tracked waiter exits" 2>&1
+)"; orphan_start_code=$?
+ORPHAN_RUN_ID="$(printf '%s' "$orphan_out" | awk '/^run_id:/ {print $2; exit}')"
+ORPHAN_META="$CODEX_REVIEW_HOME/runs/$ORPHAN_RUN_ID/meta.json"
+ORPHAN_SESSION="$(jq -r '.session_dir // empty' "$ORPHAN_META" 2>/dev/null)"
+ORPHAN_CLIENT_PID="$(jq -r '.turn_client_pid // empty' "$ORPHAN_META" 2>/dev/null)"
+for _ in $(seq 1 100); do
+    jq -e '.activeTurns | length == 1 and .leaseCount >= 1' "$ORPHAN_SESSION/state.json" >/dev/null 2>&1 && break
+    sleep 0.02
+done
+printf 'premature report marker\n' > "$CODEX_REVIEW_HOME/runs/$ORPHAN_RUN_ID/report.md"
+orphan_live_status="$(timeout 5 "$SCRIPTS_DIR/codex-status.sh" "$ORPHAN_RUN_ID" --json 2>&1)"
+if printf '%s' "$orphan_live_status" | jq -e '.status == "running"' >/dev/null 2>&1; then
+    check "status does not reconcile while the tracked turn client is alive" 0
+else
+    check "status does not reconcile while the tracked turn client is alive" 1 \
+        "status=$(printf '%s' "$orphan_live_status" | head -c 200)"
+fi
+[[ -n "$ORPHAN_CLIENT_PID" ]] && kill -9 "$ORPHAN_CLIENT_PID" 2>/dev/null || true
+for _ in $(seq 1 100); do
+    ! kill -0 "$ORPHAN_CLIENT_PID" 2>/dev/null && break
+    sleep 0.02
+done
+orphan_active_status="$(timeout 5 "$SCRIPTS_DIR/codex-status.sh" "$ORPHAN_RUN_ID" --json 2>&1)"
+if printf '%s' "$orphan_active_status" | jq -e '.status == "running" and (.active_turns > 0)' >/dev/null 2>&1; then
+    check "status does not reconcile while the persistent host has active work" 0
+else
+    check "status does not reconcile while the persistent host has active work" 1 \
+        "status=$(printf '%s' "$orphan_active_status" | head -c 200)"
+fi
+for _ in $(seq 1 250); do
+    if [[ -s "$CODEX_REVIEW_HOME/runs/$ORPHAN_RUN_ID/report.md" ]] \
+        && jq -e '.status == "ready" and .activeTurns == [] and .pendingRequests == [] and .leaseCount == 0' \
+            "$ORPHAN_SESSION/state.json" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.02
+done
+# Reproduce the metadata state left when the killed waiter cannot persist its
+# own terminal update. The host and report are real outputs from the accepted
+# wrapper turn above.
+(
+    source "$SCRIPTS_DIR/_helpers.sh"
+    codex_review_set_meta_field "$ORPHAN_RUN_ID" status "running"
+)
+orphan_status="$(timeout 5 "$SCRIPTS_DIR/codex-status.sh" "$ORPHAN_RUN_ID" --json 2>&1)"; orphan_status_code=$?
+orphan_persisted="$(jq -r '.status' "$ORPHAN_META" 2>/dev/null)"
+orphan_converse="$(timeout 8 "$SCRIPTS_DIR/codex-review-converse.sh" \
+    "$ORPHAN_RUN_ID" "continue after reconciliation" 2>&1)"; orphan_converse_code=$?
+if [[ "$orphan_start_code" -eq 0 && "$orphan_status_code" -eq 0 && "$orphan_converse_code" -eq 0 ]] \
+    && [[ "$orphan_persisted" == "completed" ]] \
+    && printf '%s' "$orphan_status" | jq -e '.status == "completed" and .host_status == "ready" and .active_turns == 0 and .pending_requests == 0' >/dev/null 2>&1 \
+    && printf '%s' "$orphan_converse" | grep -qF "DELAYED_COMPLETE_OK" \
+    && jq -e '.status == "ready"' "$ORPHAN_SESSION/state.json" >/dev/null 2>&1; then
+    check "status reconciles an orphaned turn waiter after the persistent host becomes idle" 0
+else
+    check "status reconciles an orphaned turn waiter after the persistent host becomes idle" 1 \
+        "start=$orphan_start_code status=$orphan_status_code persisted=$orphan_persisted converse=$orphan_converse_code status_out=$(printf '%s' "$orphan_status" | head -c 200) converse_out=$(printf '%s' "$orphan_converse" | head -c 160)"
+fi
+[[ -n "$ORPHAN_RUN_ID" ]] \
+    && "$SCRIPTS_DIR/codex-delete.sh" "$ORPHAN_RUN_ID" --force >/dev/null 2>&1 || true
 if [[ -f "$FAKE_CODEX_PID_FILE" ]]; then
     while IFS= read -r fake_pid; do
         kill "$fake_pid" 2>/dev/null || true
@@ -424,6 +1747,33 @@ else
     check "status reconciles a dead exec with a report as completed" 1 "persisted=$persisted_status got: $(printf '%s' "$out" | head -c 200)"
 fi
 
+# New tracked metadata must not use the report alone while the persistent
+# host still has a reverse request or another accepted local command.
+fabricate_exec_run "fake-exec-busy-report" "$WEDGE_PID" "00000000-0000-0000-0000-000000000000"
+BUSY_REPORT_DIR="$CODEX_REVIEW_HOME/runs/fake-exec-busy-report/session"
+(
+    source "$SCRIPTS_DIR/_helpers.sh"
+    codex_review_set_meta_field "fake-exec-busy-report" turn_client_pid 999999 number
+    codex_review_set_meta_field "fake-exec-busy-report" session_dir "$BUSY_REPORT_DIR"
+)
+printf 'done-looking report\n' > "$CODEX_REVIEW_HOME/runs/fake-exec-busy-report/report.md"
+mkdir -p "$BUSY_REPORT_DIR"
+jq -n '{status:"ready",activeTurns:[],pendingRequests:[{requestId:"1"}],leaseCount:0}' > "$BUSY_REPORT_DIR/state.json"
+out="$("$SCRIPTS_DIR/codex-status.sh" fake-exec-busy-report --json 2>&1)"
+if printf '%s' "$out" | jq -e '.status == "running" and .pending_requests == 1' >/dev/null 2>&1; then
+    check "status does not reconcile while a reverse request is pending" 0
+else
+    check "status does not reconcile while a reverse request is pending" 1 "got: $(printf '%s' "$out" | head -c 200)"
+fi
+jq -n '{status:"ready",activeTurns:[],pendingRequests:[],leaseCount:1}' > "$BUSY_REPORT_DIR/state.json"
+out="$("$SCRIPTS_DIR/codex-status.sh" fake-exec-busy-report --json 2>&1)"
+if printf '%s' "$out" | jq -e '.status == "running"' >/dev/null 2>&1 \
+    && [[ "$(jq -r '.status' "$CODEX_REVIEW_HOME/runs/fake-exec-busy-report/meta.json")" == "running" ]]; then
+    check "status does not reconcile while another local command lease is active" 0
+else
+    check "status does not reconcile while another local command lease is active" 1 "got: $(printf '%s' "$out" | head -c 200)"
+fi
+
 # Machine-readable form for coordinators.
 out="$("$SCRIPTS_DIR/codex-exec-status.sh" fake-exec-dead --json 2>&1)"
 if printf '%s' "$out" | jq -e '.verdict == "dead" and .kind == "exec" and .codex_pid == null and .network_active == false and .child_cmd_running == false' >/dev/null 2>&1; then
@@ -459,6 +1809,59 @@ if printf '%s' "$out" | jq -e '.kind == "review" and .verdict == "wedged" and (.
     check "status advice for wedged review uses delete force" 0
 else
     check "status advice for wedged review uses delete force" 1 "got: $(printf '%s' "$out" | head -c 200)"
+fi
+
+# A killed tracked waiter must not make review-report --wait sleep forever.
+# It may wait for proven host activity, but idle or dead hosts without a
+# report are terminal failures. An idle host with a report still reconciles.
+for report_case in idle dead completed; do
+    report_run="fake-review-report-$report_case"
+    report_host_pid="$WEDGE_PID"
+    [[ "$report_case" == "dead" ]] && report_host_pid=999999
+    fabricate_review_run "$report_run" "$report_host_pid" "00000000-0000-0000-0000-000000000000"
+    report_session="$CODEX_REVIEW_HOME/runs/$report_run/session"
+    mkdir -p "$report_session"
+    (
+        source "$SCRIPTS_DIR/_helpers.sh"
+        codex_review_set_meta_field "$report_run" turn_client_pid 999998 number
+        codex_review_set_meta_field "$report_run" session_dir "$report_session"
+    )
+    report_host_status="ready"
+    [[ "$report_case" == "dead" ]] && report_host_status="closed"
+    jq -n --arg status "$report_host_status" --argjson pid "$report_host_pid" \
+        '{status:$status,pid:$pid,activeTurns:[],pendingRequests:[],leaseCount:0}' \
+        > "$report_session/state.json"
+    if [[ "$report_case" == "completed" ]]; then
+        printf 'RECONCILED_REVIEW_REPORT\n' > "$CODEX_REVIEW_HOME/runs/$report_run/report.md"
+    fi
+done
+
+idle_report_out="$(timeout 3 "$SCRIPTS_DIR/codex-review-report.sh" fake-review-report-idle --wait 2>&1)"; idle_report_code=$?
+if [[ "$idle_report_code" -ne 0 && "$idle_report_code" -ne 124 ]] \
+    && printf '%s' "$idle_report_out" | grep -qF "Report file not found"; then
+    check "review-report wait fails promptly for a dead waiter on an idle host without a report" 0
+else
+    check "review-report wait fails promptly for a dead waiter on an idle host without a report" 1 \
+        "exit=$idle_report_code output=$(printf '%s' "$idle_report_out" | head -c 160)"
+fi
+
+dead_report_out="$(timeout 3 "$SCRIPTS_DIR/codex-review-report.sh" fake-review-report-dead --wait 2>&1)"; dead_report_code=$?
+if [[ "$dead_report_code" -ne 0 && "$dead_report_code" -ne 124 ]] \
+    && printf '%s' "$dead_report_out" | grep -qF "Report file not found"; then
+    check "review-report wait fails promptly for a dead host without a report" 0
+else
+    check "review-report wait fails promptly for a dead host without a report" 1 \
+        "exit=$dead_report_code output=$(printf '%s' "$dead_report_out" | head -c 160)"
+fi
+
+completed_report_out="$(timeout 3 "$SCRIPTS_DIR/codex-review-report.sh" fake-review-report-completed --wait 2>&1)"; completed_report_code=$?
+if [[ "$completed_report_code" -eq 0 ]] \
+    && printf '%s' "$completed_report_out" | grep -qF "RECONCILED_REVIEW_REPORT" \
+    && [[ "$(jq -r '.status' "$CODEX_REVIEW_HOME/runs/fake-review-report-completed/meta.json")" == "completed" ]]; then
+    check "review-report wait preserves completed orphan reconciliation" 0
+else
+    check "review-report wait preserves completed orphan reconciliation" 1 \
+        "exit=$completed_report_code output=$(printf '%s' "$completed_report_out" | head -c 160)"
 fi
 
 fabricate_mcp_run "fake-mcp-status" "$WEDGE_PID"
@@ -557,55 +1960,52 @@ fi
 out="$("$SCRIPTS_DIR/codex-review-converse.sh" fake-mcp-conv "hi" 2>&1)"; code=$?
 assert_exit_nonzero "converse refuses an MCP run" "$code" "$out" "Use codex-mcp-send.sh"
 
-# Resume must inherit the run's recorded effort/model. `codex exec resume` does
-# not carry them forward; without an explicit override it falls back to the
-# model's config default (e.g. xhigh for gpt-5.5), silently leaving the tier a
-# campaign was pinned to. A stub codex captures the assembled command so we can
-# assert the effort override the converse script passes on resume.
+# Resume must inherit the run's recorded effort and apply it to a new turn on
+# the existing App Server host, not to a newly spawned CLI process.
 EFFORT_STUB_BIN="$WORK/effort-stub-bin"
-export EFFORT_CAPTURE="$WORK/effort-capture.txt"
+EFFORT_RPC_LOG="$WORK/effort-rpc.jsonl"
+EFFORT_SESSION="$WORK/effort-session"
 mkdir -p "$EFFORT_STUB_BIN"
-cat > "$EFFORT_STUB_BIN/codex" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" > "$EFFORT_CAPTURE"
-out=""; prev=""
-for a in "$@"; do [[ "$prev" == "--output-last-message" ]] && out="$a"; prev="$a"; done
-[[ -n "$out" ]] && printf 'ack\n' > "$out"
-exit 0
-SH
-chmod +x "$EFFORT_STUB_BIN/codex"
+ln -s "$TESTS_DIR/fake-codex-app-server.mjs" "$EFFORT_STUB_BIN/codex"
+PATH="$EFFORT_STUB_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=complete FAKE_APP_SERVER_LOG="$EFFORT_RPC_LOG" \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$EFFORT_SESSION" --approval decline >/dev/null 2>&1
 effort_set() { ( source "$SCRIPTS_DIR/_helpers.sh"; codex_review_set_meta_field "$@" ); }
 
 fabricate_exec_run "fake-exec-effort" "" "00000000-0000-0000-0000-000000000042"
 effort_set fake-exec-effort status "completed"
 effort_set fake-exec-effort effort "medium"
-PATH="$EFFORT_STUB_BIN:$PATH" "$SCRIPTS_DIR/codex-review-converse.sh" fake-exec-effort "hi" >/dev/null 2>&1 || true
-if grep -q 'model_reasoning_effort=medium' "$EFFORT_CAPTURE" 2>/dev/null; then
+effort_set fake-exec-effort session_dir "$EFFORT_SESSION"
+: > "$EFFORT_RPC_LOG"
+"$SCRIPTS_DIR/codex-review-converse.sh" fake-exec-effort "hi" >/dev/null 2>&1 || true
+if jq -e 'select(.method == "turn/start") | .params.effort == "medium"' "$EFFORT_RPC_LOG" >/dev/null 2>&1; then
     check "converse resume inherits the run's recorded effort" 0
 else
-    check "converse resume inherits the run's recorded effort" 1 "cmd: $(head -c 200 "$EFFORT_CAPTURE" 2>/dev/null)"
+    check "converse resume inherits the run's recorded effort" 1 "rpc: $(tail -c 300 "$EFFORT_RPC_LOG" 2>/dev/null)"
 fi
 
-PATH="$EFFORT_STUB_BIN:$PATH" "$SCRIPTS_DIR/codex-review-converse.sh" fake-exec-effort --effort high "hi" >/dev/null 2>&1 || true
-if grep -q 'model_reasoning_effort=high' "$EFFORT_CAPTURE" 2>/dev/null && ! grep -q 'model_reasoning_effort=medium' "$EFFORT_CAPTURE" 2>/dev/null; then
+: > "$EFFORT_RPC_LOG"
+"$SCRIPTS_DIR/codex-review-converse.sh" fake-exec-effort --effort high "hi" >/dev/null 2>&1 || true
+if jq -e 'select(.method == "turn/start") | .params.effort == "high"' "$EFFORT_RPC_LOG" >/dev/null 2>&1; then
     check "converse --effort overrides the recorded effort" 0
 else
-    check "converse --effort overrides the recorded effort" 1 "cmd: $(head -c 200 "$EFFORT_CAPTURE" 2>/dev/null)"
+    check "converse --effort overrides the recorded effort" 1 "rpc: $(tail -c 300 "$EFFORT_RPC_LOG" 2>/dev/null)"
 fi
 
 fabricate_exec_run "fake-exec-effort-none" "" "00000000-0000-0000-0000-000000000043"
 effort_set fake-exec-effort-none status "completed"
-PATH="$EFFORT_STUB_BIN:$PATH" "$SCRIPTS_DIR/codex-review-converse.sh" fake-exec-effort-none "hi" >/dev/null 2>&1 || true
-if grep -q 'model_reasoning_effort' "$EFFORT_CAPTURE" 2>/dev/null; then
-    check "converse forces no effort when the run recorded none" 1 "cmd: $(head -c 200 "$EFFORT_CAPTURE" 2>/dev/null)"
+effort_set fake-exec-effort-none session_dir "$EFFORT_SESSION"
+: > "$EFFORT_RPC_LOG"
+"$SCRIPTS_DIR/codex-review-converse.sh" fake-exec-effort-none "hi" >/dev/null 2>&1 || true
+if jq -e 'select(.method == "turn/start") | .params | has("effort")' "$EFFORT_RPC_LOG" >/dev/null 2>&1; then
+    check "converse forces no effort when the run recorded none" 1 "rpc: $(tail -c 300 "$EFFORT_RPC_LOG" 2>/dev/null)"
 else
     check "converse forces no effort when the run recorded none" 0
 fi
 
-rm -rf "$EFFORT_STUB_BIN" "$EFFORT_CAPTURE" "$CODEX_REVIEW_HOME/runs/fake-exec-effort" "$CODEX_REVIEW_HOME/runs/fake-exec-effort-none"
-unset EFFORT_CAPTURE
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$EFFORT_SESSION" >/dev/null 2>&1 || true
+rm -rf "$EFFORT_STUB_BIN" "$CODEX_REVIEW_HOME/runs/fake-exec-effort" "$CODEX_REVIEW_HOME/runs/fake-exec-effort-none"
 
-rm -rf "$CODEX_REVIEW_HOME/runs/fake-exec-wedged" "$CODEX_REVIEW_HOME/runs/fake-exec-stalled" "$CODEX_REVIEW_HOME/runs/fake-exec-dead" "$CODEX_REVIEW_HOME/runs/fake-exec-report-complete" "$CODEX_REVIEW_HOME/runs/fake-exec-baseline" "$CODEX_REVIEW_HOME/runs/fake-exec-heartbeat-running" "$CODEX_REVIEW_HOME/runs/fake-exec-baseline-none" "$CODEX_REVIEW_HOME/runs/fake-review-status" "$CODEX_REVIEW_HOME/runs/fake-review-wedged" "$CODEX_REVIEW_HOME/runs/fake-mcp-status" "$CODEX_REVIEW_HOME/runs/fake-mcp-conv" "$CODEX_REVIEW_HOME/runs/fake-mcp-thread"
+rm -rf "$CODEX_REVIEW_HOME/runs/fake-exec-wedged" "$CODEX_REVIEW_HOME/runs/fake-exec-stalled" "$CODEX_REVIEW_HOME/runs/fake-exec-dead" "$CODEX_REVIEW_HOME/runs/fake-exec-report-complete" "$CODEX_REVIEW_HOME/runs/fake-exec-busy-report" "$CODEX_REVIEW_HOME/runs/fake-exec-baseline" "$CODEX_REVIEW_HOME/runs/fake-exec-heartbeat-running" "$CODEX_REVIEW_HOME/runs/fake-exec-baseline-none" "$CODEX_REVIEW_HOME/runs/fake-review-status" "$CODEX_REVIEW_HOME/runs/fake-review-wedged" "$CODEX_REVIEW_HOME/runs/fake-review-report-idle" "$CODEX_REVIEW_HOME/runs/fake-review-report-dead" "$CODEX_REVIEW_HOME/runs/fake-review-report-completed" "$CODEX_REVIEW_HOME/runs/fake-mcp-status" "$CODEX_REVIEW_HOME/runs/fake-mcp-conv" "$CODEX_REVIEW_HOME/runs/fake-mcp-thread"
 
 # Delete contracts. Deletion needs no codex call, so the whole feature is
 # testable offline: guard rails first, then real removal, then --force
@@ -684,16 +2084,54 @@ fi
 
 command -v codex >/dev/null || { echo "codex CLI not found; cannot run live tests." >&2; exit 1; }
 
-# ---------------------------------------------------------------------------
-note "LIVE: review session lifecycle (exec runner: preset + config)"
-# ---------------------------------------------------------------------------
+LIVE_STATE_PARENT="${XDG_STATE_HOME:-$HOME/.local/state}/boring-but-good"
+LIVE_STATE_ROOT=""
+# shellcheck disable=SC2329  # Invoked by the EXIT trap.
+cleanup_live_state() {
+    if [[ "$KEEP" != "true" && -n "${LIVE_STATE_ROOT:-}" ]]; then
+        rm -rf "$LIVE_STATE_ROOT"
+    fi
+}
+trap cleanup_live_state EXIT
+mkdir -p "$LIVE_STATE_PARENT"
+LIVE_STATE_ROOT="$(mktemp -d "$LIVE_STATE_PARENT/codex-skill-tests.XXXXXX")"
+chmod 700 "$LIVE_STATE_ROOT"
+export CODEX_REVIEW_HOME="$LIVE_STATE_ROOT/review"
+export CODEX_APP_SERVER_AUTH_ROOT="$LIVE_STATE_ROOT/app-server-auth"
+mkdir -p "$CODEX_REVIEW_HOME" "$CODEX_APP_SERVER_AUTH_ROOT"
+chmod 700 "$CODEX_REVIEW_HOME" "$CODEX_APP_SERVER_AUTH_ROOT"
+
 make_fixture_repo
+live_roots_out="$(node --input-type=module -e '
+    import { pathToFileURL } from "node:url";
+    const module = await import(pathToFileURL(process.argv[1]));
+    await module.validateManagedControllerPlacement({
+      sandbox: "workspace-write",
+      workdir: process.argv[2],
+      sessionDir: process.argv[3],
+      credentialPath: process.argv[4],
+    });
+    process.stdout.write("LIVE_ROOTS_OK");
+  ' "$SCRIPTS_DIR/app-server-placement.mjs" "$FIXTURE_REPO" \
+    "$CODEX_REVIEW_HOME" "$CODEX_APP_SERVER_AUTH_ROOT" 2>&1)"; live_roots_code=$?
+if [[ "$live_roots_code" -eq 0 && "$live_roots_out" == "LIVE_ROOTS_OK" ]]; then
+    check "live tracked-run and authentication roots are outside every workspace-write root" 0
+else
+    check "live tracked-run and authentication roots are outside every workspace-write root" 1 \
+        "exit=$live_roots_code output=$(printf '%s' "$live_roots_out" | head -c 200)"
+    printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+note "LIVE: native App Server review lifecycle (preset + config)"
+# ---------------------------------------------------------------------------
 
 out="$("$SCRIPTS_DIR/codex-review-start.sh" --wait --uncommitted \
     --workdir "$FIXTURE_REPO" --preset adversarial \
     --config model_reasoning_effort=low \
     --title "test exec review" 2>&1)"; code=$?
-check "review --wait (exec runner) exits 0" "$code" "$(printf '%s' "$out" | tail -c 200)"
+check "native review --wait exits 0" "$code" "$(printf '%s' "$out" | tail -c 200)"
 if [[ -n "$out" && "$code" -eq 0 ]]; then check "review --wait produced a report" 0; else check "review --wait produced a report" 1; fi
 
 WAIT_RUN_ID="$("$SCRIPTS_DIR/codex-review-list.sh" 2 | awk -F'\t' 'NR>1 && $2=="review" {print $1; exit}')"
@@ -705,14 +2143,16 @@ assert_contains "review status shows completed" "$status_out" "completed"
 report_out="$("$SCRIPTS_DIR/codex-review-report.sh" "$WAIT_RUN_ID" 2>&1)"; code=$?
 if [[ "$code" -eq 0 && -n "$report_out" ]]; then check "review report prints" 0; else check "review report prints" 1 "exit=$code"; fi
 
-# Prompt-delivery proof: the preset text must appear in the codex session
-# rollout on disk. Guards the `codex exec review -` stdin contract; without
-# the trailing `-` the whole prompt is silently dropped and reviews come back
-# generic (found live 2026-07-03).
-WAIT_THREAD="$(jq -r '.thread_id' "$CODEX_REVIEW_HOME/runs/$WAIT_RUN_ID/meta.json")"
-ROLLOUT="$(find "${CODEX_HOME:-$HOME/.codex}/sessions" -name "*${WAIT_THREAD}*.jsonl" 2>/dev/null | head -1)"
-[[ -n "$ROLLOUT" ]] && grep -qF "always P0, never lower" "$ROLLOUT"
-check "adversarial preset prompt reached the codex session" $?
+# Protocol proof: native review mode must enter and exit on the event stream.
+# The following P0 assertion is the behavioral proof that the preset rubric
+# affected the reviewer, without depending on private rollout file layout.
+WAIT_LOG="$(jq -r '.log_file' "$CODEX_REVIEW_HOME/runs/$WAIT_RUN_ID/meta.json")"
+if jq -e 'select(.method == "item/started" and .params.item.type == "enteredReviewMode")' "$WAIT_LOG" >/dev/null 2>&1 \
+    && jq -e 'select(.method == "item/completed" and .params.item.type == "exitedReviewMode")' "$WAIT_LOG" >/dev/null 2>&1; then
+    check "native review streams entered and exited review mode" 0
+else
+    check "native review streams entered and exited review mode" 1
+fi
 
 # Behavioral check on the rubric: the planted crash on a documented valid
 # input must be labeled P0.
@@ -724,7 +2164,7 @@ conv_out="$("$SCRIPTS_DIR/codex-review-converse.sh" "$WAIT_RUN_ID" \
 assert_contains "converse continues the review thread" "$conv_out" "ACK"
 
 # ---------------------------------------------------------------------------
-note "LIVE: review session lifecycle (background + direct runner)"
+note "LIVE: native App Server review lifecycle (background + commit target)"
 # ---------------------------------------------------------------------------
 
 start_out="$("$SCRIPTS_DIR/codex-review-start.sh" --uncommitted \
@@ -750,9 +2190,9 @@ commit_out="$("$SCRIPTS_DIR/codex-review-start.sh" --wait --commit HEAD \
     --workdir "$FIXTURE_REPO" \
     --config model_reasoning_effort=low 2>&1)"; code=$?
 if [[ "$code" -eq 0 && -n "$commit_out" ]]; then
-    check "review --wait --commit (direct runner) produces output" 0
+    check "review --wait --commit produces output" 0
 else
-    check "review --wait --commit (direct runner) produces output" 1 "exit=$code: $(printf '%s' "$commit_out" | head -c 200)"
+    check "review --wait --commit produces output" 1 "exit=$code: $(printf '%s' "$commit_out" | head -c 200)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -800,106 +2240,93 @@ exec_conv="$("$SCRIPTS_DIR/codex-review-converse.sh" "$EXEC_RUN_ID" \
 assert_contains "converse continues the exec worker session" "$exec_conv" "ACK"
 
 out="$("$SCRIPTS_DIR/codex-exec-stop.sh" "$EXEC_RUN_ID" 2>&1)"; code=$?
-if [[ "$code" -eq 0 ]] && printf '%s' "$out" | grep -q "was not running"; then
-    check "exec-stop on a finished worker is a safe no-op" 0
+if [[ "$code" -eq 0 ]] && printf '%s' "$out" | grep -q "Stopped exec worker and App Server session"; then
+    check "exec-stop closes the persistent host after a finished turn" 0
 else
-    check "exec-stop on a finished worker is a safe no-op" 1 "exit=$code: $(printf '%s' "$out" | head -c 200)"
+    check "exec-stop closes the persistent host after a finished turn" 1 "exit=$code: $(printf '%s' "$out" | head -c 200)"
 fi
 
 # ---------------------------------------------------------------------------
-note "LIVE: MCP server multi-turn conversation"
+note "LIVE: direct App Server lifecycle and active-turn control"
 # ---------------------------------------------------------------------------
 
-mcp_out="$("$SCRIPTS_DIR/codex-mcp-start.sh" --workdir "$FIXTURE_REPO" \
-    --title "test mcp" --sandbox read-only 2>&1)"; code=$?
-check "mcp-start reaches ready" "$code" "$(printf '%s' "$mcp_out" | tail -c 200)"
-MCP_RUN_ID="$(printf '%s' "$mcp_out" | awk '/^run_id:/ {print $2; exit}')"
-[[ -n "$MCP_RUN_ID" ]]; check "mcp-start prints run_id" $?
+LIVE_APP_DIR="$WORK/live-app-server"
+mkdir -p "$LIVE_APP_DIR"
+LIVE_SESSION_DIR="$LIVE_APP_DIR/session"
+LIVE_SESSION_EVENTS="$LIVE_APP_DIR/session-events.jsonl"
 
-t1="$("$SCRIPTS_DIR/codex-mcp-send.sh" "$MCP_RUN_ID" --timeout 300 \
-    --config model_reasoning_effort=low \
-    "The codeword is MANGO. Acknowledge with exactly: STORED" 2>&1)"; code=$?
-assert_contains "mcp turn 1 answers" "$t1" "STORED"
+node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$LIVE_SESSION_DIR" \
+    --events "$LIVE_SESSION_EVENTS" --approval decline >/dev/null 2>&1; code=$?
+check "live persistent App Server host starts" "$code"
 
-CODEWORD_THREAD="$(jq -r '.thread_id' "$CODEX_REVIEW_HOME/runs/$MCP_RUN_ID/meta.json")"
-[[ -n "$CODEWORD_THREAD" && "$CODEWORD_THREAD" != "null" ]]; check "thread_id recorded after turn 1" $?
-
-t2="$("$SCRIPTS_DIR/codex-mcp-send.sh" "$MCP_RUN_ID" --timeout 300 \
-    "What is the codeword? Reply with only the codeword." 2>&1)"; code=$?
-assert_contains "mcp turn 2 proves context continuity" "$t2" "MANGO"
-
-out="$("$SCRIPTS_DIR/codex-mcp-send.sh" "$MCP_RUN_ID" --preset adversarial "hi" 2>&1)"; code=$?
-assert_exit_nonzero "mcp-send rejects --preset on a continuation turn" "$code" "$out" "thread-opening turn"
-
-t3="$("$SCRIPTS_DIR/codex-mcp-send.sh" "$MCP_RUN_ID" --timeout 600 \
-    --new-thread --preset adversarial \
-    --config model_reasoning_effort=low \
-    "Review the uncommitted change to discount.py in this repository. State your single strongest finding in at most two sentences." 2>&1)"; code=$?
-if [[ "$code" -eq 0 && -n "$t3" ]]; then check "mcp --new-thread --preset adversarial turn answers" 0; else check "mcp --new-thread --preset adversarial turn answers" 1 "exit=$code: $(printf '%s' "$t3" | head -c 200)"; fi
-
-NEW_THREAD="$(jq -r '.thread_id' "$CODEX_REVIEW_HOME/runs/$MCP_RUN_ID/meta.json")"
-[[ -n "$NEW_THREAD" && "$NEW_THREAD" != "$CODEWORD_THREAD" ]]; check "--new-thread switched to a new thread" $?
-
-# Isolation, the flip side of continuity: the new thread must NOT know the
-# old thread's codeword. A same-server context leak would pass every
-# continuity check while being exactly the bug users fear.
-t4="$("$SCRIPTS_DIR/codex-mcp-send.sh" "$MCP_RUN_ID" --timeout 300 \
-    "What is the codeword? If no codeword was given earlier in this conversation, reply with exactly: UNKNOWN" 2>&1)"; code=$?
-if printf '%s' "$t4" | grep -q "UNKNOWN" && ! printf '%s' "$t4" | grep -q "MANGO"; then
-    check "new thread does not know the old thread's codeword" 0
+model_out="$(node "$SCRIPTS_DIR/codex-app-server.mjs" request --session-dir "$LIVE_SESSION_DIR" --method model/list 2>&1)"; code=$?
+if [[ "$code" -eq 0 ]] && printf '%s' "$model_out" | jq -e '.data | length > 0' >/dev/null 2>&1; then
+    check "live app-server model/list handshake succeeds" 0
 else
-    check "new thread does not know the old thread's codeword" 1 "got: $(printf '%s' "$t4" | head -c 200)"
+    check "live app-server model/list handshake succeeds" 1 "exit=$code: $(printf '%s' "$model_out" | head -c 200)"
 fi
 
-turn_files="$(find "$CODEX_REVIEW_HOME/runs/$MCP_RUN_ID/conversations" -name 'turn-*.md' | wc -l)"
-(( turn_files >= 4 )); check "turn transcripts archived (found $turn_files)" $?
+CODEWORD_THREAD_FILE="$LIVE_APP_DIR/codeword-thread.id"
+t1="$(node "$SCRIPTS_DIR/codex-app-server.mjs" turn --new \
+    --session-dir "$LIVE_SESSION_DIR" \
+    --prompt "The codeword is MANGO. Reply with exactly STORED." \
+    --workdir "$LIVE_APP_DIR" --sandbox read-only --effort low \
+    --thread-out "$CODEWORD_THREAD_FILE" 2>&1)"; code=$?
+assert_contains "live app-server new turn answers" "$t1" "STORED"
+CODEWORD_THREAD="$(tr -d '[:space:]' < "$CODEWORD_THREAD_FILE")"
+[[ -n "$CODEWORD_THREAD" ]]; check "live app-server persists thread id" $?
 
-mcp_status="$("$SCRIPTS_DIR/codex-mcp-status.sh" "$MCP_RUN_ID" 2>&1)"
-assert_contains "mcp-status shows live server" "$mcp_status" "server_alive: true"
-assert_contains "mcp-status shows turn count" "$mcp_status" "turn_count: 4"
+t2="$(node "$SCRIPTS_DIR/codex-app-server.mjs" turn --thread "$CODEWORD_THREAD" \
+    --session-dir "$LIVE_SESSION_DIR" \
+    --prompt "What is the codeword? Reply with only the codeword." \
+    --workdir "$LIVE_APP_DIR" --sandbox read-only --effort low 2>&1)"; code=$?
+assert_contains "live app-server resume proves context continuity" "$t2" "MANGO"
+
+node "$SCRIPTS_DIR/codex-app-server.mjs" turn --session-dir "$LIVE_SESSION_DIR" --new \
+    --prompt "Write a numbered list from 1 to 200 about software testing, one sentence per item. Do not use tools." \
+    --workdir "$LIVE_APP_DIR" --sandbox read-only --effort low \
+    >"$LIVE_APP_DIR/steer-turn.json" 2>"$LIVE_APP_DIR/steer-turn.err" &
+LIVE_CONTROL_PID=$!
+for _ in $(seq 1 300); do jq -e '.activeTurns | length == 1' "$LIVE_SESSION_DIR/state.json" >/dev/null 2>&1 && break; sleep 0.1; done
+steer_out="$(node "$SCRIPTS_DIR/codex-app-server.mjs" steer --session-dir "$LIVE_SESSION_DIR" \
+    --prompt "Stop the list and reply with exactly STEER_LIVE_OK." 2>&1)"; steer_code=$?
+if wait "$LIVE_CONTROL_PID"; then live_turn_code=0; else live_turn_code=$?; fi
+if [[ "$steer_code" -eq 0 && "$live_turn_code" -eq 0 ]] && grep -qF "STEER_LIVE_OK" "$LIVE_APP_DIR/steer-turn.json"; then
+    check "live same-connection steering succeeds" 0
+else
+    check "live same-connection steering succeeds" 1 "steer_exit=$steer_code turn_exit=$live_turn_code control: $(printf '%s' "$steer_out" | head -c 120) turn: $(head -c 120 "$LIVE_APP_DIR/steer-turn.err")"
+fi
+
+node "$SCRIPTS_DIR/codex-app-server.mjs" turn --session-dir "$LIVE_SESSION_DIR" --new \
+    --prompt "Write a numbered list from 1 to 200 about software testing, one sentence per item. Do not use tools." \
+    --workdir "$LIVE_APP_DIR" --sandbox read-only --effort low \
+    >"$LIVE_APP_DIR/interrupt-turn.json" 2>"$LIVE_APP_DIR/interrupt-turn.err" &
+LIVE_CONTROL_PID=$!
+for _ in $(seq 1 300); do jq -e '.activeTurns | length == 1' "$LIVE_SESSION_DIR/state.json" >/dev/null 2>&1 && break; sleep 0.1; done
+interrupt_out="$(node "$SCRIPTS_DIR/codex-app-server.mjs" interrupt --session-dir "$LIVE_SESSION_DIR" 2>&1)"; interrupt_code=$?
+if wait "$LIVE_CONTROL_PID"; then live_turn_code=0; else live_turn_code=$?; fi
+if [[ "$interrupt_code" -eq 0 && "$live_turn_code" -ne 0 ]] \
+    && jq -e 'select(.method == "turn/completed") | .params.turn.status == "interrupted"' "$LIVE_SESSION_EVENTS" >/dev/null 2>&1; then
+    check "live same-connection interruption reaches terminal state" 0
+else
+    check "live same-connection interruption reaches terminal state" 1 "interrupt_exit=$interrupt_code turn_exit=$live_turn_code output: $(printf '%s' "$interrupt_out" | head -c 200)"
+fi
+
+live_session_status="$(node "$SCRIPTS_DIR/codex-app-server.mjs" status --session-dir "$LIVE_SESSION_DIR" 2>&1)"; code=$?
+if [[ "$code" -eq 0 ]] && printf '%s' "$live_session_status" | jq -e '.status == "ready" and .processAlive == true and .activeTurns == []' >/dev/null 2>&1; then
+    check "live host remains ready after multiple terminal turns" 0
+else
+    check "live host remains ready after multiple terminal turns" 1 "status=$live_session_status"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$LIVE_SESSION_DIR" >/dev/null 2>&1
 
 list_out="$("$SCRIPTS_DIR/codex-review-list.sh" 10 2>&1)"
-assert_contains "list shows mcp kind" "$list_out" "mcp"
 assert_contains "list shows review kind" "$list_out" "review"
 assert_contains "list shows exec kind" "$list_out" "exec"
 
 # ---------------------------------------------------------------------------
-note "LIVE: MCP stop + disk-resume recovery"
-# ---------------------------------------------------------------------------
-
-stop_out="$("$SCRIPTS_DIR/codex-mcp-stop.sh" "$MCP_RUN_ID" 2>&1)"; code=$?
-check "mcp-stop exits 0" "$code"
-MCP_PID="$(jq -r '.pid' "$CODEX_REVIEW_HOME/runs/$MCP_RUN_ID/meta.json")"
-! kill -0 "$MCP_PID" 2>/dev/null; check "server process is gone" $?
-
-out="$("$SCRIPTS_DIR/codex-mcp-send.sh" "$MCP_RUN_ID" "hello again" 2>&1)"; code=$?
-assert_exit_nonzero "mcp-send after stop points at disk resume" "$code" "$out" "codex exec resume"
-
-# Stop must not remove the session: the run stays listed as stopped with its
-# data intact until an explicit delete.
-list_after_stop="$("$SCRIPTS_DIR/codex-review-list.sh" 20 2>&1)"
-printf '%s' "$list_after_stop" | grep -F -- "$MCP_RUN_ID" | grep -q "stopped"
-check "stopped run stays listed with status stopped" $?
-[[ -d "$CODEX_REVIEW_HOME/runs/$MCP_RUN_ID/conversations" ]]
-check "stopped run keeps its transcripts on disk" $?
-
-resume_out="$(codex exec resume "$CODEWORD_THREAD" --json \
-    -c model_reasoning_effort=low \
-    -o "$WORK/resume-recall.txt" \
-    "What is the codeword? Reply with only the codeword." 2>&1 >/dev/null; cat "$WORK/resume-recall.txt" 2>/dev/null)"
-assert_contains "stopped thread recovers via codex exec resume" "$resume_out" "MANGO"
-
-# ---------------------------------------------------------------------------
 note "LIVE: delete cleans up real runs"
 # ---------------------------------------------------------------------------
-
-del_out="$("$SCRIPTS_DIR/codex-delete.sh" "$MCP_RUN_ID" 2>&1)"; code=$?
-if [[ "$code" -eq 0 && ! -d "$CODEX_REVIEW_HOME/runs/$MCP_RUN_ID" ]]; then
-    check "delete removes the stopped MCP run" 0
-else
-    check "delete removes the stopped MCP run" 1 "exit=$code: $(printf '%s' "$del_out" | head -c 200)"
-fi
-assert_contains "delete prints the resumable thread id" "$del_out" "codex exec resume"
 
 del_out="$("$SCRIPTS_DIR/codex-delete.sh" "$BG_RUN_ID" 2>&1)"; code=$?
 if [[ "$code" -eq 0 && ! -d "$CODEX_REVIEW_HOME/runs/$BG_RUN_ID" ]]; then
@@ -916,7 +2343,7 @@ else
 fi
 
 list_out="$("$SCRIPTS_DIR/codex-review-list.sh" 20 2>&1)"
-if ! printf '%s' "$list_out" | grep -qF -- "$MCP_RUN_ID" && ! printf '%s' "$list_out" | grep -qF -- "$BG_RUN_ID"; then
+if ! printf '%s' "$list_out" | grep -qF -- "$BG_RUN_ID" && ! printf '%s' "$list_out" | grep -qF -- "$EXEC_RUN_ID"; then
     check "deleted runs no longer listed" 0
 else
     check "deleted runs no longer listed" 1
