@@ -48,6 +48,8 @@ Every `browser-tools` subcommand dispatches to the package's `scripts/` sources 
 | Start Chrome | `browser-tools start`, `browser-tools start --profile "<Chrome profile folder or local alias>"`, `browser-tools start --task <task>`, or `browser-tools start --headless` |
 | Check status | `browser-tools status`, `browser-tools status --port <n> --json` |
 | Stop Chrome | `browser-tools stop --clean` |
+| List running managed browsers | `browser-tools stop --status` |
+| Sweep leftover browsers and clones | `browser-tools stop --reap --dry-run`, then `browser-tools stop --prune` |
 | Navigate | `browser-tools nav https://example.com` |
 | Evaluate JavaScript | `browser-tools eval 'document.title'` |
 | Screenshot | `browser-tools screenshot --full` |
