@@ -18,6 +18,24 @@ Runtime retries are silent: a workflow journal with `started` entries lacking a 
 
 The old agent is stopped first. The replacement judges the partial work from the tree before anything else, and either builds on it or redoes it coherently; its call, coherence over salvage.
 
+## Concurrent mutation abort
+
+When an agent reports `BLOCKED_CONCURRENT_MUTATION`, freeze new work in that worktree and compare the coordinator's pre-dispatch snapshot, the agent's last safe state, and the current tree. Identify which writer moved HEAD or files before deciding what survives. Do not tell the blocked agent to continue, and do not let another agent reconcile foreign changes speculatively.
+
+If two planned writers shared one worktree, preserve their evidence and move retries into dedicated isolated worktrees with disjoint ownership. If the mutation came from an unplanned process or user edit, preserve it and report the collision; resume only from a stable baseline that does not overwrite that work.
+
+## Shared launch or configuration failure
+
+Treat identical zero-turn or zero-tool failures across parallel siblings as one shared launch or configuration failure, not several independent task failures. Inspect the runtime-resolved agent and child metadata before retrying.
+
+Read child transcript stderr as well as the top-level error. A generated tool-availability message, including an injected `intercom` complaint, can be secondary and can mask an earlier model-selection or provider-authentication failure.
+
+## Turn-budget classification failure
+
+A mutation-capable child exceeding a turn budget is not evidence that implementation failed. The runtime may defer termination during active tool work and reject the next terminal response even when the child has completed edits, tests, and a final summary. Inspect the worktree, diff, transcript tail, commands and results, and final response before deciding what remains. Preserve completed work and redo only what evidence shows is missing or unsound; do not blindly relaunch the whole task.
+
+If acceptance was skipped or the final response omitted its required report, evaluate delivery evidence separately from report compliance. Repair or re-request the handoff without treating a reporting failure as permission to overwrite a valid implementation.
+
 ## Resuming a killed Workflow run
 
 `resumeFromRunId` replays finished slices from cache; only live work re-runs. The implementer contract's idempotent re-entry exists for exactly this, so even a cache miss on a finished slice costs a green-confirmation, not a re-implementation.
