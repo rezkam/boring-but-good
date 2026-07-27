@@ -537,6 +537,11 @@ export function buildBrowserToolsConfig({ sourceDir = browserToolsChromeSourceDi
     },
     browser: {
       chromeBin: existingBrowser.chromeBin || browserToolsChromeBin(),
+      // Only carry an explicitly configured cap. Writing a default here would freeze the value and
+      // silently override a later change to the built-in limit.
+      ...(existingBrowser.maxBrowsers === undefined || existingBrowser.maxBrowsers === null
+        ? {}
+        : { maxBrowsers: existingBrowser.maxBrowsers }),
     },
     profiles: Object.fromEntries(profiles.map((profile) => [profile.folder, profile])),
     aliases: buildAliases(profiles),
@@ -937,6 +942,25 @@ export function parseProcessAgeMs(etime) {
 // path is user-configurable, so it can legitimately contain spaces ("/Volumes/My Drive/..."). Read
 // to the next " --" rather than to the next space: a \S+ capture truncates the path, the cache-dir
 // test then fails, and the browser silently disappears from the inventory.
+// Strip trailing separators so a configured cache dir of "/tmp/cache/" builds the same prefix that
+// join() produces when launching. Without this the prefix test becomes "/tmp/cache//chrome-", every
+// managed browser disappears from the inventory, and the cap silently stops applying.
+export function normalizeCacheDirPath(cacheDir) {
+  const value = String(cacheDir ?? '');
+  const trimmed = value.replace(/\/+$/, '');
+  return trimmed || value;
+}
+
+// Does this user-data-dir sit inside the cache dir as one of our clone directories? Compared on path
+// segments rather than raw text so a sibling like "/opt/cache-other" can never match "/opt/cache".
+export function isManagedCloneDir(userDataDir, cacheDir = browserToolsCacheDir()) {
+  if (!userDataDir) return false;
+  const root = normalizeCacheDirPath(cacheDir);
+  if (!userDataDir.startsWith(`${root}/`)) return false;
+  const rest = userDataDir.slice(root.length + 1);
+  return /^chrome-(?:data|fresh)-/.test(rest);
+}
+
 export function parseUserDataDirArg(command) {
   const match = String(command ?? '').match(/--user-data-dir=(.+?)(?=\s--|$)/);
   return match ? match[1].trim() : null;
@@ -951,12 +975,16 @@ export function managedChromeProcessFromCommand({ pid, etime = null, command, ca
   const portMatch = command.match(/--remote-debugging-port=(\d+)/);
   if (!portMatch) return null;
   const userDataDir = parseUserDataDirArg(command);
-  if (!userDataDir || !userDataDir.startsWith(`${cacheDir}/chrome-`)) return null;
+  if (!isManagedCloneDir(userDataDir, cacheDir)) return null;
+  const tokenMatch = command.match(/--pi-browser-tools-managed=(\S+)/);
   return {
     pid: Number.parseInt(String(pid), 10),
     port: normalizePort(portMatch[1]),
     ageMs: parseProcessAgeMs(etime),
     userDataDir,
+    // Per-launch UUID. Two different browsers never share one, so it pins process identity across
+    // a PID that may have been recycled between the scan and the signal.
+    managedToken: tokenMatch ? tokenMatch[1] : null,
     command,
   };
 }
@@ -975,6 +1003,18 @@ export function parseManagedChromeProcesses(psOutput, { cacheDir = browserToolsC
 
 // Is this PID, right now, still one of our managed browsers? Used immediately before sending a
 // signal so a recycled PID cannot be hit.
+// Is `current` the same browser the scan saw? A PID alone is not identity: it can be recycled by a
+// different managed Chrome, and signalling on PID-only would then kill a healthy browser.
+export function managedBrowserIdentityMatches(expected, current) {
+  if (!expected || !current) return false;
+  if (Number(expected.pid) !== Number(current.pid)) return false;
+  if (Number(expected.port) !== Number(current.port)) return false;
+  if (expected.userDataDir !== current.userDataDir) return false;
+  // The per-launch token is the strongest signal: a reused PID running a fresh Chrome has a new one.
+  if (expected.managedToken && current.managedToken && expected.managedToken !== current.managedToken) return false;
+  return true;
+}
+
 export function verifyManagedChromePid(pid, { cacheDir = browserToolsCacheDir(), chromeBin = browserToolsChromeBin() } = {}) {
   const command = commandForPid(pid);
   if (!command) return null;
@@ -1092,7 +1132,13 @@ export function orphanedManagedBrowsers(processes = listManagedChromeProcesses()
     if (existsSync(portLockDirForPort(entry.port))) return false;
     const state = readManagedState(stateFileForPort(entry.port));
     if (!state || state.managedBy !== 'browser-tools') return true;
-    return Number(state.pid) !== Number(entry.pid);
+    if (Number(state.pid) !== Number(entry.pid)) return true;
+    // Both lifecycle files must be present and agree. stopChrome refuses to manage a half-written
+    // pair, so sparing one here would leave the browser unreachable by stop *and* by reap.
+    const pidFile = pidFileForPort(entry.port);
+    if (!existsSync(pidFile)) return true;
+    const recordedPid = Number.parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
+    return recordedPid !== Number(entry.pid);
   });
 }
 
@@ -1111,7 +1157,7 @@ export function reapOrphanedChromes({ dryRun = false, processes = listManagedChr
     // since exited and the PID been recycled, an unguarded kill lands on something unrelated.
     // stopChrome already does this between SIGTERM and SIGKILL, and this path runs automatically on
     // every start, so it must be at least as careful.
-    if (!verifyManagedChromePid(orphan.pid)) {
+    if (!managedBrowserIdentityMatches(orphan, verifyManagedChromePid(orphan.pid))) {
       reaped.push({ ...orphan, status: processExists(orphan.pid) ? 'skipped-not-managed' : 'already-gone' });
       continue;
     }
@@ -1119,7 +1165,7 @@ export function reapOrphanedChromes({ dryRun = false, processes = listManagedChr
     try {
       process.kill(orphan.pid, 'SIGTERM');
       if (!waitForProcessExit(orphan.pid, 2000)) {
-        if (!verifyManagedChromePid(orphan.pid)) {
+        if (!managedBrowserIdentityMatches(orphan, verifyManagedChromePid(orphan.pid))) {
           reaped.push({ ...orphan, status: 'skipped-not-managed' });
           continue;
         }
@@ -1218,27 +1264,52 @@ export function managedBrowserStartupWarnings({
 // The one gate deciding whether an already-running managed browser may be adopted. Both the explicit
 // --port path and the auto-allocated path go through this: they used to diverge, and the
 // auto-allocated path skipped reuse entirely, so every bare `start` spawned another browser.
-export function managedBrowserReuseDecision({ safety, state, ownerToken, includeGoogle = false }) {
+export function managedBrowserReuseDecision({
+  safety,
+  state,
+  ownerToken,
+  includeGoogle = false,
+  profileName = null,
+  headless = false,
+  forceProfileSync = false,
+}) {
   if (!safety?.ok) return { ok: false, reason: safety?.reason || 'missing-managed-state' };
   const ownership = managedBrowserOwnershipSafety({ state, ownerToken });
   if (!ownership.ok) return { ok: false, reason: ownership.reason, ownerId: ownership.ownerId };
+  const fail = (reason) => ({ ok: false, reason, ownerId: ownership.ownerId });
   // Never adopt across Google modes: a stripped start must not inherit a Google-included browser
   // (logout risk for the source profile), and a Google workflow must not inherit a stripped one.
-  if (Boolean(state?.includeGoogle) !== Boolean(includeGoogle)) {
-    return { ok: false, reason: 'google-mode-mismatch', ownerId: ownership.ownerId };
-  }
+  if (Boolean(state?.includeGoogle) !== Boolean(includeGoogle)) return fail('google-mode-mismatch');
+  // --sync means "I want freshly copied credentials", so handing back a running browser built from
+  // an older copy would silently defeat the request.
+  if (forceProfileSync) return fail('sync-requested');
+  // Adopting a browser built from a different profile (or a fresh, signed-out clone) would run the
+  // caller's automation against the wrong account.
+  if ((state?.profileName || null) !== (profileName || null)) return fail('profile-mismatch');
+  // Headless is fixed at launch, so a windowed request cannot be served by a headless browser.
+  if (Boolean(state?.headless) !== Boolean(headless)) return fail('headless-mismatch');
   return { ok: true, ownerId: ownership.ownerId, state };
 }
 
 // Find a live managed browser the caller can prove it owns, on any port. An auto-allocated start
 // begins at DEFAULT_PORT, so without this a session whose browser landed on :9301 would look at
 // :9222, find nothing, and launch a second browser on every subsequent start.
-export function findReusableManagedBrowser({ ownerToken, includeGoogle = false, processes = listManagedChromeProcesses() } = {}) {
+export function findReusableManagedBrowser({
+  ownerToken,
+  includeGoogle = false,
+  profileName = null,
+  headless = false,
+  forceProfileSync = false,
+  processes = listManagedChromeProcesses(),
+} = {}) {
   if (!normalizeOwnerValue(ownerToken)) return null;
+  if (forceProfileSync) return null;
   for (const entry of processes) {
     const state = readManagedState(stateFileForPort(entry.port));
     if (!state || Number(state.pid) !== Number(entry.pid)) continue;
-    const decision = managedBrowserReuseDecision({ safety: { ok: true }, state, ownerToken, includeGoogle });
+    const decision = managedBrowserReuseDecision({
+      safety: { ok: true }, state, ownerToken, includeGoogle, profileName, headless, forceProfileSync,
+    });
     if (decision.ok) return { ...entry, state };
   }
   return null;
@@ -1370,7 +1441,10 @@ export async function startChrome({
   let reusable = null;
   if (providedOwnerToken) {
     const candidates = autoAllocatePort ? liveBrowsers : liveBrowsers.filter((entry) => entry.port === normalizedPort);
-    const found = findReusableManagedBrowser({ ownerToken: providedOwnerToken, includeGoogle, processes: candidates });
+    const found = findReusableManagedBrowser({
+      ownerToken: providedOwnerToken, includeGoogle, processes: candidates,
+      profileName: resolvedProfileName, headless, forceProfileSync,
+    });
     if (found && await browserWSEndpoint(found.port)) {
       reusable = found;
       normalizedPort = found.port;
@@ -1395,7 +1469,10 @@ export async function startChrome({
       if (await browserWSEndpoint(normalizedPort)) {
         const safety = managedBrowserSafetyForPort(normalizedPort);
         const state = readManagedStateForPort(normalizedPort);
-        const reuse = managedBrowserReuseDecision({ safety, state, ownerToken: providedOwnerToken, includeGoogle });
+        const reuse = managedBrowserReuseDecision({
+          safety, state, ownerToken: providedOwnerToken, includeGoogle,
+          profileName: resolvedProfileName, headless, forceProfileSync,
+        });
         // Reuse first, on both paths. An auto-allocated start used to skip this entirely and walk to
         // the next free port, so a session that called start twice got two browsers instead of one.
         if (reuse.ok) {
@@ -1418,6 +1495,23 @@ export async function startChrome({
           if (reuse.reason === 'google-mode-mismatch') {
             throw new Error(
               `Chrome on :${normalizedPort} is running with Google ${state?.includeGoogle ? 'included' : 'excluded'}, but this start requested Google ${includeGoogle ? 'included' : 'excluded'}. Stop it with scripts/stop.mjs --clean and start again.`,
+            );
+          }
+          // A configuration mismatch is not an ownership problem: the caller owns this browser, it
+          // was just built differently. Say so, rather than sending them to look for a token.
+          if (reuse.reason === 'profile-mismatch') {
+            throw new Error(
+              `Chrome on :${normalizedPort} was started with profile ${state?.profileName ? `"${state.profileName}"` : '(fresh, no profile)'}, but this start requested ${resolvedProfileName ? `"${resolvedProfileName}"` : '(fresh, no profile)'}. Reusing it would run against the wrong account. Stop it with scripts/stop.mjs --clean and start again, or pick a different --port.`,
+            );
+          }
+          if (reuse.reason === 'headless-mismatch') {
+            throw new Error(
+              `Chrome on :${normalizedPort} is running ${state?.headless ? 'headless' : 'windowed'}, but this start requested ${headless ? 'headless' : 'windowed'}. Headless is fixed at launch: stop it with scripts/stop.mjs --clean and start again.`,
+            );
+          }
+          if (reuse.reason === 'sync-requested') {
+            throw new Error(
+              `Chrome on :${normalizedPort} is already running, and --sync asks for a freshly copied profile. Stop it with scripts/stop.mjs --clean and start again with --sync.`,
             );
           }
           throw new Error(
@@ -1769,13 +1863,11 @@ function verifyManagedChromeProcess({ pid, port, state }) {
 
 export function isBrowserToolsUserDataDir(userDataDir) {
   if (!userDataDir || typeof userDataDir !== 'string') return false;
-  const cacheDir = browserToolsCacheDir();
   return userDataDir === PROFILE_DST ||
     userDataDir === FRESH_PROFILE_DIR ||
     userDataDir === profileDataDirForPort(DEFAULT_PORT) ||
     userDataDir === freshProfileDirForPort(DEFAULT_PORT) ||
-    userDataDir.startsWith(`${cacheDir}/chrome-data-`) ||
-    userDataDir.startsWith(`${cacheDir}/chrome-fresh-`);
+    isManagedCloneDir(userDataDir);
 }
 
 export function managedChromeCommandSafety({ pid, port, state, command }) {

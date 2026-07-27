@@ -14,6 +14,9 @@ import { join } from 'node:path';
 import {
   DEFAULT_MAX_MANAGED_BROWSERS,
   assertManagedBrowserCapacity,
+  buildBrowserToolsConfig,
+  isBrowserToolsUserDataDir,
+  managedBrowserIdentityMatches,
   findReusableManagedBrowser,
   managedBrowserCapacity,
   managedBrowserReuseDecision,
@@ -581,4 +584,119 @@ test('the reaper refuses to signal a PID that is no longer a managed browser', (
       try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
     }
   });
+});
+
+test('a trailing slash on the cache directory does not hide every managed browser', () => {
+  // Same silent-disable class as the spaced path: launchChrome builds the dir with join(), which
+  // collapses the slash, while a naive `${cacheDir}/chrome-` prefix produces a double slash.
+  const bin = CHROME_BIN;
+  for (const configured of ['/opt/cache/', '/opt/cache//', '/opt/cache']) {
+    const launched = join(configured, 'chrome-data-9222');
+    const line = `100 01:00 ${bin} --remote-debugging-port=9222 --user-data-dir=${launched} --pi-browser-tools-managed=tok`;
+    const found = parseManagedChromeProcesses(line, { cacheDir: configured, chromeBin: bin });
+    assert.equal(found.length, 1, `cacheDir ${JSON.stringify(configured)} must still match`);
+    assert.equal(found[0].userDataDir, launched);
+  }
+  // A sibling directory sharing a prefix must not be swallowed by the normalisation.
+  const foreign = `101 01:00 ${bin} --remote-debugging-port=9223 --user-data-dir=/opt/cache-other/chrome-data-9223 --pi-browser-tools-managed=tok`;
+  assert.equal(parseManagedChromeProcesses(foreign, { cacheDir: '/opt/cache/', chromeBin: bin }).length, 0);
+});
+
+test('isBrowserToolsUserDataDir tolerates a trailing slash on the configured cache dir', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'bt-slash-'));
+  const previous = process.env.BROWSER_TOOLS_CACHE_DIR;
+  process.env.BROWSER_TOOLS_CACHE_DIR = `${tmp}/`;
+  try {
+    assert.ok(isBrowserToolsUserDataDir(join(tmp, 'chrome-data-9222')), 'clone dir must be recognised');
+    assert.ok(isBrowserToolsUserDataDir(join(tmp, 'chrome-fresh-9223')));
+    assert.ok(!isBrowserToolsUserDataDir('/somewhere/else/chrome-data-9222'));
+  } finally {
+    if (previous === undefined) delete process.env.BROWSER_TOOLS_CACHE_DIR;
+    else process.env.BROWSER_TOOLS_CACHE_DIR = previous;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('a config refresh preserves a configured browser cap', () => {
+  // Losing maxBrowsers on refresh silently returns the machine to the default cap.
+  const built = buildBrowserToolsConfig({
+    sourceDir: '/opt/fake-home/Library/Application Support/Google/Chrome',
+    existing: { browser: { chromeBin: '/custom/Chrome', maxBrowsers: 12 } },
+  });
+  assert.equal(built.browser.maxBrowsers, 12, 'an explicit cap must survive --refresh');
+  assert.equal(built.browser.chromeBin, '/custom/Chrome');
+
+  const none = buildBrowserToolsConfig({
+    sourceDir: '/opt/fake-home/Library/Application Support/Google/Chrome',
+    existing: { browser: { chromeBin: '/custom/Chrome' } },
+  });
+  assert.ok(!('maxBrowsers' in none.browser), 'an unset cap must not be written as null');
+});
+
+test('a browser with a half-written lifecycle pair counts as an orphan', () => {
+  // stopChrome cannot manage an incomplete pair, so if the orphan predicate spares it too, the
+  // browser is unreachable by every path: exactly the dead end this PR exists to remove.
+  withTempCache((tmp) => {
+    writeFileSync(join(tmp, 'chrome-9601.json'), JSON.stringify({ managedBy: 'browser-tools', pid: 4242, port: 9601 }));
+    // .pid deliberately absent
+    writeFileSync(join(tmp, 'chrome-9602.json'), JSON.stringify({ managedBy: 'browser-tools', pid: 4243, port: 9602 }));
+    writeFileSync(join(tmp, 'chrome-9602.pid'), '4243');
+
+    const processes = [
+      { pid: 4242, port: 9601, ageMs: 1000 },
+      { pid: 4243, port: 9602, ageMs: 1000 },
+    ];
+    const orphans = orphanedManagedBrowsers(processes).map((o) => o.port);
+    assert.deepEqual(orphans, [9601], 'the half-tracked browser must be reapable; the fully tracked one must not');
+  });
+});
+
+test('the reaper compares the full scanned identity, not just "some managed Chrome"', () => {
+  // A recycled PID that now belongs to a *different* managed browser previously passed the recheck,
+  // so the signal would have killed a healthy browser on another port.
+  const scanned = {
+    pid: 5000,
+    port: 9700,
+    userDataDir: '/opt/cache/chrome-data-9700',
+    managedToken: 'token-A',
+    ageMs: 1000,
+  };
+  const sameBrowser = { ...scanned };
+  const differentPort = { ...scanned, port: 9701, userDataDir: '/opt/cache/chrome-data-9701' };
+  const differentToken = { ...scanned, managedToken: 'token-B' };
+
+  assert.equal(managedBrowserIdentityMatches(scanned, sameBrowser), true);
+  assert.equal(managedBrowserIdentityMatches(scanned, differentPort), false, 'a different port is a different browser');
+  assert.equal(managedBrowserIdentityMatches(scanned, differentToken), false, 'a per-launch token mismatch means the PID was reused');
+  assert.equal(managedBrowserIdentityMatches(scanned, null), false);
+});
+
+test('parseManagedChromeProcesses exposes the per-launch managed token for identity checks', () => {
+  const line = `100 01:00 ${CHROME_BIN} --remote-debugging-port=9222 --user-data-dir=${CACHE_DIR}/chrome-data-9222 --pi-browser-tools-managed=uuid-xyz`;
+  const [entry] = parseManagedChromeProcesses(line, { cacheDir: CACHE_DIR, chromeBin: CHROME_BIN });
+  assert.equal(entry.managedToken, 'uuid-xyz');
+});
+
+test('reuse is refused when the existing browser is not the configuration that was asked for', () => {
+  // Adopting a browser with the wrong profile means the automation runs against the wrong account.
+  const base = { managedBy: 'browser-tools', ownerTokenHash: ownerTokenHash('tok'), includeGoogle: false };
+  const decide = (state, request) =>
+    managedBrowserReuseDecision({ safety: { ok: true }, state, ownerToken: 'tok', includeGoogle: false, ...request });
+
+  const work = { ...base, profileName: 'Profile 1', headless: true };
+  assert.equal(decide(work, { profileName: 'Profile 1', headless: true }).ok, true, 'identical configuration reuses');
+
+  assert.equal(decide(work, { profileName: 'Profile 2', headless: true }).reason, 'profile-mismatch');
+  assert.equal(decide(work, { profileName: null, headless: true }).reason, 'profile-mismatch', 'a fresh start must not adopt a profiled browser');
+  assert.equal(
+    decide({ ...base, profileName: null, headless: true }, { profileName: 'Profile 1', headless: true }).reason,
+    'profile-mismatch',
+    'a profiled start must not adopt a fresh browser',
+  );
+  assert.equal(decide(work, { profileName: 'Profile 1', headless: false }).reason, 'headless-mismatch');
+  assert.equal(
+    decide(work, { profileName: 'Profile 1', headless: true, forceProfileSync: true }).reason,
+    'sync-requested',
+    '--sync explicitly asks for fresh credentials, so reuse would defeat it',
+  );
 });
