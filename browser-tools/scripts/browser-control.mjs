@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { delimiter, dirname, join } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import puppeteer from 'puppeteer-core';
 
 export const DEFAULT_PORT = 9222;
@@ -296,6 +296,28 @@ export function portLockDirForPort(port) {
   return join(browserToolsCacheDir(), `chrome-${normalizePort(port)}.lock`);
 }
 
+export function portLockIsActive(port = DEFAULT_PORT, { staleMs = PORT_LOCK_STALE_MS } = {}) {
+  const lockDir = portLockDirForPort(port);
+  if (!existsSync(lockDir)) return false;
+
+  let lockState = null;
+  try {
+    lockState = safeReadJson(join(lockDir, 'lock.json'));
+  } catch {
+    lockState = null;
+  }
+  let stale = false;
+  if (lockState?.pid && !processExists(Number(lockState.pid))) stale = true;
+  try {
+    if (Date.now() - statSync(lockDir).mtimeMs > staleMs) stale = true;
+  } catch {
+    stale = true;
+  }
+  if (!stale) return true;
+  rmSync(lockDir, { recursive: true, force: true });
+  return false;
+}
+
 export function chromePaths(port = DEFAULT_PORT) {
   const runtime = browserToolsRuntimeConfig();
   return {
@@ -416,25 +438,9 @@ export function acquirePortLock(port = DEFAULT_PORT, { ownerId = null, staleMs =
       };
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
-      // A start that crashed mid-write can leave a partial or corrupt lock.json. Treat an unreadable
-      // lock as having no metadata rather than throwing, so the age-based staleness check below can
-      // still recover the port (and a fresh, possibly mid-write lock is left alone until it ages out).
-      let lockState = null;
-      try {
-        lockState = safeReadJson(join(lockDir, 'lock.json'));
-      } catch {
-        lockState = null;
-      }
-      let stale = false;
-      if (lockState?.pid && !processExists(Number(lockState.pid))) stale = true;
-      try {
-        const ageMs = Date.now() - statSync(lockDir).mtimeMs;
-        if (ageMs > staleMs) stale = true;
-      } catch {
-        stale = true;
-      }
-      if (!stale) return null;
-      rmSync(lockDir, { recursive: true, force: true });
+      // A start that crashed mid-write can leave a partial or corrupt lock.json. Fresh partial locks
+      // remain active until they age out, while stale locks are reclaimed by the shared lock check.
+      if (portLockIsActive(normalizedPort, { staleMs })) return null;
     }
   }
 
@@ -905,7 +911,6 @@ export function headlessUserAgent(chromeBin = browserToolsChromeBin()) {
 export function managedBrowserForUserDataDir(userDataDir) {
   const result = spawnSync('ps', ['-axo', 'pid=,command='], { encoding: 'utf-8' });
   if (result.error || result.status !== 0) return null;
-  const chromeBin = browserToolsChromeBin();
 
   for (const line of result.stdout.split('\n')) {
     const trimmed = line.trim();
@@ -914,12 +919,9 @@ export function managedBrowserForUserDataDir(userDataDir) {
     if (!match) continue;
     const pid = Number.parseInt(match[1], 10);
     const command = match[2];
-    if (!command.includes(chromeBin)) continue;
-    if (!command.includes(`--user-data-dir=${userDataDir}`)) continue;
-    if (!command.includes('--pi-browser-tools-managed=')) continue;
-    const portMatch = command.match(/--remote-debugging-port=(\d+)/);
-    if (!portMatch) continue;
-    return { pid, port: normalizePort(portMatch[1]), command };
+    const managed = managedChromeProcessFromCommand({ pid, command });
+    if (!managed || managed.userDataDir !== userDataDir) continue;
+    return managed;
   }
 
   return null;
@@ -950,8 +952,7 @@ export function parseProcessAgeMs(etime) {
 // managed browser disappears from the inventory, and the cap silently stops applying.
 export function normalizeCacheDirPath(cacheDir) {
   const value = String(cacheDir ?? '');
-  const trimmed = value.replace(/\/+$/, '');
-  return trimmed || value;
+  return value ? resolve(value) : value;
 }
 
 // Does this user-data-dir sit inside the cache dir as one of our clone directories? Compared on path
@@ -959,8 +960,9 @@ export function normalizeCacheDirPath(cacheDir) {
 export function isManagedCloneDir(userDataDir, cacheDir = browserToolsCacheDir()) {
   if (!userDataDir) return false;
   const root = normalizeCacheDirPath(cacheDir);
-  if (!userDataDir.startsWith(`${root}/`)) return false;
-  const rest = userDataDir.slice(root.length + 1);
+  const candidate = resolve(userDataDir);
+  if (!candidate.startsWith(`${root}/`)) return false;
+  const rest = candidate.slice(root.length + 1);
   return /^chrome-(?:data|fresh)-/.test(rest);
 }
 
@@ -972,7 +974,7 @@ export function parseUserDataDirArg(command) {
 // Decide whether one ps line is a managed browser, and describe it. Shared by the inventory scan and
 // by the pre-signal recheck in the reaper, so both apply exactly the same definition.
 export function managedChromeProcessFromCommand({ pid, etime = null, command, cacheDir = browserToolsCacheDir(), chromeBin = browserToolsChromeBin() }) {
-  if (!command || !command.includes(chromeBin)) return null;
+  if (!command) return null;
   if (/--type=/.test(command)) return null;
   if (!command.includes('--pi-browser-tools-managed=')) return null;
   const portMatch = command.match(/--remote-debugging-port=(\d+)/);
@@ -1132,7 +1134,7 @@ export function orphanedManagedBrowsers(processes = listManagedChromeProcesses()
     // A concurrent start holds the port lock from before the spawn until the readiness probe passes,
     // so there is a window where its browser is live but not yet written to a state file. Never reap
     // inside that window or we would kill a healthy browser out from under another agent.
-    if (existsSync(portLockDirForPort(entry.port))) return false;
+    if (portLockIsActive(entry.port)) return false;
     const state = readManagedState(stateFileForPort(entry.port));
     if (!state || state.managedBy !== 'browser-tools') return true;
     if (Number(state.pid) !== Number(entry.pid)) return true;
@@ -1142,12 +1144,11 @@ export function orphanedManagedBrowsers(processes = listManagedChromeProcesses()
     if (!existsSync(pidFile)) return true;
     const recordedPid = Number.parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
     if (recordedPid !== Number(entry.pid)) return true;
-    // A PID match alone is not tracking. stopChrome also verifies the managed token, clone dir and
-    // port, refuses the browser when they disagree, and points at --reap; if this predicate stopped
-    // at the PID, --reap would disagree and the browser would have no cleanup path at all.
-    if (Number(state.port) !== Number(entry.port)) return true;
+    // A PID match alone is not tracking. Apply the same lifecycle-state validation as stopChrome,
+    // then compare the recorded identity with the process inventory.
+    if (!managedChromeLifecycleStateSafety({ pid: entry.pid, port: entry.port, state }).ok) return true;
     if (state.userDataDir !== entry.userDataDir) return true;
-    if (state.managedToken && entry.managedToken && state.managedToken !== entry.managedToken) return true;
+    if (state.managedToken !== entry.managedToken) return true;
     return false;
   });
 }
@@ -1265,7 +1266,8 @@ export function managedBrowserStartupWarnings({
     warnings.push(
       `${stale.length} managed browser${stale.length === 1 ? '' : 's'} ${stale.length === 1 ? 'has' : 'have'} been running over ${hours}h ` +
       `(${describePorts(stale)}), likely left over from a finished session. ` +
-      `Review with scripts/stop.mjs --reap --dry-run, then clear with scripts/stop.mjs --prune.`,
+      `Stop a tracked browser with scripts/stop.mjs --port <n> --owner-token "$${OWNER_TOKEN_ENV}". ` +
+      `Use scripts/stop.mjs --reap --dry-run and scripts/stop.mjs --prune only for untracked browsers.`,
     );
   }
   return warnings;
@@ -1887,33 +1889,42 @@ export function isBrowserToolsUserDataDir(userDataDir) {
     isManagedCloneDir(userDataDir);
 }
 
-export function managedChromeCommandSafety({ pid, port, state, command }) {
+export function managedChromeLifecycleStateSafety({ pid, port, state }) {
   if (!state || state.managedBy !== 'browser-tools') {
-    return { ok: false, reason: 'missing-managed-state', command };
+    return { ok: false, reason: 'missing-managed-state' };
   }
   if (Number(state.pid) !== Number(pid) || Number(state.port) !== Number(port)) {
-    return { ok: false, reason: 'state-mismatch', command };
+    return { ok: false, reason: 'state-mismatch' };
   }
   if (!state.managedToken) {
-    return { ok: false, reason: 'missing-managed-token', command };
+    return { ok: false, reason: 'missing-managed-token' };
   }
   if (!isBrowserToolsUserDataDir(state.userDataDir)) {
-    return { ok: false, reason: 'state-user-data-dir-mismatch', command };
+    return { ok: false, reason: 'state-user-data-dir-mismatch' };
   }
 
   const expectedDebugPort = `--remote-debugging-port=${port}`;
   const expectedToken = `--pi-browser-tools-managed=${state.managedToken}`;
   const expectedUserDataDir = `--user-data-dir=${state.userDataDir}`;
   const expectedArgs = Array.isArray(state.args) ? state.args : [];
-  const isChrome = command.includes('Google Chrome') || command.includes(browserToolsChromeBin()) || command.includes(CHROME_BIN);
+  if (!expectedArgs.includes(expectedDebugPort)) return { ok: false, reason: 'state-debug-port-missing' };
+  if (!expectedArgs.includes(expectedUserDataDir)) return { ok: false, reason: 'state-user-data-dir-missing' };
+  if (!expectedArgs.includes(expectedToken)) return { ok: false, reason: 'state-managed-token-missing' };
 
-  if (!isChrome) return { ok: false, reason: 'not-chrome-process', command };
+  return { ok: true };
+}
+
+export function managedChromeCommandSafety({ pid, port, state, command }) {
+  const stateSafety = managedChromeLifecycleStateSafety({ pid, port, state });
+  if (!stateSafety.ok) return { ...stateSafety, command };
+
+  const expectedDebugPort = `--remote-debugging-port=${port}`;
+  const expectedToken = `--pi-browser-tools-managed=${state.managedToken}`;
+  const expectedUserDataDir = `--user-data-dir=${state.userDataDir}`;
+
   if (!command.includes(expectedDebugPort)) return { ok: false, reason: 'debug-port-mismatch', command };
   if (!command.includes(expectedUserDataDir)) return { ok: false, reason: 'user-data-dir-mismatch', command };
   if (!command.includes(expectedToken)) return { ok: false, reason: 'managed-token-mismatch', command };
-  if (!expectedArgs.includes(expectedDebugPort)) return { ok: false, reason: 'state-debug-port-missing', command };
-  if (!expectedArgs.includes(expectedUserDataDir)) return { ok: false, reason: 'state-user-data-dir-missing', command };
-  if (!expectedArgs.includes(expectedToken)) return { ok: false, reason: 'state-managed-token-missing', command };
 
   return { ok: true, command };
 }

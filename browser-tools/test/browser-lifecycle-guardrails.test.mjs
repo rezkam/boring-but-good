@@ -103,6 +103,17 @@ test('parseManagedChromeProcesses ignores the real Chrome and any browser outsid
   assert.deepEqual(found.map((p) => p.pid), [503], 'only the managed fresh-clone browser qualifies');
 });
 
+test('parseManagedChromeProcesses keeps browsers launched by a previous binary override', () => {
+  const previousBin = '/opt/browser-v1';
+  const currentBin = '/opt/browser-v2';
+  const line =
+    `503 01:00 ${previousBin} --remote-debugging-port=9224 ` +
+    `--user-data-dir=${CACHE_DIR}/chrome-fresh-9224 --pi-browser-tools-managed=tok`;
+
+  const found = parseManagedChromeProcesses(line, { cacheDir: CACHE_DIR, chromeBin: currentBin });
+  assert.deepEqual(found.map((entry) => entry.pid), [503], 'managed identity must survive a binary override change');
+});
+
 test('the managed browser cap defaults to a small number and is configurable', () => {
   assert.equal(DEFAULT_MAX_MANAGED_BROWSERS, 5);
 
@@ -155,14 +166,27 @@ test('orphanedManagedBrowsers finds running browsers whose lifecycle files no lo
   // This is the exact incident shape: 86 live browsers, one surviving state file, so stop.mjs
   // reported "No managed debug Chrome instance found" for every one of them.
   withTempCache((tmp) => {
+    const trackedDir = join(tmp, 'chrome-data-9222');
+    const trackedToken = 'tok-9222';
     writeFileSync(join(tmp, 'chrome-9222.pid'), '100');
-    writeFileSync(join(tmp, 'chrome-9222.json'), JSON.stringify({ managedBy: 'browser-tools', pid: 100, port: 9222 }));
+    writeFileSync(join(tmp, 'chrome-9222.json'), JSON.stringify({
+      managedBy: 'browser-tools',
+      pid: 100,
+      port: 9222,
+      userDataDir: trackedDir,
+      managedToken: trackedToken,
+      args: [
+        '--remote-debugging-port=9222',
+        `--user-data-dir=${trackedDir}`,
+        `--pi-browser-tools-managed=${trackedToken}`,
+      ],
+    }));
     // :9223 is tracked but the state file points at a different pid (recycled/rewritten state)
     writeFileSync(join(tmp, 'chrome-9223.pid'), '999');
     writeFileSync(join(tmp, 'chrome-9223.json'), JSON.stringify({ managedBy: 'browser-tools', pid: 999, port: 9223 }));
 
     const processes = [
-      { pid: 100, port: 9222, ageMs: 1000 },
+      { pid: 100, port: 9222, ageMs: 1000, userDataDir: trackedDir, managedToken: trackedToken },
       { pid: 200, port: 9223, ageMs: 1000 },
       { pid: 300, port: 9224, ageMs: 1000 },
     ];
@@ -324,6 +348,8 @@ test('managedBrowserStartupWarnings warns on the last slot and on leftover old s
   assert.match(staleWarnings[0], /2 managed browser/, 'must count the leftovers');
   assert.match(staleWarnings[0], /9222|9223/, 'must name the ports to inspect');
   assert.match(staleWarnings[0], /stop\.mjs/, 'must name the cleanup command');
+  assert.match(staleWarnings[0], /--port <n> --owner-token/, 'tracked browsers need the normal owner-protected stop path');
+  assert.match(staleWarnings[0], /untracked/, 'reap and prune must be described as orphan-only recovery');
 });
 
 test('managedBrowserReuseDecision is the single gate both explicit and auto-allocated starts share', () => {
@@ -378,9 +404,19 @@ test('startChrome refuses to launch past the cap instead of allocating another p
   writeFileSync(join(binDir, 'ps'), `#!/bin/sh\ncat <<'PSEOF'\n${lines}\nPSEOF\n`, { mode: 0o755 });
   // Tracked, so the pre-launch reap leaves them alone and they genuinely occupy all five slots.
   for (const port of ports) {
+    const userDataDir = join(cacheDir, `chrome-data-${port}`);
     writeFileSync(join(cacheDir, `chrome-${port}.pid`), String(pidFor(port)));
     writeFileSync(join(cacheDir, `chrome-${port}.json`), JSON.stringify({
-      managedBy: 'browser-tools', pid: pidFor(port), port,
+      managedBy: 'browser-tools',
+      pid: pidFor(port),
+      port,
+      userDataDir,
+      managedToken: 'tok',
+      args: [
+        `--remote-debugging-port=${port}`,
+        `--user-data-dir=${userDataDir}`,
+        '--pi-browser-tools-managed=tok',
+      ],
     }));
   }
 
@@ -421,14 +457,27 @@ test('startChrome refuses to launch past the cap instead of allocating another p
 
 test('the pre-launch reap spares tracked browsers and ports held by a concurrent start', () => {
   withTempCache((tmp) => {
+    const trackedDir = join(tmp, 'chrome-data-9222');
+    const trackedToken = 'tok-9222';
     // tracked: state file agrees with the running pid
     writeFileSync(join(tmp, 'chrome-9222.pid'), '900001');
-    writeFileSync(join(tmp, 'chrome-9222.json'), JSON.stringify({ managedBy: 'browser-tools', pid: 900001, port: 9222 }));
+    writeFileSync(join(tmp, 'chrome-9222.json'), JSON.stringify({
+      managedBy: 'browser-tools',
+      pid: 900001,
+      port: 9222,
+      userDataDir: trackedDir,
+      managedToken: trackedToken,
+      args: [
+        '--remote-debugging-port=9222',
+        `--user-data-dir=${trackedDir}`,
+        `--pi-browser-tools-managed=${trackedToken}`,
+      ],
+    }));
     // untracked but a start currently holds the port lock: its browser exists before its state file does
     mkdirSync(portLockDirForPort(9223), { recursive: true });
 
     const processes = [
-      { pid: 900001, port: 9222, ageMs: 1000 },
+      { pid: 900001, port: 9222, ageMs: 1000, userDataDir: trackedDir, managedToken: trackedToken },
       { pid: 900002, port: 9223, ageMs: 1000 },
       { pid: 900003, port: 9224, ageMs: 1000 },
     ];
@@ -438,6 +487,32 @@ test('the pre-launch reap spares tracked browsers and ports held by a concurrent
     const dry = reapOrphanedChromes({ dryRun: true, processes });
     assert.deepEqual(dry.reaped.map((p) => p.status), ['would-reap']);
     assert.deepEqual(dry.reaped.map((p) => p.pid), [900003], 'a dry run must not signal anything');
+  });
+});
+
+test('a stale port lock cannot permanently exempt an orphan from reaping', () => {
+  withTempCache((tmp) => {
+    const lockDir = portLockDirForPort(9223);
+    mkdirSync(lockDir, { recursive: true });
+    writeFileSync(join(lockDir, 'lock.json'), JSON.stringify({
+      pid: 999999,
+      port: 9223,
+      createdAt: new Date().toISOString(),
+    }));
+
+    const orphan = {
+      pid: 900002,
+      port: 9223,
+      ageMs: 1000,
+      userDataDir: join(tmp, 'chrome-data-9223'),
+      managedToken: 'tok-9223',
+    };
+    assert.deepEqual(
+      orphanedManagedBrowsers([orphan]).map((entry) => entry.pid),
+      [900002],
+      'a lock whose owning start is gone must not shield the browser',
+    );
+    assert.equal(existsSync(lockDir), false, 'the stale lock must be reclaimed for future starts');
   });
 });
 
@@ -604,6 +679,16 @@ test('a trailing slash on the cache directory does not hide every managed browse
   assert.equal(parseManagedChromeProcesses(foreign, { cacheDir: '/opt/cache/', chromeBin: bin }).length, 0);
 });
 
+test('dot segments in the cache directory do not hide managed browsers', () => {
+  for (const configured of ['/opt/runtime/../cache', './cache']) {
+    const launched = join(configured, 'chrome-data-9222');
+    const line = `100 01:00 ${CHROME_BIN} --remote-debugging-port=9222 --user-data-dir=${launched} --pi-browser-tools-managed=tok`;
+    const found = parseManagedChromeProcesses(line, { cacheDir: configured, chromeBin: CHROME_BIN });
+    assert.equal(found.length, 1, `cacheDir ${JSON.stringify(configured)} must match its normalized launch path`);
+    assert.equal(found[0].userDataDir, launched);
+  }
+});
+
 test('isBrowserToolsUserDataDir tolerates a trailing slash on the configured cache dir', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'bt-slash-'));
   const previous = process.env.BROWSER_TOOLS_CACHE_DIR;
@@ -639,14 +724,27 @@ test('a browser with a half-written lifecycle pair counts as an orphan', () => {
   // stopChrome cannot manage an incomplete pair, so if the orphan predicate spares it too, the
   // browser is unreachable by every path: exactly the dead end this PR exists to remove.
   withTempCache((tmp) => {
+    const trackedDir = join(tmp, 'chrome-data-9602');
+    const trackedToken = 'tok-9602';
     writeFileSync(join(tmp, 'chrome-9601.json'), JSON.stringify({ managedBy: 'browser-tools', pid: 4242, port: 9601 }));
     // .pid deliberately absent
-    writeFileSync(join(tmp, 'chrome-9602.json'), JSON.stringify({ managedBy: 'browser-tools', pid: 4243, port: 9602 }));
+    writeFileSync(join(tmp, 'chrome-9602.json'), JSON.stringify({
+      managedBy: 'browser-tools',
+      pid: 4243,
+      port: 9602,
+      userDataDir: trackedDir,
+      managedToken: trackedToken,
+      args: [
+        '--remote-debugging-port=9602',
+        `--user-data-dir=${trackedDir}`,
+        `--pi-browser-tools-managed=${trackedToken}`,
+      ],
+    }));
     writeFileSync(join(tmp, 'chrome-9602.pid'), '4243');
 
     const processes = [
       { pid: 4242, port: 9601, ageMs: 1000 },
-      { pid: 4243, port: 9602, ageMs: 1000 },
+      { pid: 4243, port: 9602, ageMs: 1000, userDataDir: trackedDir, managedToken: trackedToken },
     ];
     const orphans = orphanedManagedBrowsers(processes).map((o) => o.port);
     assert.deepEqual(orphans, [9601], 'the half-tracked browser must be reapable; the fully tracked one must not');
@@ -710,7 +808,15 @@ test('lifecycle state that contradicts the running process counts as an orphan',
   withTempCache((tmp) => {
     const write = (port, state) => {
       writeFileSync(join(tmp, `chrome-${port}.pid`), String(state.pid));
-      writeFileSync(join(tmp, `chrome-${port}.json`), JSON.stringify({ managedBy: 'browser-tools', ...state }));
+      writeFileSync(join(tmp, `chrome-${port}.json`), JSON.stringify({
+        managedBy: 'browser-tools',
+        ...state,
+        args: [
+          `--remote-debugging-port=${state.port}`,
+          `--user-data-dir=${state.userDataDir}`,
+          `--pi-browser-tools-managed=${state.managedToken}`,
+        ],
+      }));
     };
     const scanned = (port, over = {}) => ({
       pid: 7000 + port, port, ageMs: 1000,
@@ -725,6 +831,51 @@ test('lifecycle state that contradicts the running process counts as an orphan',
     const orphans = orphanedManagedBrowsers([scanned(9801), scanned(9802), scanned(9803), scanned(9804)])
       .map((o) => o.port).sort();
     assert.deepEqual(orphans, [9802, 9803, 9804], 'token, data-dir and port contradictions are all orphans');
+  });
+});
+
+test('lifecycle state that stop cannot validate counts as an orphan', () => {
+  withTempCache((tmp) => {
+    const write = (port, state) => {
+      writeFileSync(join(tmp, `chrome-${port}.pid`), String(state.pid));
+      writeFileSync(join(tmp, `chrome-${port}.json`), JSON.stringify({ managedBy: 'browser-tools', ...state }));
+    };
+    const scanned = (port, token) => ({
+      pid: 7000 + port,
+      port,
+      ageMs: 1000,
+      userDataDir: join(tmp, `chrome-data-${port}`),
+      managedToken: token,
+    });
+
+    const missingToken = scanned(9811, 'tok-9811');
+    write(9811, {
+      pid: missingToken.pid,
+      port: missingToken.port,
+      userDataDir: missingToken.userDataDir,
+      args: [
+        '--remote-debugging-port=9811',
+        `--user-data-dir=${missingToken.userDataDir}`,
+      ],
+    });
+
+    const incompleteArgs = scanned(9812, 'tok-9812');
+    write(9812, {
+      pid: incompleteArgs.pid,
+      port: incompleteArgs.port,
+      userDataDir: incompleteArgs.userDataDir,
+      managedToken: incompleteArgs.managedToken,
+      args: [
+        '--remote-debugging-port=9812',
+        `--user-data-dir=${incompleteArgs.userDataDir}`,
+      ],
+    });
+
+    assert.deepEqual(
+      orphanedManagedBrowsers([missingToken, incompleteArgs]).map((entry) => entry.port),
+      [9811, 9812],
+      'missing token and incomplete args must remain reachable through the reaper',
+    );
   });
 });
 
