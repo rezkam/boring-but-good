@@ -7,28 +7,31 @@
 # Usage:
 #   dispatch-audit.sh                    audit the most recent dispatch for this cwd
 #   dispatch-audit.sh --workflow wf_xxx  audit one Claude Code workflow run
+#   dispatch-audit.sh --session PATH|ID  audit one pi session by path or id substring
 #   dispatch-audit.sh --last N           audit the N most recent runs (default 1)
 #   dispatch-audit.sh --harness NAME     force claude-code | codex | pi
 #
-# Exit 0 always. Read the VERDICT line.
+# Exit 0 always. Read the VERDICT line, and on pi the POLICY line beside it.
 #
 # Coverage, by harness:
 #   claude-code  model verified per agent; effort is REQUEST-ONLY, the harness records none
 #   codex        model and reasoning_effort both verified, per turn
-#   pi           model verified; effort travels inside the request string, unconfirmed
+#   pi           model and effort both verified, per subagent run directory
 
 set -uo pipefail
 
 harness=""
 workflow=""
+session=""
 last=1
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --workflow) workflow="$2"; shift 2 ;;
+    --session)  session="$2"; shift 2 ;;
     --last)     last="$2"; shift 2 ;;
     --harness)  harness="$2"; shift 2 ;;
-    -h|--help)  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)  sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)          echo "unknown argument: $1" >&2; exit 0 ;;
   esac
 done
@@ -187,22 +190,185 @@ audit_codex() {
 }
 
 # ---------------------------------------------------------------------------- pi
+# pi keeps both halves of the answer. The parent session holds each `subagent` toolCall
+# (what was asked for) and its toolResult (what resolved, including the :effort suffix
+# and the turn-budget outcome). Beside it, one directory per run holds the child's own
+# model_change and thinking_level_change: what the process actually loaded. Reading only
+# the parent misses dispatches that never returned; reading only the directories misses
+# what was requested. This reads both and joins them.
+
+# Emit "<runId>\t<idx>\t<provider/model:thinking>\t<name>" for every subagent run dir.
+pi_run_dirs() { # $1 session stem directory
+  local rd sf runid idx
+  [ -d "$1" ] || return 0
+  for rd in "$1"/*/run-*; do
+    sf="$rd/session.jsonl"
+    [ -f "$sf" ] || continue
+    runid=$(basename "$(dirname "$rd")")
+    idx=${rd##*run-}
+    jq -rs --arg r "$runid" --arg i "$idx" '
+      ([.[]|select(.type=="model_change")]|last)          as $m |
+      ([.[]|select(.type=="thinking_level_change")]|last) as $t |
+      ([.[]|select(.type=="session_info")]|last)          as $n |
+      [$r, $i, "\($m.provider // "?")/\($m.modelId // "?"):\($t.thinkingLevel // "?")",
+       ($n.name // "-")] | @tsv' "$sf" 2>/dev/null
+  done
+}
+
 audit_pi() {
-  local d f s
-  s=$(printf '%s' "$PWD" | sed 's|/|-|g')
-  d=$(find "$HOME/.pi/agent/sessions" -maxdepth 1 -type d -name "*$s*" 2>/dev/null | head -1)
-  [ -n "$d" ] || d="$HOME/.pi/agent/sessions"
-  f=$(find "$d" -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
-  [ -n "$f" ] || { echo "VERDICT        NO_PI_SESSIONS_FOUND"; return; }
-  echo "RUN            $(basename "$f")"
-  # pi carries effort inside the request string: provider/model:effort
-  grep -ohE '"[a-z-]+/[a-z0-9.-]+:(minimal|low|medium|high|xhigh)"' "$f" 2>/dev/null \
-    | sort | uniq -c | sed 's/^ *//' \
-    | while read -r c m; do printf 'REQUESTED      %-40s x%s\n' "$m" "$c"; done
-  grep -ohE '"model":"[^"]+"' "$f" | sort | uniq -c | sed 's/^ *//' \
-    | while read -r c m; do printf 'ACTUAL         %-40s x%s\n' "$m" "$c"; done
-  echo "EFFORT         actual=UNCONFIRMED (pi strips the :effort suffix from the resolved record)"
-  echo "VERDICT        ROUTING_MODEL_ONLY"
+  local root="$HOME/.pi/agent/sessions"
+  local files=() f d s
+
+  if [ -n "$session" ]; then
+    if [ -f "$session" ]; then
+      files=("$session")
+    else
+      while IFS= read -r f; do files+=("$f"); done < <(
+        find "$root" -maxdepth 2 -type f -name "*$session*.jsonl" 2>/dev/null | head -n "$last")
+    fi
+    [ ${#files[@]} -gt 0 ] || { echo "VERDICT        NO_PI_SESSION_MATCHING_$session"; return; }
+  else
+    s=$(printf '%s' "$PWD" | sed 's|/|-|g')
+    d=$(find "$root" -maxdepth 1 -type d -name "*$s*" 2>/dev/null | head -1)
+    [ -n "$d" ] || d="$root"
+    while IFS= read -r f; do files+=("$f"); done < <(
+      find "$d" -maxdepth 2 -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null \
+        | sort -rn | head -n "$last" | cut -d' ' -f2-)
+    [ ${#files[@]} -gt 0 ] || { echo "VERDICT        NO_PI_SESSIONS_FOUND"; return; }
+  fi
+
+  local overall=VERIFIED total=0 budgets=0 killed=0 truncated=0
+
+  for f in "${files[@]}"; do
+    local stem sm st reqf resf dirf n
+    stem=${f%.jsonl}
+    echo "RUN            $(basename "$f")"
+
+    sm=$(grep -m1 -F '"type":"model_change"' "$f" 2>/dev/null \
+         | jq -r '"\(.provider)/\(.modelId)"' 2>/dev/null)
+    st=$(grep -m1 -F '"type":"thinking_level_change"' "$f" 2>/dev/null \
+         | jq -r '.thinkingLevel' 2>/dev/null)
+    echo "SESSION_MODEL  ${sm:-unknown}${st:+:$st}   (what an unpinned agent inherits)"
+
+    reqf=$(mktemp); resf=$(mktemp); dirf=$(mktemp)
+
+    # REQUEST: one row per dispatching call. `tasks[]` is the batch form, and the model
+    # key sits on the call, never inside a task, so a batch pins one model or none.
+    # An `action` (list, status, get, models, watchdog.*) inspects the fleet and launches
+    # nothing. Several of those carry an `agent` key, so filtering on `agent` alone
+    # invented three phantom dispatches on a real session.
+    grep -F '"subagent"' "$f" 2>/dev/null | jq -r '
+      select(.type=="message") | .message | .content[]?
+      | select(.type=="toolCall" and .name=="subagent")
+      | select((.arguments.action? // "") == "")
+      | select((.arguments.agent? // .arguments.tasks?) != null)
+      | [ .id,
+          (.arguments.model // "none"),
+          (if .arguments.tasks then (.arguments.tasks|length) else 1 end),
+          (if .arguments.turnBudget
+             then "maxTurns=\(.arguments.turnBudget.maxTurns // "?")" else "-" end),
+          (if .arguments.timeoutMs then "\(.arguments.timeoutMs)ms" else "-" end)
+        ] | @tsv' 2>/dev/null > "$reqf"
+
+    # ACTUAL, parent side: resolved model with its :effort suffix, plus how it ended.
+    grep -F '"subagent"' "$f" 2>/dev/null | jq -r '
+      select(.type=="message") | .message
+      | select(.role=="toolResult" and .toolName=="subagent")
+      | select((.details.runId? // "") != "")
+      | .toolCallId as $c | .details.runId as $r
+      | (.details.results // []) | to_entries[]
+      | [ $c, $r, (.key|tostring), (.value.agent // "?"), (.value.model // "?"),
+          (.value.thinking // "?"), (.value.turnBudget.outcome // "-"),
+          (if .value.error then "error" else "ok" end)
+        ] | @tsv' 2>/dev/null > "$resf"
+
+    # ACTUAL, child side: what each run process actually loaded.
+    pi_run_dirs "$stem" > "$dirf"
+
+    n=$(grep -c . "$reqf" 2>/dev/null); n=${n:-0}
+    if [ "$n" = "0" ]; then
+      echo "DISPATCHES     none in this session"
+      rm -f "$reqf" "$resf" "$dirf"
+      echo
+      continue
+    fi
+    total=$((total + n))
+
+    while IFS=$'\t' read -r cid req ntasks tb tmo; do
+      [ -n "$cid" ] || continue
+      printf 'DISPATCH       %-22s tasks=%-2s model=%-28s turn_budget=%s timeout=%s\n' \
+        "${cid%%|*}" "$ntasks" "$req" "$tb" "$tmo"
+      [ "$tb" = "-" ] || budgets=$((budgets + 1))
+      if [ "$req" = "none" ] && [ "$ntasks" -gt 1 ]; then
+        echo "  UNPINNED_BATCH  the tasks[] form takes no per-task model, and none was set on the call"
+      fi
+
+      local found=0
+      while IFS=$'\t' read -r rc rid idx agent actual thinking outcome status; do
+        [ "$rc" = "$cid" ] || continue
+        found=1
+        local dm="-" dn="-" verdict
+        while IFS=$'\t' read -r xr xi xm xn; do
+          [ "$xr" = "$rid" ] && [ "$xi" = "$idx" ] && { dm="$xm"; dn="$xn"; break; }
+        done < "$dirf"
+
+        if   [ "$req" = "none" ];    then verdict=INHERITED
+        elif [ "$req" = "$actual" ]; then
+          if [ "${actual%%:*}" = "$sm" ]; then verdict=INDISTINGUISHABLE; else verdict=MATCH; fi
+        else verdict=MISMATCH; fi
+
+        printf 'AGENT          %-10s %-28s %-28s %s\n' "$agent" "$actual" "$dn" "$verdict"
+        # The two records are written by different processes. When they disagree, the
+        # result line is a summary and the run directory is the process, so say so.
+        [ "$dm" = "-" ] || [ "$dm" = "$actual" ] \
+          || echo "  RECORD_CONFLICT  run directory says $dm, the result record says $actual"
+
+        case "$outcome" in
+          exceeded)
+            killed=$((killed + 1))
+            echo "  KILLED_BY_TURN_BUDGET  $agent was cut off, not finished; its work may already be on disk" ;;
+          wrap-up-requested)
+            truncated=$((truncated + 1))
+            echo "  TRUNCATED_BY_TURN_BUDGET  $agent was told to wrap up early, treat its answer as partial" ;;
+          *)
+            [ "$status" = "error" ] && echo "  FAILED       $agent returned an error" ;;
+        esac
+
+        case "$verdict" in
+          MISMATCH)          overall=MISMATCH ;;
+          INHERITED)         [ "$overall" = MISMATCH ] || overall=UNVERIFIED ;;
+          INDISTINGUISHABLE) [ "$overall" = VERIFIED ] && overall=INDISTINGUISHABLE ;;
+        esac
+      done < "$resf"
+
+      if [ "$found" = "0" ]; then
+        echo "  NO_RESULT    launched, but this session holds no result for it. The run ended"
+        echo "               before it returned, so nothing here was verified."
+        [ "$overall" = MISMATCH ] || overall=UNVERIFIED
+      fi
+    done < "$reqf"
+
+    # A run directory with no matching result is the same failure seen from the child.
+    while IFS=$'\t' read -r xr xi xm xn; do
+      [ -n "$xr" ] || continue
+      cut -f2,3 "$resf" | grep -qxF "$xr	$xi" && continue
+      printf 'AGENT          %-10s %-28s %-28s NO_RESULT\n' "-" "$xm" "$xn"
+      [ "$overall" = MISMATCH ] || overall=UNVERIFIED
+    done < "$dirf"
+
+    echo "EFFORT         actual=VERIFIED (pi records thinkingLevel in each subagent run)"
+    rm -f "$reqf" "$resf" "$dirf"
+    echo
+  done
+
+  [ "$total" -gt 0 ] || overall=NO_DISPATCHES
+  if [ "$budgets" -gt 0 ]; then
+    echo "POLICY         $budgets dispatch(es) set a hard turn budget: $killed agent(s) killed by it," \
+         "$truncated truncated. SKILL.md forbids turn and tool-call budgets, read-only agents included."
+  else
+    echo "POLICY         clean, no dispatch set a hard turn or tool-call budget"
+  fi
+  echo "VERDICT        ROUTING_$overall"
 }
 
 case "$harness" in
