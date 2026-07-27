@@ -228,20 +228,74 @@ test('stopChrome leaves a half-written lifecycle pair alone while a managed brow
   });
 });
 
-test('assertManagedBrowserCapacity blocks a new browser at the cap with an actionable message', () => {
+test('assertManagedBrowserCapacity blocks a new browser at the cap with a self-explanatory error', () => {
   const under = new Array(4).fill({ pid: 1, port: 9222, ageMs: 1000 });
   assert.doesNotThrow(() => assertManagedBrowserCapacity({ processes: under, max: 5 }));
 
-  const at = [9222, 9223, 9224, 9225, 9226].map((port, i) => ({ pid: 100 + i, port, ageMs: 3 * 60 * 60 * 1000 }));
+  // Four stale, one fresh: the message must let a reader see at a glance which slots are junk.
+  const at = [
+    { pid: 100, port: 9222, ageMs: 58 * 60 * 60 * 1000 },
+    { pid: 101, port: 9223, ageMs: 30 * 60 * 60 * 1000 },
+    { pid: 102, port: 9224, ageMs: 6 * 60 * 60 * 1000 },
+    { pid: 103, port: 9225, ageMs: 3 * 60 * 60 * 1000 },
+    { pid: 104, port: 9226, ageMs: 5 * 60 * 1000 },
+  ];
   assert.throws(
     () => assertManagedBrowserCapacity({ processes: at, max: 5 }),
     (error) => {
-      assert.match(error.message, /5 of 5/, 'must state the count against the cap');
-      assert.match(error.message, /--reap|stop\.mjs/, 'must name the recovery command');
-      assert.match(error.message, /9222/, 'must list the ports holding the slots');
+      const m = error.message;
+      // What happened, stated as a refusal rather than a bare failure.
+      assert.match(m, /Refusing to start another managed Chrome/, 'must say what was refused');
+      assert.match(m, /5 of 5/, 'must state the count against the cap');
+      // Why the limit exists, so the reader knows this is deliberate and not a malfunction.
+      assert.match(m, /memory|MB|swap/i, 'must explain why the limit exists');
+      // The evidence: every occupied slot with enough detail to act on it.
+      for (const entry of at) {
+        assert.ok(m.includes(`:${entry.port}`), `must list port ${entry.port}`);
+        assert.ok(m.includes(`PID ${entry.pid}`), `must list PID ${entry.pid}`);
+      }
+      assert.match(m, /58(\.0)?h/, 'must show how long each browser has been up');
+      // The diagnosis: which of them are probably junk.
+      assert.match(m, /4 .*(leftover|over 2h)/i, 'must call out how many look like leftovers');
+      // The recovery, including the reuse path that avoids needing a slot at all.
+      assert.match(m, /--reap/, 'must name the reaper');
+      assert.match(m, /--prune/, 'must name prune');
+      assert.match(m, /BROWSER_TOOLS_OWNER_TOKEN/, 'must show how to reuse a browser you own');
+      assert.match(m, /BROWSER_TOOLS_MAX_BROWSERS/, 'must name the override');
       return true;
     },
   );
+});
+
+test('the cap error stays readable when nothing is stale and when the list is long', () => {
+  const fresh = [9222, 9223].map((port, i) => ({ pid: 200 + i, port, ageMs: 60 * 1000 }));
+  const freshError = (() => { try { assertManagedBrowserCapacity({ processes: fresh, max: 2 }); } catch (e) { return e.message; } })();
+  assert.ok(freshError, 'must still throw with no stale browsers');
+  assert.doesNotMatch(freshError, /leftover/i, 'must not invent leftovers when every browser is recent');
+
+  const many = Array.from({ length: 12 }, (_, i) => ({ pid: 300 + i, port: 9300 + i, ageMs: 60 * 1000 }));
+  const manyError = (() => { try { assertManagedBrowserCapacity({ processes: many, max: 5 }); } catch (e) { return e.message; } })();
+  const listed = (manyError.match(/PID \d+/g) || []).length;
+  assert.ok(listed <= 10, `must cap the listing, got ${listed} entries`);
+  assert.match(manyError, /\d+ more/, 'must say how many were not listed rather than silently truncating');
+});
+
+test('the cap error is cleanly formatted in both the stale and all-fresh cases', () => {
+  const message = (processes, max) => {
+    try { assertManagedBrowserCapacity({ processes, max }); } catch (e) { return e.message; }
+    throw new Error('expected the cap to throw');
+  };
+  const fresh = message([{ pid: 1, port: 9222, ageMs: 60 * 1000 }], 1);
+  const stale = message([{ pid: 1, port: 9222, ageMs: 9 * 60 * 60 * 1000 }], 1);
+
+  for (const [label, m] of [['fresh', fresh], ['stale', stale]]) {
+    assert.doesNotMatch(m, /\n\s*\n\s*\n/, `${label} message must not contain a double blank line`);
+    assert.doesNotMatch(m, /[ \t]+$/m, `${label} message must not have trailing whitespace`);
+  }
+  assert.match(fresh, /up 1m/, 'sub-hour ages read as minutes, not 0.0h');
+  assert.match(stale, /up 9\.0h/);
+  assert.match(stale, /likely a leftover/, 'a stale slot must be marked inline');
+  assert.doesNotMatch(fresh, /likely a leftover/);
 });
 
 test('managedBrowserStartupWarnings warns on the last slot and on leftover old sessions', () => {

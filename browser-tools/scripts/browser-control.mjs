@@ -1041,17 +1041,47 @@ function describePorts(processes, limit = 8) {
 
 // Hard stop before a new launch. Refusing is better than allocating yet another port: an unbounded
 // fan-out of starts is exactly what filled memory and swap on a previous run.
+export function formatBrowserAge(ageMs) {
+  if (!Number.isFinite(ageMs)) return 'unknown age';
+  const hours = ageMs / 3600000;
+  if (hours < 1) return `${Math.max(1, Math.round(ageMs / 60000))}m`;
+  return `${hours.toFixed(1)}h`;
+}
+
+// One inventory line per occupied slot. The age and the leftover marker are the whole point: they
+// turn "you are at the limit" into "these four are junk from finished sessions, clear them".
+function describeBrowserInventory(processes, { limit = 10, staleMaxAgeMs = STALE_BROWSER_AGE_MS } = {}) {
+  const lines = processes.slice(0, limit).map((entry) => {
+    const stale = Number.isFinite(entry.ageMs) && entry.ageMs >= staleMaxAgeMs;
+    return `    :${entry.port}  PID ${entry.pid}  up ${formatBrowserAge(entry.ageMs)}${stale ? '   <- idle over 2h, likely a leftover' : ''}`;
+  });
+  if (processes.length > limit) lines.push(`    ... and ${processes.length - limit} more`);
+  return lines.join('\n');
+}
+
 export function assertManagedBrowserCapacity({ processes = listManagedChromeProcesses(), max = maxManagedBrowsers() } = {}) {
   const capacity = managedBrowserCapacity({ processes, max });
   if (!capacity.atCap) return capacity;
+  const stale = staleManagedBrowsers(processes);
+  const staleLine = stale.length
+    ? `\n  ${stale.length} of these ${stale.length === 1 ? 'has' : 'have'} been running over 2h and ${stale.length === 1 ? 'is' : 'are'} probably left over from a finished session.\n`
+    : '';
   throw new Error(
-    `Managed Chrome limit reached: ${capacity.count} of ${max} browsers are already running (${describePorts(processes)}).\n` +
-    `  Reuse one with --port <n> and its owner token, or free a slot first:\n` +
-    `    scripts/stop.mjs --status   list what is running and how old it is\n` +
-    `    scripts/stop.mjs --reap     sweep browsers no lifecycle file tracks\n` +
-    `    scripts/stop.mjs --prune    reap, then drop unused profile clones\n` +
-    `    scripts/stop.mjs --port <n> --owner-token "$${OWNER_TOKEN_ENV}"\n` +
-    `  Raise the ceiling deliberately with ${MAX_BROWSERS_ENV}=<n> if you genuinely need more.`,
+    `Refusing to start another managed Chrome: ${capacity.count} of ${max} browser slots are in use.\n\n` +
+    `  This is a deliberate limit, not a browser failure. Each managed Chrome costs roughly\n` +
+    `  800 MB across its process tree, so starts that are never stopped will exhaust memory\n` +
+    `  and swap. The limit stops a runaway fan-out from taking the machine down.\n\n` +
+    `  Currently running (${capacity.count} of ${max}):\n` +
+    `${describeBrowserInventory(processes)}\n` +
+    staleLine +
+    `\n  To continue, do one of these:\n` +
+    `    scripts/stop.mjs --status              see this list again at any time\n` +
+    `    scripts/stop.mjs --reap --dry-run      preview browsers no lifecycle file tracks\n` +
+    `    scripts/stop.mjs --prune               reap those, then drop their unused clones\n` +
+    `    scripts/stop.mjs --port <n> --owner-token "$${OWNER_TOKEN_ENV}"    stop one you own\n\n` +
+    `  Best fix if these are yours: export ${OWNER_TOKEN_ENV} from the first start, and later\n` +
+    `  starts reuse that browser instead of needing a new slot at all.\n\n` +
+    `  If you genuinely need more at once: ${MAX_BROWSERS_ENV}=<n>`,
   );
 }
 
