@@ -307,19 +307,39 @@ function lockDirectoryIsActive(lockDir, { staleMs = PORT_LOCK_STALE_MS } = {}) {
     lockState = null;
   }
   const ownerPid = Number(lockState?.pid);
-  let stale;
+  let staleByAge;
+  try {
+    staleByAge = Date.now() - statSync(lockDir).mtimeMs > staleMs;
+  } catch {
+    staleByAge = true;
+  }
+
+  let stale = staleByAge;
   if (Number.isInteger(ownerPid) && ownerPid > 0) {
-    stale = !processExists(ownerPid);
-  } else {
-    try {
-      stale = Date.now() - statSync(lockDir).mtimeMs > staleMs;
-    } catch {
-      stale = true;
+    const recordedIdentity = typeof lockState?.processStartIdentity === 'string'
+      ? lockState.processStartIdentity
+      : null;
+    const currentIdentity = recordedIdentity ? processStartIdentity(ownerPid) : null;
+    if (recordedIdentity && currentIdentity === recordedIdentity) {
+      return true;
     }
+    stale = !processExists(ownerPid) || staleByAge;
   }
   if (!stale) return true;
   rmSync(lockDir, { recursive: true, force: true });
   return false;
+}
+
+function releaseOwnedLockDirectory(lockDir, lockId) {
+  let lockState;
+  try {
+    lockState = safeReadJson(join(lockDir, 'lock.json'));
+  } catch {
+    return false;
+  }
+  if (!lockState || lockState.lockId !== lockId) return false;
+  rmSync(lockDir, { recursive: true, force: true });
+  return true;
 }
 
 export function portLockIsActive(port = DEFAULT_PORT, options = {}) {
@@ -427,12 +447,16 @@ export function acquirePortLock(port = DEFAULT_PORT, { ownerId = null, staleMs =
   const normalizedPort = normalizePort(port);
   ensureCacheDir();
   const lockDir = portLockDirForPort(normalizedPort);
+  const lockId = randomUUID();
+  const ownerProcessStartIdentity = processStartIdentity(process.pid);
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       mkdirSync(lockDir, { mode: 0o700 });
       writePrivateFile(join(lockDir, 'lock.json'), JSON.stringify({
+        lockId,
         pid: process.pid,
+        processStartIdentity: ownerProcessStartIdentity,
         port: normalizedPort,
         ownerId: normalizeOwnerValue(ownerId),
         createdAt: new Date().toISOString(),
@@ -441,7 +465,7 @@ export function acquirePortLock(port = DEFAULT_PORT, { ownerId = null, staleMs =
         port: normalizedPort,
         lockDir,
         release() {
-          rmSync(lockDir, { recursive: true, force: true });
+          releaseOwnedLockDirectory(lockDir, lockId);
         },
       };
     } catch (e) {
@@ -1039,7 +1063,19 @@ export function verifyManagedChromePid(pid, { cacheDir = browserToolsCacheDir(),
 // a previous leak became invisible to `stop`. Processes cannot lie about existing.
 export function listManagedChromeProcesses() {
   const result = spawnSync('ps', ['-axo', 'pid=,etime=,command='], { encoding: 'utf-8' });
-  if (result.error || result.status !== 0) return [];
+  if (result.error) {
+    const error = new Error(
+      `Cannot read the managed Chrome process inventory: ps failed to start (${result.error.code || 'unknown error'}). Refusing to launch without enforcing the browser cap.`,
+    );
+    error.cause = result.error;
+    throw error;
+  }
+  if (result.status !== 0) {
+    const outcome = result.signal ? `signal ${result.signal}` : `status ${result.status ?? 'unknown'}`;
+    throw new Error(
+      `Cannot read the managed Chrome process inventory: ps exited with ${outcome}. Refusing to launch without enforcing the browser cap.`,
+    );
+  }
   return parseManagedChromeProcesses(result.stdout);
 }
 
@@ -1061,15 +1097,19 @@ export function acquireLaunchLock({ staleMs = PORT_LOCK_STALE_MS, waitMs = 30000
   ensureCacheDir();
   const lockDir = launchLockDir();
   const deadline = Date.now() + Math.max(0, waitMs);
+  const lockId = randomUUID();
+  const ownerProcessStartIdentity = processStartIdentity(process.pid);
 
   while (true) {
     try {
       mkdirSync(lockDir, { mode: 0o700 });
       writePrivateFile(join(lockDir, 'lock.json'), JSON.stringify({
+        lockId,
         pid: process.pid,
+        processStartIdentity: ownerProcessStartIdentity,
         createdAt: new Date().toISOString(),
       }, null, 2));
-      return { lockDir, release() { rmSync(lockDir, { recursive: true, force: true }); } };
+      return { lockDir, release() { releaseOwnedLockDirectory(lockDir, lockId); } };
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
       if (!lockDirectoryIsActive(lockDir, { staleMs })) continue;
@@ -1113,6 +1153,24 @@ export function occupiedManagedSlotPorts({ processes = listManagedChromeProcesse
     if (isPendingProcessScan) ports.add(port);
   }
   return ports;
+}
+
+function managedBrowserCandidatesForOccupiedSlots(processes, occupiedPorts) {
+  const candidates = [...processes];
+  const visiblePorts = new Set(processes.map((entry) => entry.port));
+  for (const port of occupiedPorts) {
+    if (visiblePorts.has(port)) continue;
+    const state = readManagedState(stateFileForPort(port));
+    if (!state) continue;
+    candidates.push({
+      pid: Number(state.pid),
+      port,
+      ageMs: null,
+      userDataDir: state.userDataDir,
+      managedToken: state.managedToken,
+    });
+  }
+  return candidates;
 }
 
 export function managedBrowserCapacity({ processes = listManagedChromeProcesses(), max = maxManagedBrowsers() } = {}) {
@@ -1613,26 +1671,71 @@ export async function startChrome({
         );
       }
       let proc;
+      let serializedReuse = null;
       try {
         const live = listManagedChromeProcesses();
         const occupied = occupiedManagedSlotPorts({ processes: live });
-        occupied.delete(normalizedPort);
-        assertManagedBrowserCapacity({
-          processes: [...occupied].map((p) =>
-            live.find((entry) => entry.port === p)
-            || { pid: readManagedState(stateFileForPort(p))?.pid ?? null, port: p, ageMs: null }),
-        });
-        proc = launchChrome({
-          port: normalizedPort,
-          profileName: resolvedProfileName,
-          userDataDir,
-          ownerToken: effectiveOwnerToken,
-          ownerId: normalizedOwnerId,
-          headless,
-          includeGoogle,
-        });
+        if (autoAllocatePort && providedOwnerToken) {
+          serializedReuse = findReusableManagedBrowser({
+            ownerToken: providedOwnerToken,
+            includeGoogle,
+            profileName: resolvedProfileName,
+            headless,
+            forceProfileSync,
+            processes: managedBrowserCandidatesForOccupiedSlots(live, occupied),
+          });
+        }
+        if (!serializedReuse) {
+          occupied.delete(normalizedPort);
+          assertManagedBrowserCapacity({
+            processes: [...occupied].map((p) =>
+              live.find((entry) => entry.port === p)
+              || { pid: readManagedState(stateFileForPort(p))?.pid ?? null, port: p, ageMs: null }),
+          });
+          proc = launchChrome({
+            port: normalizedPort,
+            profileName: resolvedProfileName,
+            userDataDir,
+            ownerToken: effectiveOwnerToken,
+            ownerId: normalizedOwnerId,
+            headless,
+            includeGoogle,
+          });
+        }
       } finally {
         launchLock.release();
+      }
+      if (serializedReuse) {
+        const ready = await waitForChromeReady(serializedReuse.port, { timeoutMs: CHROME_READY_TIMEOUT_MS });
+        if (!ready) {
+          throw new Error(
+            `Matching managed Chrome on :${serializedReuse.port} did not become ready after a concurrent start.`,
+          );
+        }
+        const state = readManagedStateForPort(serializedReuse.port);
+        const reuse = managedBrowserReuseDecision({
+          safety: managedBrowserSafetyForPort(serializedReuse.port),
+          state,
+          ownerToken: providedOwnerToken,
+          includeGoogle,
+          profileName: resolvedProfileName,
+          headless,
+          forceProfileSync,
+        });
+        if (!reuse.ok) {
+          throw new Error(
+            `Matching managed Chrome on :${serializedReuse.port} changed while a concurrent start was completing (${reuse.reason}).`,
+          );
+        }
+        return {
+          status: 'reused',
+          port: serializedReuse.port,
+          headless: Boolean(state?.headless),
+          includeGoogle: Boolean(state?.includeGoogle),
+          ownerToken: effectiveOwnerToken,
+          ownerId: reuse.ownerId,
+          ownerTokenGenerated: false,
+        };
       }
       const ready = await waitForChromeReady(normalizedPort, { timeoutMs: CHROME_READY_TIMEOUT_MS });
       if (!ready) {
@@ -1868,6 +1971,20 @@ function commandForPid(pid) {
   if (result.error || result.status !== 0) return null;
   const command = result.stdout.trim();
   return command || null;
+}
+
+function processStartIdentity(pid) {
+  const normalizedPid = Number(pid);
+  if (!Number.isInteger(normalizedPid) || normalizedPid < 1) return null;
+  const result = spawnSync(
+    'ps',
+    ['-p', String(normalizedPid), '-o', 'lstart=', '-o', 'command='],
+    { encoding: 'utf-8' },
+  );
+  if (result.error || result.status !== 0) return null;
+  const identity = result.stdout.trim();
+  if (!identity) return null;
+  return createHash('sha256').update(identity, 'utf8').digest('hex');
 }
 
 function processExists(pid) {

@@ -29,6 +29,7 @@ import {
   parseManagedChromeProcesses,
   parseProcessAgeMs,
   portLockDirForPort,
+  acquirePortLock,
   acquireLaunchLock,
   occupiedManagedSlotPorts,
   pruneChromeClones,
@@ -456,6 +457,109 @@ test('startChrome refuses to launch past the cap instead of allocating another p
   );
 });
 
+test('startChrome refuses to launch when the managed browser inventory cannot be read', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'bt-inventory-failure-'));
+  const binDir = join(tmp, 'bin');
+  const cacheDir = join(tmp, 'cache');
+  mkdirSync(binDir);
+  mkdirSync(cacheDir);
+  writeFileSync(join(binDir, 'ps'), '#!/bin/sh\nexit 23\n', { mode: 0o755 });
+
+  const env = {
+    PATH: process.env.PATH,
+    BROWSER_TOOLS_CACHE_DIR: process.env.BROWSER_TOOLS_CACHE_DIR,
+    BROWSER_TOOLS_CHROME_BIN: process.env.BROWSER_TOOLS_CHROME_BIN,
+  };
+  process.env.PATH = `${binDir}:${process.env.PATH}`;
+  process.env.BROWSER_TOOLS_CACHE_DIR = cacheDir;
+  process.env.BROWSER_TOOLS_CHROME_BIN = join(tmp, 'must-not-launch');
+  t.after(() => {
+    process.env.PATH = env.PATH;
+    if (env.BROWSER_TOOLS_CACHE_DIR === undefined) delete process.env.BROWSER_TOOLS_CACHE_DIR;
+    else process.env.BROWSER_TOOLS_CACHE_DIR = env.BROWSER_TOOLS_CACHE_DIR;
+    if (env.BROWSER_TOOLS_CHROME_BIN === undefined) delete process.env.BROWSER_TOOLS_CHROME_BIN;
+    else process.env.BROWSER_TOOLS_CHROME_BIN = env.BROWSER_TOOLS_CHROME_BIN;
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  await assert.rejects(
+    () => startChrome({ port: 65419, ownerToken: 'inventory-owner' }),
+    /Cannot read the managed Chrome process inventory/,
+  );
+  assert.deepEqual(
+    readdirSync(cacheDir),
+    [],
+    'an unreadable process inventory must fail before creating lifecycle state or locks',
+  );
+});
+
+test('concurrent auto-allocated starts with one owner reuse a single browser', { timeout: 30000 }, async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'bt-owner-race-'));
+  const cacheDir = join(tmp, 'cache');
+  const fakeChrome = join(tmp, 'fake-chrome.mjs');
+  const ownerToken = 'shared-concurrent-owner';
+  mkdirSync(cacheDir);
+  writeFileSync(fakeChrome, `#!/usr/bin/env node
+import { createServer } from 'node:http';
+
+const portValue = process.argv.find((arg) => arg.startsWith('--remote-debugging-port='));
+const port = Number.parseInt(portValue?.split('=')[1] || '', 10);
+const server = createServer((request, response) => {
+  if (request.url === '/json/version') {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ webSocketDebuggerUrl: \`ws://127.0.0.1:\${port}/devtools/browser/test\` }));
+    return;
+  }
+  response.writeHead(404);
+  response.end();
+});
+server.listen(port, '127.0.0.1');
+const stop = () => server.close(() => process.exit(0));
+process.on('SIGTERM', stop);
+process.on('SIGINT', stop);
+`, { mode: 0o755 });
+
+  const env = {
+    BROWSER_TOOLS_CACHE_DIR: process.env.BROWSER_TOOLS_CACHE_DIR,
+    BROWSER_TOOLS_CHROME_BIN: process.env.BROWSER_TOOLS_CHROME_BIN,
+  };
+  process.env.BROWSER_TOOLS_CACHE_DIR = cacheDir;
+  process.env.BROWSER_TOOLS_CHROME_BIN = fakeChrome;
+  t.after(() => {
+    for (const name of existsSync(cacheDir) ? readdirSync(cacheDir) : []) {
+      const match = name.match(/^chrome-(\d+)\.json$/);
+      if (!match) continue;
+      try {
+        stopChrome({ port: Number.parseInt(match[1], 10), ownerToken });
+      } catch {
+        // The assertion is more useful than a cleanup error from an already exited fake browser.
+      }
+    }
+    if (env.BROWSER_TOOLS_CACHE_DIR === undefined) delete process.env.BROWSER_TOOLS_CACHE_DIR;
+    else process.env.BROWSER_TOOLS_CACHE_DIR = env.BROWSER_TOOLS_CACHE_DIR;
+    if (env.BROWSER_TOOLS_CHROME_BIN === undefined) delete process.env.BROWSER_TOOLS_CHROME_BIN;
+    else process.env.BROWSER_TOOLS_CHROME_BIN = env.BROWSER_TOOLS_CHROME_BIN;
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const results = await Promise.all([
+    startChrome({ port: 65420, autoAllocatePort: true, ownerToken }),
+    startChrome({ port: 65420, autoAllocatePort: true, ownerToken }),
+  ]);
+
+  assert.deepEqual(
+    results.map((result) => result.status).sort(),
+    ['reused', 'started'],
+    'one caller starts Chrome and the serialized caller reuses it',
+  );
+  assert.equal(results[0].port, results[1].port, 'both callers receive the same browser port');
+  assert.equal(
+    readdirSync(cacheDir).filter((name) => /^chrome-\d+\.json$/.test(name)).length,
+    1,
+    'the race leaves one managed browser lifecycle',
+  );
+});
+
 test('the pre-launch reap spares tracked browsers and ports held by a concurrent start', () => {
   withTempCache((tmp) => {
     const trackedDir = join(tmp, 'chrome-data-9222');
@@ -684,21 +788,83 @@ test('the launch lock serialises slot reservation and is released', () => {
 
 test('a live launch-lock owner never ages out', () => {
   withTempCache((tmp) => {
-    const lockDir = join(tmp, 'launch.lock');
-    mkdirSync(lockDir);
-    writeFileSync(join(lockDir, 'lock.json'), JSON.stringify({
-      pid: process.pid,
-      createdAt: new Date(0).toISOString(),
-    }));
+    const liveLock = acquireLaunchLock();
+    assert.ok(liveLock, 'the live owner must acquire the fixture lock');
+    const lockDir = liveLock.lockDir;
     const old = new Date(Date.now() - 60_000);
     utimesSync(lockDir, old, old);
 
+    try {
+      assert.equal(
+        acquireLaunchLock({ staleMs: 1, waitMs: 0 }),
+        null,
+        'age recovery must not replace a lock whose recorded owner is still alive',
+      );
+      assert.equal(existsSync(lockDir), true, 'the live owner must retain its lock directory');
+    } finally {
+      liveLock.release();
+    }
+  });
+});
+
+test('old locks are reclaimed when their PID belongs to a different process identity', () => {
+  withTempCache((tmp) => {
+    const old = new Date(Date.now() - 60_000);
+    const launchDir = join(tmp, 'launch.lock');
+    mkdirSync(launchDir);
+    writeFileSync(join(launchDir, 'lock.json'), JSON.stringify({
+      pid: process.pid,
+      processStartIdentity: 'not-the-current-process',
+      createdAt: new Date(0).toISOString(),
+    }));
+    utimesSync(launchDir, old, old);
+
+    const launchLock = acquireLaunchLock({ staleMs: 1, waitMs: 0 });
+    assert.ok(launchLock, 'a reused PID must not keep an old launch lock active');
+    launchLock.release();
+
+    const port = 65422;
+    const portDir = portLockDirForPort(port);
+    mkdirSync(portDir);
+    writeFileSync(join(portDir, 'lock.json'), JSON.stringify({
+      pid: process.pid,
+      port,
+      processStartIdentity: 'not-the-current-process',
+      createdAt: new Date(0).toISOString(),
+    }));
+    utimesSync(portDir, old, old);
+
+    const portLock = acquirePortLock(port, { staleMs: 1 });
+    assert.ok(portLock, 'a reused PID must not keep an old port lock active');
+    portLock.release();
+  });
+});
+
+test('a previous lock owner cannot release a replacement lock', () => {
+  withTempCache(() => {
+    const first = acquireLaunchLock();
+    assert.ok(first, 'the first owner acquires the launch lock');
+    const lockFile = join(first.lockDir, 'lock.json');
+    const staleState = JSON.parse(readFileSync(lockFile, 'utf-8'));
+    staleState.processStartIdentity = 'not-the-current-process';
+    writeFileSync(lockFile, JSON.stringify(staleState));
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(first.lockDir, old, old);
+
+    const replacement = acquireLaunchLock({ staleMs: 1, waitMs: 0 });
+    assert.ok(replacement, 'the mismatched old lock is replaced');
+    first.release();
     assert.equal(
-      acquireLaunchLock({ staleMs: 1, waitMs: 0 }),
-      null,
-      'age recovery must not replace a lock whose recorded owner is still alive',
+      existsSync(replacement.lockDir),
+      true,
+      'the previous owner release must not remove the replacement lock',
     );
-    assert.equal(existsSync(lockDir), true, 'the live owner must retain its lock directory');
+    assert.equal(
+      acquireLaunchLock({ waitMs: 0 }),
+      null,
+      'the replacement must still exclude another launch',
+    );
+    replacement.release();
   });
 });
 
