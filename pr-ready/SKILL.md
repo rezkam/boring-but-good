@@ -139,6 +139,29 @@ Then the real one:
 Force-pushing over a branch someone may have pulled, or over a PR with filed reviews,
 needs the user's explicit go-ahead first.
 
+### Never run a git command that can open an editor
+
+`git rebase --continue`, `git merge`, `git cherry-pick`, `git revert`, and
+`git commit --amend` all drop into `$EDITOR` and wait. Under an agent there is nobody to
+close it. One `rebase --continue` sat in vim for 1022 seconds before the run was killed,
+and completed in 0.3 seconds once the editor was disabled.
+
+Prefix with `GIT_EDITOR=true`, or pass `--no-edit`, or supply the message with `-m`:
+
+```bash
+GIT_EDITOR=true git rebase --continue
+git merge --no-edit origin/main
+```
+
+Claude Code happens to set `GIT_EDITOR=true` already. Codex does not, which is where this
+failure came from, so write the guard explicitly rather than depending on the harness.
+Same for anything else that prompts: `gh pr create` without `--title` and `--body` is
+interactive, and `GIT_TERMINAL_PROMPT=0` stops git blocking on a credential prompt.
+
+A timeout is the backstop, not the fix. It converts a hang into a shorter hang, and you
+still lose the in-progress rebase state. Bound long commands anyway, but disable the
+editor first.
+
 ### MERGE_STATE is not the whole answer
 
 `mergeStateStatus: CLEAN` means a **merge commit** would apply. It says nothing about

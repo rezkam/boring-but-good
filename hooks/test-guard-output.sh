@@ -7,6 +7,7 @@
 
 set -uo pipefail
 HOOK="$(cd "$(dirname "$0")" && pwd)/guard-output.sh"
+EM=$(printf '\u2014')
 pass=0; fail=0
 
 # $1 expected exit, $2 name, $3 json payload
@@ -26,7 +27,7 @@ w() { jq -cn --arg c "$1" --arg p "${2:-/repo/src/a.md}" \
 b() { jq -cn --arg c "$1" '{tool_name:"Bash", tool_input:{command:$c}}'; }
 
 echo "existing behavior"
-check 2 "em dash in written content"        "$(w 'a sentence — with a dash')"
+check 2 "em dash in written content"        "$(w "a sentence $EM with a dash")"
 check 0 "clean written content"             "$(w 'a sentence, with a comma')"
 check 2 "AI attribution in a commit"        "$(b 'git commit -m "fix
 
@@ -38,6 +39,17 @@ check 0 "git commit --amend --no-edit"      "$(b 'git commit --amend --no-edit')
 check 2 "draft PR"                          "$(b 'gh pr create --draft --title x')"
 check 2 "staging the notes file"            "$(b 'git add implementation-notes-x.md')"
 check 0 "ordinary bash is not inspected"    "$(b 'ls -la /Users/someone/Code')"
+
+echo "commands that can open an editor and hang"
+check 2 "git rebase --continue bare"        "$(b 'git rebase --continue')"
+check 0 "rebase --continue with GIT_EDITOR" "$(b 'GIT_EDITOR=true git rebase --continue')"
+check 2 "git merge without --no-edit"       "$(b 'git merge origin/main')"
+check 0 "git merge --no-edit"               "$(b 'git merge --no-edit origin/main')"
+check 2 "git cherry-pick bare"              "$(b 'git cherry-pick abc1234')"
+check 0 "git revert --no-edit"              "$(b 'git revert --no-edit abc1234')"
+check 2 "git commit --amend without -m"     "$(b 'git commit --amend')"
+check 0 "git commit --amend --no-edit"      "$(b 'git commit --amend --no-edit')"
+check 0 "git commit with -m"                "$(b 'git commit -m "fix: a message"')"
 
 echo "personal and environment data"
 check 2 "real email address"                "$(w 'contact: firstname.lastname@acme.com')"
