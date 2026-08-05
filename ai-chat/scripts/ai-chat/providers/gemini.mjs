@@ -11,6 +11,7 @@ import {
   fetchGeminiAccountModels,
   getGoogleCookies,
   hasRequiredGoogleCookies,
+  parseGeminiStreamResponse,
   queryGeminiWeb,
   resolveChromeProfileName,
   resolveGeminiModel,
@@ -332,6 +333,90 @@ function normalizedGeminiErrorCode(error) {
   return messageMatch ? Number.parseInt(messageMatch[1], 10) : null;
 }
 
+export async function queryGeminiViaBrowserNetwork(browser, prompt, timeoutMs = 120000, options = {}) {
+  const page = await browser.newPage({ background: true });
+  const promptSelector = 'div[role="textbox"][aria-label="Enter a prompt for Gemini"]';
+  const requestedMode = options.modelConfig?.thinking
+    ? 'Thinking'
+    : (options.modelConfig?.id?.includes('-pro') ? 'Pro' : 'Flash');
+  try {
+    await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForSelector(promptSelector, { timeout: 30000 });
+    await page.waitForSelector('button[aria-label^="Open mode picker"]', { timeout: 30000 });
+    if (options.temporary !== false) {
+      await page.waitForSelector('button[aria-label="Temporary chat"]', { timeout: 30000 });
+    }
+    const configured = await page.evaluate(async ({ requestedMode, temporary }) => {
+      const modePicker = document.querySelector('button[aria-label^="Open mode picker"]');
+      if (!modePicker) throw new Error('Gemini mode picker not found');
+      const currentMode = `${modePicker.getAttribute('aria-label') || ''} ${modePicker.innerText || ''}`;
+      if (!currentMode.includes(requestedMode)) {
+        modePicker.click();
+        await new Promise(resolve => setTimeout(resolve, 500));
+        const choice = [...document.querySelectorAll('button, [role="menuitem"], [role="option"]')]
+          .find(node => (node.innerText || '').trim().includes(requestedMode));
+        if (!choice) throw new Error(`Gemini model mode is unavailable in the UI: ${requestedMode}`);
+        choice.click();
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      const observedPicker = document.querySelector('button[aria-label^="Open mode picker"]');
+      const observedMode = `${observedPicker?.getAttribute('aria-label') || ''} ${observedPicker?.innerText || ''}`;
+      if (!observedMode.includes(requestedMode)) {
+        throw new Error(`Gemini model mode did not activate: expected ${requestedMode}, observed ${observedMode.trim() || 'unknown'}`);
+      }
+      if (temporary) {
+        const temporaryButton = document.querySelector('button[aria-label="Temporary chat"]');
+        if (!temporaryButton) throw new Error('Gemini temporary chat control not found');
+        temporaryButton.click();
+        await new Promise(resolve => setTimeout(resolve, 750));
+        if (!/Temporary chats/i.test(document.body?.innerText || '')) {
+          throw new Error('Gemini temporary chat mode did not activate');
+        }
+      }
+      return { observedMode: requestedMode, temporaryActive: temporary };
+    }, { requestedMode, temporary: options.temporary !== false });
+    if (!configured || configured.observedMode !== requestedMode) {
+      throw new Error(`Gemini model mode verification failed: ${requestedMode}`);
+    }
+    if (options.temporary !== false && configured.temporaryActive !== true) {
+      throw new Error('Gemini temporary chat verification failed');
+    }
+    await page.waitForSelector(promptSelector, { timeout: 30000 });
+    await page.evaluate((selector, text) => {
+      const editor = document.querySelector(selector);
+      if (!editor) throw new Error('Gemini prompt input not found');
+      editor.focus();
+      document.execCommand('selectAll', false, null);
+      document.execCommand('insertText', false, text);
+      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+    }, promptSelector, prompt);
+    await page.waitForSelector('button[aria-label="Send message"]:not([disabled])', { timeout: 10000 });
+
+    const responsePromise = page.waitForResponse(
+      response => response.request().method() === 'POST' && response.url().includes('/StreamGenerate'),
+      { timeout: timeoutMs },
+    );
+    await page.evaluate(() => {
+      const button = document.querySelector('button[aria-label="Send message"]');
+      if (!button || button.disabled) throw new Error('Gemini send button is not actionable');
+      button.click();
+    });
+    const response = await responsePromise;
+    const rawText = await response.text();
+    const result = parseGeminiStreamResponse(rawText);
+    if (!result.text) throw new Error('Gemini browser network response contained no answer text');
+    return {
+      ...result,
+      rawText,
+      browserNetworkFallback: true,
+      modelUsed: options.modelConfig?.id || null,
+      temporaryVerified: configured.temporaryActive === true,
+    };
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
 export function isGeminiNativeContinuationError(error) {
   return normalizedGeminiErrorCode(error) === GEMINI_NATIVE_CONTINUATION_ERROR_CODE;
 }
@@ -406,7 +491,8 @@ export const geminiProvider = {
     if (sessionVerification.ui.checked && !sessionVerification.ui_ready) {
       console.error(`[gemini] UI login check is not ready: ${sessionVerification.ui.reason}. Direct WebUI auth ${sessionVerification.direct_ready ? 'passed' : 'failed'}.`);
     }
-    if (!sessionVerification.direct_ready) {
+    const useBrowserNetwork = cookieContext.source === COOKIE_SOURCE_MANAGED_BROWSER && !!browser && request.browserHeadless;
+    if (!sessionVerification.direct_ready && !useBrowserNetwork) {
       console.error(`[gemini] Direct session check is not ready: ${sessionVerification.direct.error || 'account RPC did not return models'}.`);
     }
 
@@ -425,32 +511,45 @@ export const geminiProvider = {
     let result;
     const saveToLibrary = !!request.providerOptions?.saveToLibrary;
     const temporary = !saveToLibrary;
-    try {
-      result = await queryGeminiWeb(request.prompt, cookies, {
+    const previousMessages = conversation?.record?.messages || [];
+    const transcript = previousMessages
+      .map(message => `${message.role === 'assistant' ? 'Assistant' : 'User'}: ${message.content}`)
+      .join('\n\n');
+    const replayPrompt = previousMessages.length
+      ? `Continue this conversation. Use the prior messages as context, then answer the new user message.\n\n${transcript}\n\nUser: ${request.prompt}`
+      : request.prompt;
+
+    if (useBrowserNetwork) {
+      result = await queryGeminiViaBrowserNetwork(browser, replayPrompt, request.timeoutSeconds * 1000, {
         modelConfig,
-        timeoutMs: request.timeoutSeconds * 1000,
-        conversationState: conversation?.record?.provider_state?.conversation_state || null,
         temporary,
       });
-    } catch (error) {
-      const previousMessages = conversation?.record?.messages || [];
-      if (!previousMessages.length || !isGeminiNativeContinuationError(error)) throw error;
-      const nativeContinuationError = {
-        message: error.message,
-        error_code: normalizedGeminiErrorCode(error),
-        model: error.model || modelConfig.id,
-      };
-      const transcript = previousMessages
-        .map(message => `${message.role === 'assistant' ? 'Assistant' : 'User'}: ${message.content}`)
-        .join('\n\n');
-      const replayPrompt = `Continue this conversation. Use the prior messages as context, then answer the new user message.\n\n${transcript}\n\nUser: ${request.prompt}`;
-      result = await queryGeminiWeb(replayPrompt, cookies, {
-        modelConfig,
-        timeoutMs: request.timeoutSeconds * 1000,
-        temporary,
-      });
-      result.localTranscriptFallback = true;
-      result.nativeContinuationError = nativeContinuationError;
+      result.localTranscriptFallback = previousMessages.length > 0;
+      sessionVerification.browser_network_ready = true;
+      sessionVerification.fully_logged_in = true;
+    } else {
+      try {
+        result = await queryGeminiWeb(request.prompt, cookies, {
+          modelConfig,
+          timeoutMs: request.timeoutSeconds * 1000,
+          conversationState: conversation?.record?.provider_state?.conversation_state || null,
+          temporary,
+        });
+      } catch (error) {
+        if (!previousMessages.length || !isGeminiNativeContinuationError(error)) throw error;
+        const nativeContinuationError = {
+          message: error.message,
+          error_code: normalizedGeminiErrorCode(error),
+          model: error.model || modelConfig.id,
+        };
+        result = await queryGeminiWeb(replayPrompt, cookies, {
+          modelConfig,
+          timeoutMs: request.timeoutSeconds * 1000,
+          temporary,
+        });
+        result.localTranscriptFallback = true;
+        result.nativeContinuationError = nativeContinuationError;
+      }
     }
     return {
       text: result.text,
@@ -459,10 +558,11 @@ export const geminiProvider = {
       modelUsed: result.modelUsed,
       finalUrl: null,
       providerState: {
-        transport: 'webui-api',
+        transport: result.browserNetworkFallback ? 'browser-network' : 'webui-api',
         error_code: result.errorCode || null,
         conversation_state: result.conversationState || null,
-        is_temporary: temporary,
+        is_temporary: result.browserNetworkFallback ? result.temporaryVerified === true : temporary,
+        temporary_verified: result.browserNetworkFallback ? result.temporaryVerified === true : null,
         saved_to_library: saveToLibrary,
         cookie_source: cookieContext.source,
         chrome_profile: cookieContext.chromeProfile,
