@@ -63,6 +63,7 @@ scripts/ai-chat.mjs --provider perplexity --conversation https://www.perplexity.
 scripts/ai-chat.mjs --provider chatgpt --list-models --json
 scripts/ai-chat.mjs --provider chatgpt --model extra-high --prompt-file /tmp/question.md --json
 scripts/ai-chat.mjs --provider gemini --task reasoning --prompt "Explain this tradeoff" --verify-session --json
+scripts/ai-chat.mjs --provider gemini --headless --include-google --browser-profile "Browser Profile" --prompt "Search the web for recent evidence" --json
 scripts/ai-chat.mjs --provider perplexity --list-models --verify-models --verify-model-timeout 180 --json
 scripts/ai-chat.mjs --provider perplexity --model openai/gpt-5.6-terra --thinking --prompt "Find recent evidence" --json
 
@@ -100,7 +101,7 @@ scripts/ai-chat.mjs \
 
 - Perplexity has one transport, `browser-network-sse`. It runs authenticated same-origin requests in a headless-preferred managed browser, parses captured schematized SSE block patches, supports model and Thinking variants, persistent-by-default history, explicit Incognito, research filters, deep research, files, Spaces, streaming, and backend UUID continuation. New responses expose the backend UUID and canonical `/search/<uuid>` thread URL. It never extracts browser cookies and has no rendered HTML, element, or DOM fallback path.
 - ChatGPT long-running requests use network SSE and WebSocket state first. Metadata reports stream handoff, timeout, partial or empty response, resumed stream, assistant turn completion, and DOM fallback when fallback is used.
-- Gemini uses WebUI API cookies from the AI Chat owned browser by default. It can fall back to an explicit Chrome profile cookie source. Native continuation can fail with backend error `1097`; metadata must show that and the local transcript fallback.
+- Gemini uses WebUI API cookies from the AI Chat owned browser by default. It can fall back to an explicit Chrome profile cookie source. For a fully headless Google-authenticated browser, use `--headless --include-google --browser-profile "<profile folder>"`. Including Google identity reintroduces the source-session logout risk that Browser Tools normally avoids, so use it only for an intentional Google workflow. In headless managed-browser mode, Gemini submits through the authenticated page and parses the complete `StreamGenerate` network response instead of scraping rendered answer text. Native continuation can fail with backend error `1097`; metadata must show that and the local transcript fallback.
 - Grok uses browser UI labels and preflights the X/Grok composer before typing. It can verify visible labels, but not a backend model slug. In the current X/Grok app `Fast` is the reliable default; check `--list-models --verify-models` before selecting `Auto` or `Expert`.
 
 ## References

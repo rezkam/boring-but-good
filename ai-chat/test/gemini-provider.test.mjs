@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildAiChatRequest, runAiChat } from '../scripts/ai-chat/module.mjs';
-import { geminiProvider, isGeminiNativeContinuationError } from '../scripts/ai-chat/providers/gemini.mjs';
+import { geminiProvider, isGeminiNativeContinuationError, queryGeminiViaBrowserNetwork } from '../scripts/ai-chat/providers/gemini.mjs';
 
 function noCache() {
   return { read: () => null, write: () => null };
@@ -92,6 +92,103 @@ function promptFromStreamCall(call) {
   const innerReqList = JSON.parse(outer[1]);
   return innerReqList[0][0];
 }
+
+test('Gemini browser-network fallback captures and parses the complete StreamGenerate response', async () => {
+  const calls = [];
+  const response = {
+    url: () => 'https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate',
+    request: () => ({ method: () => 'POST' }),
+    text: async () => streamAnswerRaw('complete browser-network answer'),
+  };
+  const page = {
+    async goto(url, options) { calls.push(['goto', url, options]); },
+    async waitForSelector(selector) { calls.push(['waitForSelector', selector]); },
+    async evaluate(_fn, selector, prompt) {
+      calls.push(['evaluate', selector, prompt]);
+      if (selector?.requestedMode) {
+        return { observedMode: selector.requestedMode, temporaryActive: selector.temporary };
+      }
+    },
+    async waitForResponse(predicate, options) {
+      calls.push(['waitForResponse', options]);
+      assert.equal(predicate(response), true);
+      return response;
+    },
+    async click(selector) { calls.push(['click', selector]); },
+    async close() { calls.push(['close']); },
+  };
+
+  const result = await queryGeminiViaBrowserNetwork({ newPage: async options => {
+    assert.deepEqual(options, { background: true });
+    return page;
+  } }, 'browser prompt', 45000, {
+    modelConfig: { id: 'gemini-3-pro', thinking: false },
+    temporary: false,
+  });
+
+  assert.equal(result.text, 'complete browser-network answer');
+  assert.equal(result.browserNetworkFallback, true);
+  assert.equal(result.modelUsed, 'gemini-3-pro');
+  assert.equal(result.temporaryVerified, false);
+  assert.ok(result.rawText.includes('complete browser-network answer'));
+  assert.deepEqual(calls.at(-1), ['close']);
+  assert.deepEqual(calls.find(call => call[0] === 'evaluate')[1], { requestedMode: 'Pro', temporary: false });
+  assert.deepEqual(calls.find(call => call[0] === 'waitForResponse'), ['waitForResponse', { timeout: 45000 }]);
+});
+
+test('Gemini provider falls back from failed Node replay to a complete browser-network response', async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new TypeError('fetch failed'); };
+  const response = {
+    url: () => 'https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate',
+    request: () => ({ method: () => 'POST' }),
+    text: async () => streamAnswerRaw('fallback captured the complete answer'),
+  };
+  const networkPage = {
+    async goto() {},
+    async waitForSelector() {},
+    async evaluate(_fn, value) {
+      if (value?.requestedMode) {
+        return { observedMode: value.requestedMode, temporaryActive: value.temporary };
+      }
+    },
+    async waitForResponse(predicate) {
+      assert.equal(predicate(response), true);
+      return response;
+    },
+    async close() {},
+  };
+  const browser = {
+    pages: async () => [{
+      url: () => 'https://gemini.google.com/app',
+      cookies: async () => [{ name: '__Secure-1PSID', value: 'psid' }],
+    }],
+    newPage: async () => networkPage,
+  };
+  const stdout = [];
+
+  try {
+    const result = await runAiChat(buildAiChatRequest({
+      providerName: 'gemini',
+      modelName: 'gemini-3-flash',
+      prompt: 'capture this',
+      jsonOutput: true,
+      timeoutSeconds: 1,
+      browserHeadless: true,
+    }), {
+      provider: geminiProvider,
+      browser,
+      cache: noCache(),
+      io: { stdout: text => stdout.push(text), writeFile: () => assert.fail('no file expected') },
+    });
+
+    assert.equal(result.result.text, 'fallback captured the complete answer');
+    assert.equal(result.metadata.provider_state.transport, 'browser-network');
+    assert.equal(JSON.parse(stdout[0]).response, 'fallback captured the complete answer');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
 
 test('Gemini continuation error classifier is explicit to 1097', () => {
   const coded = new Error('backend rejected continuation');
