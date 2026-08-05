@@ -70,6 +70,7 @@ test('parseAiChatArgs supports provider options and conversation flags', () => {
     '--timezone', 'Europe/Stockholm',
     '--save-to-library',
     '--chrome-profile', 'Work Profile',
+    '--browser-profile', 'Browser Profile',
     '--cookie-source', 'chrome-profile',
     '--file', '/tmp/report.pdf',
     '--file', '/tmp/chart.png',
@@ -79,6 +80,8 @@ test('parseAiChatArgs supports provider options and conversation flags', () => {
     '--evidence',
     '--evidence-path', '/tmp/ai-chat-evidence.png',
     '--evidence-full-page',
+    '--headless',
+    '--include-google',
     '--verify-models',
     '--verify-model-timeout', '12',
     '--json',
@@ -98,6 +101,7 @@ test('parseAiChatArgs supports provider options and conversation flags', () => {
   assert.equal(request.providerOptions.timezone, 'Europe/Stockholm');
   assert.equal(request.providerOptions.saveToLibrary, true);
   assert.equal(request.providerOptions.chromeProfile, 'Work Profile');
+  assert.equal(request.browserProfileName, 'Browser Profile');
   assert.equal(request.providerOptions.cookieSource, 'chrome-profile');
   assert.deepEqual(request.providerOptions.files, ['/tmp/report.pdf', '/tmp/chart.png']);
   assert.equal(request.providerOptions.spaceUuid, '123e4567-e89b-12d3-a456-426614174000');
@@ -106,6 +110,8 @@ test('parseAiChatArgs supports provider options and conversation flags', () => {
   assert.equal(request.captureEvidence, true);
   assert.equal(request.evidencePath, '/tmp/ai-chat-evidence.png');
   assert.equal(request.evidenceFullPage, true);
+  assert.equal(request.browserHeadless, true);
+  assert.equal(request.includeGoogle, true);
   assert.equal(request.verifyModels, true);
   assert.equal(request.verifyModelTimeoutSeconds, 12);
   assert.equal(request.jsonOutput, true);
@@ -469,7 +475,7 @@ test('runAiChat uses provider direct transport when available', async () => {
   assert.equal(JSON.parse(stdout[0]).provider_state.thread, 't1');
 });
 
-test('runAiChat starts a preferred headless AI Chat owned browser from the Default profile', async () => {
+test('runAiChat starts a headless Google-enabled browser from the explicitly selected profile', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ai-chat-browser-start-'));
   try {
     const stateFile = join(dir, 'browser.json');
@@ -478,7 +484,16 @@ test('runAiChat starts a preferred headless AI Chat owned browser from the Defau
     let startArgs = null;
     let disconnects = 0;
     const browser = { disconnect: () => { disconnects += 1; } };
-    const request = buildAiChatRequest({ providerName: 'browser-provider', modelName: 'default', prompt: 'hello', jsonOutput: true, browserStateFile: stateFile });
+    const request = buildAiChatRequest({
+      providerName: 'browser-provider',
+      modelName: 'default',
+      prompt: 'hello',
+      jsonOutput: true,
+      browserStateFile: stateFile,
+      browserProfileName: 'Browser Profile',
+      browserHeadless: true,
+      includeGoogle: true,
+    });
 
     await runAiChat(request, {
       provider: {
@@ -493,7 +508,7 @@ test('runAiChat starts a preferred headless AI Chat owned browser from the Defau
       },
       async startChrome(args) {
         startArgs = args;
-        return { status: 'started', port: 4555, ownerToken: 'owned-token', profileName: 'Default', requestedProfileName: 'Default', headless: true };
+        return { status: 'started', port: 4555, ownerToken: 'owned-token', profileName: 'Browser Profile', requestedProfileName: 'Browser Profile', headless: true, includeGoogle: true };
       },
       async connectBrowser(port, options) {
         connectCalls.push({ port, options });
@@ -503,15 +518,16 @@ test('runAiChat starts a preferred headless AI Chat owned browser from the Defau
       io: { stdout: text => stdout.push(text), writeFile: () => assert.fail('no file expected') },
     });
 
-    assert.deepEqual(startArgs, { port: 9222, taskName: 'ai-chat', defaultProfileName: 'Default', ownerId: 'ai-chat', autoAllocatePort: true, headless: true });
-    assert.deepEqual(connectCalls, [{ port: 4555, options: { ownerToken: 'owned-token', protocolTimeout: 60000 } }]);
+    assert.deepEqual(startArgs, { port: 9222, taskName: 'ai-chat', profileName: 'Browser Profile', ownerId: 'ai-chat', autoAllocatePort: true, headless: true, includeGoogle: true });
+    assert.deepEqual(connectCalls, [{ port: 4555, options: { ownerToken: 'owned-token', protocolTimeout: 330000 } }]);
     const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
     assert.equal(state.ownerId, 'ai-chat');
     assert.equal(state.ownerToken, 'owned-token');
     assert.equal(state.port, 4555);
-    assert.equal(state.profileName, 'Default');
-    assert.equal(state.requestedProfileName, 'Default');
+    assert.equal(state.profileName, 'Browser Profile');
+    assert.equal(state.requestedProfileName, 'Browser Profile');
     assert.equal(state.headless, true);
+    assert.equal(state.includeGoogle, true);
     assert.equal(statSync(stateFile).mode & 0o777, 0o600);
     assert.equal(disconnects, 1);
     assert.equal(JSON.parse(stdout[0]).response, 'owned answer');
@@ -719,6 +735,34 @@ test('runAiChat refuses old AI Chat browsers that were started with a fresh prof
       connectBrowser: () => assert.fail('fresh-profile browser should not connect'),
       cache: noCache(),
     }), /profile-mismatch expected configured-or-default-profile, got fresh-profile.*Recovery/s);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runAiChat refuses a visible saved browser when headless execution is requested', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-browser-headless-mismatch-'));
+  try {
+    const stateFile = join(dir, 'browser.json');
+    writeJson(stateFile, { version: 1, ownerId: 'ai-chat', ownerToken: 'owned-token', port: 4996, profileName: 'Browser Profile' });
+    const request = buildAiChatRequest({
+      providerName: 'browser-provider',
+      prompt: 'hello',
+      browserStateFile: stateFile,
+      browserProfileName: 'Browser Profile',
+      browserHeadless: true,
+    });
+
+    await assert.rejects(() => runAiChat(request, {
+      provider: { name: 'browser-provider', runRequiresBrowser: () => true, run: () => assert.fail('provider should not run') },
+      managedBrowserSafetyForPort: () => ({ ok: true }),
+      readManagedStateForPort: () => ({ managedBy: 'browser-tools', ownerId: 'ai-chat', profileName: 'Browser Profile', headless: false }),
+      managedBrowserOwnershipSafety: () => ({ ok: true, ownerId: 'ai-chat' }),
+      browserWSEndpoint: async () => 'ws://localhost:4996',
+      startChrome: () => assert.fail('visible browser should not be replaced silently'),
+      connectBrowser: () => assert.fail('visible browser should not connect'),
+      cache: noCache(),
+    }), /headless-mismatch expected headless browser.*Recovery/s);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

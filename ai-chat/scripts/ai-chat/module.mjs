@@ -72,6 +72,7 @@ export function parseAiChatArgs(args = process.argv.slice(2)) {
   const language = optionValue(args, '--language', null);
   const timezone = optionValue(args, '--timezone', null);
   const chromeProfile = optionValue(args, '--chrome-profile', null);
+  const browserProfileName = optionValue(args, '--browser-profile', null);
   const cookieSource = optionValue(args, '--cookie-source', null);
   const evidencePath = optionValue(args, '--evidence-path', null);
   const files = optionValues(args, '--file');
@@ -88,6 +89,9 @@ export function parseAiChatArgs(args = process.argv.slice(2)) {
     outFile: outFile === true ? null : outFile,
     port: normalizePort(optionValue(args, '--port', DEFAULT_PORT)),
     explicitPort: args.includes('--port'),
+    browserHeadless: hasFlag(args, '--headless'),
+    browserProfileName: browserProfileName === true ? null : browserProfileName,
+    includeGoogle: hasFlag(args, '--include-google'),
     timeoutSeconds,
     timeoutExplicit: args.includes('--timeout'),
     jsonOutput: hasFlag(args, '--json'),
@@ -239,7 +243,14 @@ function browserProfileMismatchReason({ expectedProfileName = 'configured-or-def
   return `profile-mismatch expected ${expectedProfileName}, got ${actual}`;
 }
 
-export async function validateAiChatBrowserState(state, { browserTools = browserToolsDeps(), stateFile = DEFAULT_BROWSER_STATE_FILE, expectedProfileName = null, requireProfile = false } = {}) {
+export async function validateAiChatBrowserState(state, {
+  browserTools = browserToolsDeps(),
+  stateFile = DEFAULT_BROWSER_STATE_FILE,
+  expectedProfileName = null,
+  expectedHeadless = null,
+  expectedIncludeGoogle = null,
+  requireProfile = false,
+} = {}) {
   if (!state || typeof state !== 'object' || Array.isArray(state)) {
     return { ok: false, stale: true, reason: 'missing-ai-chat-browser-state' };
   }
@@ -296,12 +307,26 @@ export async function validateAiChatBrowserState(state, { browserTools = browser
     };
   }
 
+  const actualHeadless = managedState?.headless ?? state.headless ?? false;
+  if (expectedHeadless === true && actualHeadless !== true) {
+    return { ok: false, stale: false, port, reason: 'headless-mismatch expected headless browser', ownerId: ownership.ownerId || null };
+  }
+  const actualIncludeGoogle = managedState?.includeGoogle ?? state.includeGoogle ?? false;
+  if (typeof expectedIncludeGoogle === 'boolean' && actualIncludeGoogle !== expectedIncludeGoogle) {
+    const expected = expectedIncludeGoogle ? 'included' : 'excluded';
+    return { ok: false, stale: false, port, reason: `google-profile-mismatch expected Google identity ${expected}`, ownerId: ownership.ownerId || null };
+  }
+
   const wsEndpoint = await browserTools.browserWSEndpoint(port);
   if (!wsEndpoint) {
     return { ok: false, stale: false, port, reason: 'debug-port-unavailable', ownerId: ownership.ownerId || null };
   }
 
   return { ok: true, port, ownerToken, ownerId: ownership.ownerId, managedState, stateFile };
+}
+
+function browserProtocolTimeoutMs(request) {
+  return Math.max(60000, (request.timeoutSeconds * 1000) + 30000);
 }
 
 export async function ensureAiChatBrowserSession(request, deps = {}) {
@@ -313,11 +338,21 @@ export async function ensureAiChatBrowserSession(request, deps = {}) {
   const savedState = readAiChatBrowserState(stateFile, stateFs);
 
   if (savedState) {
-    const validation = await validateAiChatBrowserState(savedState, { browserTools, stateFile, requireProfile: true });
+    const validation = await validateAiChatBrowserState(savedState, {
+      browserTools,
+      stateFile,
+      expectedProfileName: request.browserProfileName || null,
+      expectedHeadless: request.browserHeadless ? true : null,
+      expectedIncludeGoogle: !!request.includeGoogle,
+      requireProfile: true,
+    });
     if (validation.ok) {
       console.error(`[ai-chat] Reusing owned Browser Tools Chrome on :${validation.port}`);
       try {
-        const browser = await browserTools.connectBrowser(validation.port, { ownerToken: validation.ownerToken, protocolTimeout: 60000 });
+        const browser = await browserTools.connectBrowser(validation.port, {
+          ownerToken: validation.ownerToken,
+          protocolTimeout: browserProtocolTimeoutMs(request),
+        });
         return { browser, shouldDisconnect: true, request: { ...request, port: validation.port }, source: 'reused', state: savedState };
       } catch (error) {
         throw aiChatBrowserError(`Refusing to connect to saved AI Chat browser after validation failed (${error.message})`, {
@@ -346,10 +381,13 @@ export async function ensureAiChatBrowserSession(request, deps = {}) {
   const started = await browserTools.startChrome({
     port: request.port,
     taskName: AI_CHAT_BROWSER_TASK_NAME,
-    defaultProfileName: AI_CHAT_DEFAULT_BROWSER_PROFILE_NAME,
+    ...(request.browserProfileName
+      ? { profileName: request.browserProfileName }
+      : { defaultProfileName: AI_CHAT_DEFAULT_BROWSER_PROFILE_NAME }),
     ownerId: AI_CHAT_BROWSER_OWNER_ID,
     autoAllocatePort: !request.explicitPort,
     ...(request.browserHeadless ? { headless: true } : {}),
+    ...(request.includeGoogle ? { includeGoogle: true } : {}),
   });
   if (!started.ownerToken) {
     throw new Error('Browser Tools did not return an owner token for the AI Chat browser. Recovery: retry, or start Browser Tools manually with an owner token and configure AI Chat state.');
@@ -364,11 +402,15 @@ export async function ensureAiChatBrowserSession(request, deps = {}) {
     profileName: started.profileName || null,
     requestedProfileName: started.requestedProfileName || null,
     headless: !!started.headless,
+    includeGoogle: !!(started.includeGoogle ?? request.includeGoogle),
     status: started.status || 'started',
     startedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   }, stateFile, stateFs);
-  const browser = await browserTools.connectBrowser(started.port, { ownerToken: started.ownerToken, protocolTimeout: 60000 });
+  const browser = await browserTools.connectBrowser(started.port, {
+    ownerToken: started.ownerToken,
+    protocolTimeout: browserProtocolTimeoutMs(request),
+  });
   return { browser, shouldDisconnect: true, request: { ...request, port: started.port }, source: started.status || 'started', state };
 }
 
@@ -391,6 +433,8 @@ export function buildAiChatRequest(options = {}) {
     explicitPort: !!options.explicitPort,
     browserStateFile: options.browserStateFile || null,
     browserHeadless: !!options.browserHeadless,
+    browserProfileName: options.browserProfileName || null,
+    includeGoogle: !!options.includeGoogle,
     timeoutSeconds: options.timeoutSeconds || DEFAULT_TIMEOUT_SECONDS,
     timeoutExplicit,
     jsonOutput: !!options.jsonOutput,
