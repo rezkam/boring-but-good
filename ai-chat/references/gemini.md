@@ -12,18 +12,13 @@ Gemini uses a direct WebUI API path through Browser Tools managed Chrome cookies
 - In headless managed-browser mode, submits through the authenticated page and captures the complete `StreamGenerate` response through the browser network layer. Non-browser cookie sources continue to use direct WebUI replay.
 - Parses the chunked response stream for answer text. It does not depend on rendered answer text.
 - Discovers account-visible model choices through Gemini's `otAQ7b` user status RPC.
-- Falls back to known model headers when live discovery fails:
-  - `gemini-3-flash` alias `flash`
-  - `gemini-3-flash-thinking` aliases `thinking`, `reasoning`
-  - `gemini-3-pro` alias `pro`
-  - `gemini-3-flash-plus`
-  - `gemini-3-flash-thinking-plus`
-  - `gemini-3-pro-plus` alias `plus-pro`
-  - advanced variants when the account allows them
-- Falls back from `pro` to `flash` on Gemini model unavailable error `1052`.
+- Exposes two current model modes when live discovery is unavailable:
+  - `gemini-3.6-flash`, alias `flash`
+  - `gemini-3.6-flash-extended-thinking`, aliases `thinking`, `extended-thinking`, and `reasoning`
+- Falls back from `gemini-3.6-flash-extended-thinking` to `gemini-3.6-flash` on Gemini model unavailable error `1052`.
 - Extracts Gemini conversation ids from stream responses.
-- Defaults to temporary chats by setting `innerReqList[45]=1`.
-- Uses `--save-to-library` to omit the temporary flag so the chat can appear in Gemini history.
+- Defaults to temporary chats. In browser-network mode it verifies that Gemini's Temporary chat UI activated before sending; in direct replay it sets `innerReqList[45]=1`.
+- Uses `--temporary false` in headless managed-browser mode to retain the chat in Gemini history. `--save-to-library` remains a compatibility alias. Direct replay rejects persistence because it cannot verify provider history mode.
 - Attempts native Gemini metadata continuation first.
 - Reports `native_continuation_error` when Gemini rejects the stored ids, commonly backend error `1097`.
 - Saves a local conversation transcript and can continue by replaying prior messages as context when Gemini backend continuation rejects the stored ids.
@@ -34,9 +29,8 @@ Task defaults:
 
 | Task | Model |
 | --- | --- |
-| `quick` | `gemini-3-flash` |
-| `reasoning` | `gemini-3-flash-thinking` |
-| `pro` | `gemini-3-pro` |
+| `quick` | `gemini-3.6-flash` |
+| `reasoning` | `gemini-3.6-flash-extended-thinking` |
 
 ## Important limitations
 

@@ -66,6 +66,9 @@ scripts/ai-chat.mjs --provider perplexity --prompt "Analyze this file" --file /t
 | `--thinking` | Enable thinking mode where supported by a UI adapter |
 | `--out <file>` | Save response to file. Sidecars are written as `<out>.meta.json` and `<out>.raw.txt` when available |
 | `--port <n>` | Preferred Chrome debug port, default `9222`. Without an explicit port, Browser Tools may auto-allocate another port |
+| `--headless` | Launch the owned Browser Tools Chrome without a visible window |
+| `--browser-profile <name>` | Explicit source Chrome profile for a new owned browser, overriding the configured task profile |
+| `--include-google` | Retain Google identity in the managed profile copy. Use only for intentional Google workflows because it restores source-session logout risk |
 | `--timeout <seconds>` | Max wait, default `300`. Perplexity deep research uses at least `3600` unless this flag is explicit |
 | `--json` | Output JSON with metadata and `response` |
 | `--stream` | Enable provider streaming progress where supported. Perplexity writes deltas to stderr and still emits final structured output |
@@ -82,7 +85,8 @@ scripts/ai-chat.mjs --provider perplexity --prompt "Analyze this file" --file /t
 | `--file <path>` | Perplexity local attachment. Repeatable. Metadata is safe, file contents are not echoed into metadata |
 | `--space-uuid <uuid>` or `--space <uuid>` | Perplexity Space identifier supplied by the user |
 | `--incognito` | Explicit Perplexity Incognito request. It is not saved to history and the provider reports an expiry time |
-| `--save-to-library` | Explicit provider-history persistence where supported. Perplexity already persists normal requests and rejects this together with `--incognito` |
+| `--temporary <true|false>` | Gemini history mode. Defaults to `true`; use `false` in headless managed-browser mode to retain the chat in provider history |
+| `--save-to-library` | Compatibility alias for Gemini `--temporary false`. Perplexity already persists normal requests and rejects this together with `--incognito` |
 | `--cookie-source <source>` | Gemini cookie source, `managed-browser` by default or `chrome-profile` for the direct fallback |
 | `--chrome-profile <name>` | Gemini direct profile fallback. Prefer Chrome profile `Default` or Browser Tools task profile `ai-chat` for normal AI Chat runs |
 | `--continue` | Continue the active provider conversation tab when the current URL is already a conversation |
@@ -128,8 +132,8 @@ Rules:
 - Default cookie source is the Browser Tools managed browser that AI Chat owns.
 - Use `--cookie-source chrome-profile --chrome-profile <profile-folder>` only as an explicit direct profile fallback.
 - `--list-models` uses Gemini account RPC discovery when cookies work.
-- Verified account models from the managed Gemini-capable browser include `gemini-3-flash`, `gemini-3-flash-thinking`, and `gemini-3-pro`.
-- Default chats are temporary. Use `--save-to-library` when the user wants Gemini history.
+- The managed Gemini browser exposes `gemini-3.6-flash` and `gemini-3.6-flash-extended-thinking`.
+- Default chats are temporary. Use `--temporary false` in headless managed-browser mode when the user wants Gemini history; `--save-to-library` remains a compatibility alias.
 - Native Gemini continuation can return backend error `1097`; the helper reports `native_continuation_error` and uses local transcript fallback.
 - Model unavailable error `1052` can fall back only when the adapter reports that fallback in metadata.
 

@@ -42,15 +42,34 @@ const GEMINI_USER_STATUS_RPC = 'otAQ7b';
 const DEFAULT_METADATA = ['', '', '', null, null, null, null, null, null, ''];
 
 export const GEMINI_MODELS = [
-  { id: 'gemini-3-flash', name: 'Gemini 3 Flash', model_id: 'fbb127bbb056c959', capacity_tail: 1, capacity_field: 12, min_tier: 'basic', family: 'gemini-3', thinking: false, aliases: ['flash', 'basic-flash', 'quick'], known: true },
-  { id: 'gemini-3-flash-thinking', name: 'Gemini 3 Flash Thinking', model_id: '5bf011840784117a', capacity_tail: 1, capacity_field: 12, min_tier: 'basic', family: 'gemini-3', thinking: true, aliases: ['thinking', 'think', 'reasoning', 'basic-thinking'], known: true },
-  { id: 'gemini-3-pro', name: 'Gemini 3 Pro', model_id: '9d8ca3786ebdfbea', capacity_tail: 1, capacity_field: 12, min_tier: 'basic', family: 'gemini-3', thinking: false, aliases: ['pro', 'basic-pro'], known: true },
-  { id: 'gemini-3-flash-plus', name: 'Gemini 3 Flash Plus', model_id: '56fdd199312815e2', capacity_tail: 4, capacity_field: 12, min_tier: 'plus', family: 'gemini-3', thinking: false, aliases: ['plus-flash'], known: true },
-  { id: 'gemini-3-flash-thinking-plus', name: 'Gemini 3 Flash Thinking Plus', model_id: 'e051ce1aa80aa576', capacity_tail: 4, capacity_field: 12, min_tier: 'plus', family: 'gemini-3', thinking: true, aliases: ['plus-thinking'], known: true },
-  { id: 'gemini-3-pro-plus', name: 'Gemini 3 Pro Plus', model_id: 'e6fa609c3fa255c0', capacity_tail: 4, capacity_field: 12, min_tier: 'plus', family: 'gemini-3', thinking: false, aliases: ['plus-pro'], known: true },
-  { id: 'gemini-3-flash-advanced', name: 'Gemini 3 Flash Advanced', model_id: '56fdd199312815e2', capacity_tail: 2, capacity_field: 12, min_tier: 'advanced', family: 'gemini-3', thinking: false, aliases: ['advanced-flash'], known: true },
-  { id: 'gemini-3-flash-thinking-advanced', name: 'Gemini 3 Flash Thinking Advanced', model_id: 'e051ce1aa80aa576', capacity_tail: 2, capacity_field: 12, min_tier: 'advanced', family: 'gemini-3', thinking: true, aliases: ['advanced-thinking'], known: true },
-  { id: 'gemini-3-pro-advanced', name: 'Gemini 3 Pro Advanced', model_id: 'e6fa609c3fa255c0', capacity_tail: 2, capacity_field: 12, min_tier: 'advanced', family: 'gemini-3', thinking: false, aliases: ['advanced-pro'], known: true },
+  {
+    id: 'gemini-3.6-flash',
+    name: 'Gemini 3.6 Flash',
+    model_id: '56fdd199312815e2',
+    capacity_tail: 2,
+    capacity_field: 12,
+    min_tier: 'basic',
+    family: 'gemini-3.6',
+    thinking: false,
+    ui_choice: '3.6 Flash',
+    ui_selected: 'Gemini Flash',
+    aliases: ['flash', 'quick'],
+    known: true,
+  },
+  {
+    id: 'gemini-3.6-flash-extended-thinking',
+    name: 'Gemini 3.6 Flash Extended Thinking',
+    model_id: 'e051ce1aa80aa576',
+    capacity_tail: 2,
+    capacity_field: 12,
+    min_tier: 'basic',
+    family: 'gemini-3.6',
+    thinking: true,
+    ui_choice: 'Extended thinking',
+    ui_selected: 'Flash Extended',
+    aliases: ['thinking', 'extended-thinking', 'reasoning'],
+    known: true,
+  },
 ];
 
 const GEMINI_MODEL_BY_ID = new Map(GEMINI_MODELS.flatMap(model => [
@@ -363,10 +382,11 @@ function enrichGeminiAccountModel(modelData, account) {
   if (!modelId || !displayName) return null;
 
   const staticByModelId = GEMINI_MODELS.find(model => model.model_id === modelId);
+  if (!staticByModelId) return null;
   const capacity = account.capacity;
   const capacityField = account.capacity_field;
-  const id = staticByModelId?.id || `gemini/${slugifyModelName(displayName)}`;
-  const name = staticByModelId?.name || displayName;
+  const id = staticByModelId.id;
+  const name = staticByModelId.name;
   const thinking = /think|thinking/i.test(`${id} ${name} ${displayName} ${description}`);
   return {
     ...(staticByModelId || {}),
@@ -602,8 +622,8 @@ export async function queryGeminiWeb(prompt, cookieMap, options = {}) {
   if (process.env.AI_CHAT_GEMINI_RAW_OUT) writeFileSync(process.env.AI_CHAT_GEMINI_RAW_OUT, rawText, 'utf-8');
   if (!response.ok) throw new Error(`Gemini request failed: ${response.status}`);
   const result = parseGeminiStreamResponse(rawText);
-  if (result.errorCode === 1052 && options.allowModelFallback !== false && model !== 'gemini-3-flash') {
-    const fallback = await queryGeminiWeb(prompt, cookieMap, { ...options, model: 'gemini-3-flash', modelConfig: null });
+  if (result.errorCode === 1052 && options.allowModelFallback !== false && model !== 'gemini-3.6-flash') {
+    const fallback = await queryGeminiWeb(prompt, cookieMap, { ...options, model: 'gemini-3.6-flash', modelConfig: null });
     return { ...fallback, modelFallbackFrom: model, modelFallbackReason: 'error_1052' };
   }
   if (!result.text) {

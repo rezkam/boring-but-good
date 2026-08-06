@@ -111,7 +111,8 @@ Gemini uses the WebUI API path and live account discovery where possible:
 - Default auth source is the AI Chat owned Browser Tools browser.
 - Explicit fallback is `--cookie-source chrome-profile --chrome-profile <profile-folder>`.
 - `--verify-session` reports direct API readiness and browser UI readiness separately.
-- Default chats are temporary. `--save-to-library` requests provider history.
+- Exposed browser modes are `gemini-3.6-flash` and `gemini-3.6-flash-extended-thinking`.
+- Default chats are temporary. In headless managed-browser mode, `--temporary false` requests provider history; `--save-to-library` remains a compatibility alias. Direct replay rejects persistence because it cannot verify history mode.
 - Native continuation is attempted first. If backend ids fail, metadata reports `native_continuation_error` and `local_transcript_fallback`.
 
 Known limits:
