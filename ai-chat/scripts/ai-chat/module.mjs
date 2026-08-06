@@ -12,6 +12,7 @@ import {
   requiredOptionValue as optionValue,
   hasFlag,
   startChrome,
+  stopChrome,
   timestampedTmpPath,
 } from '../../../browser-tools/scripts/browser-control.mjs';
 import { readCachedResponse, writeCachedResponse } from '../browser-query-cache.mjs';
@@ -237,6 +238,7 @@ function browserToolsDeps(deps = {}) {
     managedBrowserSafetyForPort: deps.managedBrowserSafetyForPort || managedBrowserSafetyForPort,
     readManagedStateForPort: deps.readManagedStateForPort || readManagedStateForPort,
     startChrome: deps.startChrome || startChrome,
+    stopChrome: deps.stopChrome || stopChrome,
   };
 }
 
@@ -369,12 +371,22 @@ export async function ensureAiChatBrowserSession(request, deps = {}) {
         });
         return { browser, shouldDisconnect: true, request: { ...request, port: validation.port }, source: 'reused', state: savedState };
       } catch (error) {
-        throw aiChatBrowserError(`Refusing to connect to saved AI Chat browser after validation failed (${error.message})`, {
+        const connectionError = aiChatBrowserError(`Refusing to connect to saved AI Chat browser after validation failed (${error.message})`, {
           port: validation.port,
           reason: 'connect-failed',
           ownerId: validation.ownerId,
           stateFile,
         });
+        if (request.closeBrowserAfterRun) {
+          await finishAiChatBrowserSessionPreservingError({
+            browserSession: { shouldDisconnect: true, request: { ...request, port: validation.port }, state: savedState },
+            browser: null,
+            provider: { name: request.providerName, closeBrowserAfterRun: true },
+            request: { ...request, port: validation.port },
+            deps,
+          }, connectionError);
+        }
+        throw connectionError;
       }
     }
 
@@ -407,7 +419,7 @@ export async function ensureAiChatBrowserSession(request, deps = {}) {
     throw new Error('Browser Tools did not return an owner token for the AI Chat browser. Recovery: retry, or start Browser Tools manually with an owner token and configure AI Chat state.');
   }
 
-  const state = writeAiChatBrowserState({
+  const state = {
     version: 1,
     ownerId: AI_CHAT_BROWSER_OWNER_ID,
     ownerToken: started.ownerToken,
@@ -420,12 +432,81 @@ export async function ensureAiChatBrowserSession(request, deps = {}) {
     status: started.status || 'started',
     startedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+  };
+  try {
+    writeAiChatBrowserState(state, stateFile, stateFs);
+    const browser = await browserTools.connectBrowser(started.port, {
+      ownerToken: started.ownerToken,
+      protocolTimeout: browserProtocolTimeoutMs(request),
+    });
+    return { browser, shouldDisconnect: true, request: { ...request, port: started.port }, source: started.status || 'started', state };
+  } catch (error) {
+    if (request.closeBrowserAfterRun) {
+      await finishAiChatBrowserSessionPreservingError({
+        browserSession: { shouldDisconnect: true, request: { ...request, port: started.port }, state },
+        browser: null,
+        provider: { name: request.providerName, closeBrowserAfterRun: true },
+        request: { ...request, port: started.port },
+        deps,
+      }, error);
+    }
+    throw error;
+  }
+}
+
+async function finishAiChatBrowserSession({ browserSession, browser, provider, request, deps = {} }) {
+  if (!browserSession?.shouldDisconnect) return;
+  let disconnectError = null;
+  try {
+    browser?.disconnect();
+  } catch (error) {
+    disconnectError = error;
+  }
+  if (!provider?.closeBrowserAfterRun) {
+    if (disconnectError) throw disconnectError;
+    return;
+  }
+
+  const stateFile = resolveAiChatBrowserStateFile(request, deps);
+  const stateFs = deps.browserStateFs || defaultBrowserStateFs;
+  const ownerToken = browserSession.state?.ownerToken;
+  const port = browserSession.request?.port;
+  if (!ownerToken || !port) {
+    throw new Error(`[${provider.name}] Cannot close the AI Chat browser safely because its owner token or port is missing.`);
+  }
+
+  const browserTools = browserToolsDeps(deps);
+  const result = browserTools.stopChrome({ port, ownerToken, clean: false });
+  const closedStatuses = new Set(['stopped', 'already-gone']);
+  let stopStatus = result?.status;
+  if (!closedStatuses.has(stopStatus)) {
+    const endpoint = await browserTools.browserWSEndpoint(port);
+    if (endpoint) {
+      throw new Error(`[${provider.name}] Failed to close the AI Chat browser on :${port}: ${result?.reason || result?.error?.message || stopStatus || 'unknown error'}`);
+    }
+    stopStatus = 'verified-gone';
+  }
+
+  writeAiChatBrowserState({
+    ...browserSession.state,
+    status: 'stopped',
+    stopStatus,
+    updatedAt: new Date().toISOString(),
   }, stateFile, stateFs);
-  const browser = await browserTools.connectBrowser(started.port, {
-    ownerToken: started.ownerToken,
-    protocolTimeout: browserProtocolTimeoutMs(request),
-  });
-  return { browser, shouldDisconnect: true, request: { ...request, port: started.port }, source: started.status || 'started', state };
+  if (disconnectError) console.error(`[ai-chat] CDP disconnect failed before browser shutdown: ${disconnectError.message}`);
+  console.error(`[ai-chat] Closed owned Browser Tools Chrome on :${port} after ${provider.name}.`);
+}
+
+async function finishAiChatBrowserSessionPreservingError(args, operationError = null) {
+  try {
+    await finishAiChatBrowserSession(args);
+  } catch (cleanupError) {
+    if (!operationError) throw cleanupError;
+    throw new AggregateError(
+      [operationError, cleanupError],
+      `[${args.provider.name}] ${operationError.message}; browser cleanup failed: ${cleanupError.message}`,
+    );
+  }
 }
 
 export function buildAiChatRequest(options = {}) {
@@ -1227,8 +1308,11 @@ function requestBypassesCache(request = {}) {
 }
 
 function browserRequestForProvider(request, provider) {
-  if (!provider?.preferredBrowserHeadless) return request;
-  return { ...request, browserHeadless: true };
+  return {
+    ...request,
+    ...(provider?.preferredBrowserHeadless ? { browserHeadless: true } : {}),
+    closeBrowserAfterRun: !!provider?.closeBrowserAfterRun,
+  };
 }
 
 export async function runAiChat(request, deps = {}) {
@@ -1245,6 +1329,7 @@ export async function runAiChat(request, deps = {}) {
     let browser = null;
     let browserSession = null;
     let activeRequest = request;
+    let operationError = null;
     try {
       const needsBrowser = typeof provider.listModelsRequiresBrowser === 'function'
         ? provider.listModelsRequiresBrowser({ request })
@@ -1271,8 +1356,11 @@ export async function runAiChat(request, deps = {}) {
       }, null, 2);
       emitOutput({ request: { ...activeRequest, outFile: activeRequest.outFile || null }, outputText: output, metadata: { provider: provider.name, model_count: models.length, captured_at: new Date().toISOString() }, rawText: output, io });
       return { source: 'models', provider, models, output };
+    } catch (error) {
+      operationError = error;
+      throw error;
     } finally {
-      if (browserSession?.shouldDisconnect) browser?.disconnect();
+      await finishAiChatBrowserSessionPreservingError({ browserSession, browser, provider, request: activeRequest, deps }, operationError);
     }
   }
 
@@ -1328,6 +1416,7 @@ export async function runAiChat(request, deps = {}) {
   let browserSession = null;
   let browser = null;
   let activeRequest = request;
+  let operationError = null;
   if (needsBrowser) {
     browserSession = await ensureAiChatBrowserSession(browserRequestForProvider(request, provider), deps);
     browser = browserSession.browser;
@@ -1406,8 +1495,11 @@ export async function runAiChat(request, deps = {}) {
     if (activeRequest.outFile) console.error(`[${provider.name}] Saved to ${activeRequest.outFile}`);
 
     return { source: 'live', provider, result: publicProviderResult(result), metadata, output: finalOutput.text };
+  } catch (error) {
+    operationError = error;
+    throw error;
   } finally {
-    if (browserSession?.shouldDisconnect) browser?.disconnect();
+    await finishAiChatBrowserSessionPreservingError({ browserSession, browser, provider, request: activeRequest, deps }, operationError);
   }
 }
 
