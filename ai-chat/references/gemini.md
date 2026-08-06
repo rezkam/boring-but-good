@@ -4,7 +4,7 @@ Gemini uses a direct WebUI API path through Browser Tools managed Chrome cookies
 
 ## Current capability
 
-- Reads Google cookies from the AI Chat owned Browser Tools managed Chrome by default. AI Chat uses Chrome profile `Default` unless the Browser Tools task profile `ai-chat` is configured or `--browser-profile` selects a profile for a new owned browser. Use `--headless --include-google` for a background Gemini session that retains Google identity. Including Google identity reintroduces the source-session logout risk that Browser Tools normally avoids, so use it only for an intentional Google workflow. If auth looks stale, cleanly stop the AI Chat owned browser and rerun so Browser Tools resyncs the copied profile.
+- Reads Google cookies from the AI Chat owned Browser Tools managed Chrome by default. AI Chat uses Chrome profile `Default` unless the Browser Tools task profile `ai-chat` is configured or `--browser-profile` selects a profile for a new owned browser. Use `--headless --include-google` for a background Gemini session that retains Google identity. Including Google identity reintroduces the source-session logout risk that Browser Tools normally avoids, so use it only for an intentional Google workflow. Gemini requests and model-listing commands stop the owned browser with its matching owner token after completion or failure. If auth looks stale, rerun so Browser Tools resyncs the copied profile.
 - Supports an explicit direct profile fallback with `--cookie-source chrome-profile --chrome-profile <profile-folder>`.
 - Verifies Gemini session state on live runs and model listing. The result separates direct WebUI auth from browser UI readiness.
 - Fetches Gemini page tokens from `https://gemini.google.com/app`.
