@@ -26,15 +26,29 @@ delegating: if the unit is on the never-dispatch list, no row here applies to it
 Use the least capable model that finishes the role correctly in few turns. Turn count
 costs more than token price: a cheap model that needs three times the turns is not cheap.
 
-| Role | Claude | GPT |
-| --- | --- | --- |
-| A slice whose spec is complete and mechanical | `claude-sonnet-5` | `gpt-5.6-luna` |
-| Implementation from prose, integration work | `claude-sonnet-5` | `gpt-5.6-terra` |
-| Design judgment, long-horizon work | `claude-opus-5` | `gpt-5.6-sol` |
-| Final whole-branch review | `claude-fable-5` at high | `gpt-5.6-sol` at high |
+Implementation defaults form three capability classes. The listed GPT and Claude models
+are alternatives, not a requirement to have both providers. Use an available model from the
+selected class, at its listed effort. Record the chosen model and the reason in the routing
+table.
 
-Implementers and fixers default to `medium` effort. Reviewer effort scales with risk;
-the final review is always high and always names its model explicitly, even when that
+| Implementation class | Equivalent models | Use for |
+| --- | --- | --- |
+| 1 | `gpt-luna` at `high`, or `claude-sonnet` at `medium` | Complete, mechanical slices |
+| 2 | `gpt-terra` at `medium`, or `claude-opus` at `low` | Prose-led implementation and integration work |
+| 3 | `gpt-sol` at `medium`, or `claude-opus` at `medium` | Complex cross-layer or long-horizon work |
+
+Choose the fastest available model in the selected class. Prefer observed throughput from
+this campaign, measured as returned tokens divided by elapsed seconds. A larger model may
+be the faster choice, so do not choose by model size or provider alone. When there is no
+campaign measurement, use the quickest successfully completed comparable dispatch, then
+record the assumption and revisit it after the first result.
+
+Escalate exactly one class only when the task is complex or the selected class cannot make
+progress. Do not skip a class simply because a stronger model is available. Class 3 has no
+higher implementation class.
+
+Final whole-branch review uses `claude-fable` or `gpt-sol` at `high` effort. Reviewer effort
+scales with risk, and the final review always names its model explicitly, even when that
 model equals the session default.
 
 This table is policy, not proof of availability. Resolve the model before launch and

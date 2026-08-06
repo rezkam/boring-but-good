@@ -57,7 +57,7 @@ session's reasoning effort whatever the plan said. Two ways to pin it:
    `~/.claude/agents/`, dispatched by name.
 
 **pi.** `subagent` pins both inside one string: `model: "<provider>/<model>:<effort>"`, as
-in `openai-codex/gpt-5.6-sol:high`. **The batch form takes no per-task model.** In
+in `openai-codex/gpt-sol:high`. **The batch form takes no per-task model.** In
 `subagent({tasks: [...]})` the `model` key sits on the call, not inside a task, so a fan-out
 of mixed roles either shares one model or goes out as one call per task. Leaving it off
 inherits silently, and every builtin pi agent inherits the session model by default: a real
@@ -94,8 +94,8 @@ It reads the harness's own records, so what you paste is what ran. Report its ve
 written. `ROUTING_INDISTINGUISHABLE` means the pin equalled the session default and proved
 nothing, and effort on Claude Code is always request-only. Neither is a pinned dispatch.
 
-A campaign once printed `claude-fable-5` in its table while all eight agents ran
-`claude-opus-5`, and nothing caught it, because nothing ever compared the two.
+A campaign once printed `claude-fable` in its table while all eight agents ran
+`claude-opus`, and nothing caught it, because nothing ever compared the two.
 
 See [dispatch.md](dispatch.md) for tier selection and what every dispatch must carry.
 
@@ -142,7 +142,7 @@ give the reason. Silent non-dispatch is how a campaign drifts into doing everyth
 
 ## 4. Report status without being asked
 
-After every slice, every dispatch return, and at least every ten minutes of background
+After every slice, every dispatch return, and at least every five minutes of background
 work, print this unprompted. This block is deliberately structured even on harnesses that
 prefer minimal formatting, because it is scanned rather than read.
 

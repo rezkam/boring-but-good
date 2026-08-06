@@ -9,9 +9,9 @@ Perform a read-only, defect-first review of a specified code change and return e
 - **Agent:** `[RUNTIME-VERIFIED READ-ONLY REVIEWER]`
 - **Description:** `Review [TARGET DESCRIPTION]`
 - **Model:** `[REQUIRED: choose under dispatch.md Model selection]`
-  - `gpt-5.6-terra` or `claude-sonnet-5` is the reviewer floor
-  - scale to `gpt-5.6-sol`, `claude-opus-4-8`, or `claude-fable-5` for subtle, risky, or broad changes
-  - use `gpt-5.6-sol` or `claude-fable-5` explicitly for the final whole-branch review
+  - `gpt-terra` or `claude-sonnet` is the reviewer floor
+  - scale to `gpt-sol`, `claude-opus`, or `claude-fable` for subtle, risky, or broad changes
+  - use `gpt-sol` or `claude-fable` explicitly for the final whole-branch review
 - **Effort:** `[SCALE WITH RISK; HIGH FOR FINAL WHOLE-BRANCH REVIEW]`
 - **Working directory:** `[FULL REVIEW WORKTREE PATH]`
 - **Target:** `[UNCOMMITTED | BASE BRANCH | COMMIT | CUSTOM]`
