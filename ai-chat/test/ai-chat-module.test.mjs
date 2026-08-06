@@ -125,6 +125,17 @@ test('parseAiChatArgs rejects missing values for value options without breaking 
   assert.equal(parseAiChatArgs(['--evidence', '--prompt', 'hello']).captureEvidence, true);
 });
 
+test('parseAiChatArgs defaults Gemini temporary mode and accepts an explicit false value', () => {
+  assert.equal(parseAiChatArgs(['--prompt', 'hello']).providerOptions.temporary, null);
+  assert.equal(parseAiChatArgs(['--prompt', 'hello', '--temporary', 'false']).providerOptions.temporary, false);
+  assert.equal(parseAiChatArgs(['--prompt', 'hello', '--temporary', 'true']).providerOptions.temporary, true);
+  assert.throws(() => parseAiChatArgs(['--prompt', 'hello', '--temporary', 'maybe']), /Invalid --temporary value/);
+  assert.throws(
+    () => parseAiChatArgs(['--prompt', 'hello', '--temporary', 'true', '--save-to-library']),
+    /conflicts with --save-to-library/,
+  );
+});
+
 test('parseAiChatArgs strictly validates timeout flags', () => {
   const invalidValues = ['1m', '10s', '1.5', '0', '-1', '', 'abc'];
   for (const flag of ['--timeout', '--verify-model-timeout']) {

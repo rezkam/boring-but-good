@@ -336,17 +336,16 @@ function normalizedGeminiErrorCode(error) {
 export async function queryGeminiViaBrowserNetwork(browser, prompt, timeoutMs = 120000, options = {}) {
   const page = await browser.newPage({ background: true });
   const promptSelector = 'div[role="textbox"][aria-label="Enter a prompt for Gemini"]';
-  const requestedMode = options.modelConfig?.thinking
+  const requestedMode = options.modelConfig?.ui_selected || (options.modelConfig?.thinking
     ? 'Thinking'
-    : (options.modelConfig?.id?.includes('-pro') ? 'Pro' : 'Flash');
+    : (options.modelConfig?.id?.includes('-pro') ? 'Pro' : 'Flash'));
+  const requestedChoice = options.modelConfig?.ui_choice || requestedMode;
   try {
     await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForSelector(promptSelector, { timeout: 30000 });
     await page.waitForSelector('button[aria-label^="Open mode picker"]', { timeout: 30000 });
-    if (options.temporary !== false) {
-      await page.waitForSelector('button[aria-label="Temporary chat"]', { timeout: 30000 });
-    }
-    const configured = await page.evaluate(async ({ requestedMode, temporary }) => {
+    await page.waitForSelector('button[aria-label="Temporary chat"]', { timeout: 30000 });
+    const configured = await page.evaluate(async ({ requestedMode, requestedChoice, temporary }) => {
       const modePicker = document.querySelector('button[aria-label^="Open mode picker"]');
       if (!modePicker) throw new Error('Gemini mode picker not found');
       const currentMode = `${modePicker.getAttribute('aria-label') || ''} ${modePicker.innerText || ''}`;
@@ -354,8 +353,8 @@ export async function queryGeminiViaBrowserNetwork(browser, prompt, timeoutMs = 
         modePicker.click();
         await new Promise(resolve => setTimeout(resolve, 500));
         const choice = [...document.querySelectorAll('button, [role="menuitem"], [role="option"]')]
-          .find(node => (node.innerText || '').trim().includes(requestedMode));
-        if (!choice) throw new Error(`Gemini model mode is unavailable in the UI: ${requestedMode}`);
+          .find(node => (node.innerText || '').trim().includes(requestedChoice));
+        if (!choice) throw new Error(`Gemini model mode is unavailable in the UI: ${requestedChoice}`);
         choice.click();
         await new Promise(resolve => setTimeout(resolve, 500));
       }
@@ -364,22 +363,38 @@ export async function queryGeminiViaBrowserNetwork(browser, prompt, timeoutMs = 
       if (!observedMode.includes(requestedMode)) {
         throw new Error(`Gemini model mode did not activate: expected ${requestedMode}, observed ${observedMode.trim() || 'unknown'}`);
       }
+      const temporaryButton = document.querySelector('button[aria-label="Temporary chat"]');
+      if (!temporaryButton) throw new Error('Gemini temporary chat control not found');
       if (temporary) {
-        const temporaryButton = document.querySelector('button[aria-label="Temporary chat"]');
-        if (!temporaryButton) throw new Error('Gemini temporary chat control not found');
         temporaryButton.click();
         await new Promise(resolve => setTimeout(resolve, 750));
         if (!/Temporary chats/i.test(document.body?.innerText || '')) {
           throw new Error('Gemini temporary chat mode did not activate');
         }
+      } else {
+        temporaryButton.click();
+        await new Promise(resolve => setTimeout(resolve, 750));
+        if (!/Temporary chats/i.test(document.body?.innerText || '')) {
+          throw new Error('Gemini temporary mode probe did not activate');
+        }
+        const activeTemporaryButton = document.querySelector('button[aria-label="Temporary chat"]');
+        if (!activeTemporaryButton) throw new Error('Gemini temporary chat control disappeared during history verification');
+        activeTemporaryButton.click();
+        await new Promise(resolve => setTimeout(resolve, 750));
+        if (/Temporary chats/i.test(document.body?.innerText || '')) {
+          throw new Error('Gemini persistent chat mode did not activate');
+        }
       }
-      return { observedMode: requestedMode, temporaryActive: temporary };
-    }, { requestedMode, temporary: options.temporary !== false });
+      return { observedMode: requestedMode, temporaryActive: temporary, historyModeVerified: true };
+    }, { requestedMode, requestedChoice, temporary: options.temporary !== false });
     if (!configured || configured.observedMode !== requestedMode) {
       throw new Error(`Gemini model mode verification failed: ${requestedMode}`);
     }
     if (options.temporary !== false && configured.temporaryActive !== true) {
       throw new Error('Gemini temporary chat verification failed');
+    }
+    if (configured.historyModeVerified !== true) {
+      throw new Error('Gemini chat history mode verification failed');
     }
     await page.waitForSelector(promptSelector, { timeout: 30000 });
     await page.evaluate((selector, text) => {
@@ -411,6 +426,7 @@ export async function queryGeminiViaBrowserNetwork(browser, prompt, timeoutMs = 
       browserNetworkFallback: true,
       modelUsed: options.modelConfig?.id || null,
       temporaryVerified: configured.temporaryActive === true,
+      historyModeVerified: configured.historyModeVerified === true,
     };
   } finally {
     await page.close().catch(() => {});
@@ -427,16 +443,16 @@ export const geminiProvider = {
   trustedConversationHostnames: GEMINI_APP_HOSTNAMES,
   transport: 'webui-api',
 
-  defaultModel: 'gemini-3-flash',
+  defaultModel: 'gemini-3.6-flash',
   taskModels: {
-    default: 'gemini-3-flash',
-    quick: 'gemini-3-flash',
-    reasoning: 'gemini-3-flash-thinking',
-    pro: 'gemini-3-pro',
+    default: 'gemini-3.6-flash',
+    quick: 'gemini-3.6-flash',
+    reasoning: 'gemini-3.6-flash-extended-thinking',
   },
   historyPolicy: {
     default: 'temporary',
-    saveFlag: '--save-to-library',
+    saveFlag: '--temporary false',
+    compatibilitySaveFlag: '--save-to-library',
     transportField: 'innerReqList[45]',
   },
   resolveConversationAttachment: resolveGeminiConversationAttachment,
@@ -509,8 +525,16 @@ export const geminiProvider = {
     if (!modelConfig) throw new Error(`[gemini] Unknown model: ${requestedModel}. Run --provider gemini --list-models --json to inspect selectable models.`);
 
     let result;
-    const saveToLibrary = !!request.providerOptions?.saveToLibrary;
-    const temporary = !saveToLibrary;
+    const explicitTemporary = request.providerOptions?.temporary;
+    const saveFlag = !!request.providerOptions?.saveToLibrary;
+    if (explicitTemporary === true && saveFlag) {
+      throw new Error('Gemini temporary mode conflicts with save-to-library');
+    }
+    const temporary = explicitTemporary ?? !saveFlag;
+    const saveToLibrary = !temporary;
+    if (!temporary && !useBrowserNetwork) {
+      throw new Error('Gemini persistent history requires a headless managed-browser session so history mode can be verified');
+    }
     const previousMessages = conversation?.record?.messages || [];
     const transcript = previousMessages
       .map(message => `${message.role === 'assistant' ? 'Assistant' : 'User'}: ${message.content}`)
@@ -563,6 +587,7 @@ export const geminiProvider = {
         conversation_state: result.conversationState || null,
         is_temporary: result.browserNetworkFallback ? result.temporaryVerified === true : temporary,
         temporary_verified: result.browserNetworkFallback ? result.temporaryVerified === true : null,
+        history_mode_verified: result.browserNetworkFallback ? result.historyModeVerified === true : null,
         saved_to_library: saveToLibrary,
         cookie_source: cookieContext.source,
         chrome_profile: cookieContext.chromeProfile,

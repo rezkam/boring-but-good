@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { browserCookiesToGoogleCookieMap, buildGeminiCookieHeader, buildGeminiInnerRequest, buildGeminiModelHeader, classifyGeminiUiState, hasRequiredGoogleCookies, parseGeminiAccountModelsResponse, parseGeminiStreamResponse, resolveGeminiModel } from '../scripts/ai-chat/providers/gemini-api.mjs';
+import { browserCookiesToGoogleCookieMap, buildGeminiCookieHeader, buildGeminiInnerRequest, buildGeminiModelHeader, classifyGeminiUiState, GEMINI_MODELS, hasRequiredGoogleCookies, parseGeminiAccountModelsResponse, parseGeminiStreamResponse, resolveGeminiModel } from '../scripts/ai-chat/providers/gemini-api.mjs';
 
 test('buildGeminiCookieHeader serializes cookie map', () => {
   assert.equal(buildGeminiCookieHeader({ A: '1', B: '', C: '3' }), 'A=1; C=3');
@@ -35,10 +35,15 @@ test('parseGeminiStreamResponse extracts model unavailable error code', () => {
   assert.equal(parseGeminiStreamResponse(raw).errorCode, 1052);
 });
 
-test('resolves Gemini model aliases', () => {
-  assert.equal(resolveGeminiModel('flash').id, 'gemini-3-flash');
-  assert.equal(resolveGeminiModel('thinking').id, 'gemini-3-flash-thinking');
-  assert.equal(resolveGeminiModel('pro').id, 'gemini-3-pro');
+test('exposes only Gemini 3.6 Flash and Gemini 3.6 Flash Extended Thinking', () => {
+  assert.deepEqual(GEMINI_MODELS.map(model => model.id), [
+    'gemini-3.6-flash',
+    'gemini-3.6-flash-extended-thinking',
+  ]);
+  assert.equal(resolveGeminiModel('flash').id, 'gemini-3.6-flash');
+  assert.equal(resolveGeminiModel('thinking').id, 'gemini-3.6-flash-extended-thinking');
+  assert.equal(resolveGeminiModel('extended-thinking').id, 'gemini-3.6-flash-extended-thinking');
+  assert.equal(resolveGeminiModel('pro'), null);
 });
 
 test('buildGeminiInnerRequest defaults to temporary and can save to history', () => {
@@ -79,13 +84,17 @@ test('classifyGeminiUiState distinguishes app readiness from consent and sign-in
 test('parseGeminiAccountModelsResponse extracts account model registry', () => {
   const body = [];
   body[14] = 1;
-  body[15] = [['fbb127bbb056c959', 'Fast', 'Fast model']];
+  body[15] = [
+    ['56fdd199312815e2', 'Fast', 'Fast model'],
+    ['unknown-model-id', 'Unexpected Model', 'Not exposed'],
+  ];
   body[16] = [];
   body[17] = [115];
   const raw = `)]}'\n${JSON.stringify([['wrb.fr', 'otAQ7b', JSON.stringify(body)]])}\n`;
   const parsed = parseGeminiAccountModelsResponse(raw);
-  assert.equal(parsed.models[0].id, 'gemini-3-flash');
+  assert.equal(parsed.models[0].id, 'gemini-3.6-flash');
   assert.equal(parsed.models[0].display_name, 'Fast');
   assert.equal(parsed.models[0].capacity, 4);
   assert.equal(parsed.models[0].source, 'gemini-account-rpc');
+  assert.equal(parsed.models.length, 1);
 });
