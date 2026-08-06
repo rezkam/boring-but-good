@@ -54,6 +54,14 @@ function parsePositiveIntegerOption(args, name, fallback) {
   return Number.parseInt(normalized, 10);
 }
 
+function parseOptionalBooleanOption(args, name) {
+  const value = optionValue(args, name, null);
+  if (value === null) return null;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  throw new Error(`Invalid ${name} value: "${value}". Expected true or false.`);
+}
+
 export function parseAiChatArgs(args = process.argv.slice(2)) {
   const providerName = optionValue(args, '--provider', 'grok');
   const promptFile = optionValue(args, '--prompt-file', null);
@@ -78,6 +86,11 @@ export function parseAiChatArgs(args = process.argv.slice(2)) {
   const files = optionValues(args, '--file');
   const spaceUuid = optionValue(args, '--space-uuid', optionValue(args, '--space', null));
   const verifyModelTimeoutSeconds = parsePositiveIntegerOption(args, '--verify-model-timeout', 90);
+  const temporary = parseOptionalBooleanOption(args, '--temporary');
+  const saveToLibrary = hasFlag(args, '--save-to-library');
+  if (temporary === true && saveToLibrary) {
+    throw new Error('--temporary true conflicts with --save-to-library');
+  }
 
   return {
     providerName,
@@ -115,7 +128,8 @@ export function parseAiChatArgs(args = process.argv.slice(2)) {
       language: language === true ? null : language,
       timezone: timezone === true ? null : timezone,
       incognito: hasFlag(args, '--incognito'),
-      saveToLibrary: hasFlag(args, '--save-to-library'),
+      temporary,
+      saveToLibrary,
       verifySession: hasFlag(args, '--verify-session') || hasFlag(args, '--auth-check'),
       chromeProfile: chromeProfile === true ? null : chromeProfile,
       cookieSource: cookieSource === true ? null : cookieSource,
