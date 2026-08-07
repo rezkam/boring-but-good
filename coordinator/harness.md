@@ -119,7 +119,7 @@ that the audit would reject.
 
 ## pi
 
-**The guard enforces this skill mechanically here.** `guard/pi-extension.ts` blocks tool
+**The guard enforces this skill mechanically here.** `guard/` blocks tool
 calls that break the dispatch rules, so a rule you forget fails the call instead of
 silently degrading the campaign. Register the campaign before the first dispatch:
 `coordinator_campaign` action `start` with slug, worktree, plan path, slice count, and
