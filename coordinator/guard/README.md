@@ -65,11 +65,12 @@ work again immediately.
 | CG007 | Dispatching commit, stage, rebase, push, or PR work | Committing was delegated four times to a subagent given write access to the branch |
 | CG008 | A launch while the last status block is older than five minutes | Zero status blocks during the two hours of heaviest fan-out |
 | CG009 | Unrendered placeholders, or a prompt missing the worktree path, the HEAD sha, or the never-push boundary | One unset interpolation shipped `cd undefined/<pkg>` to every agent in a fanout |
-| CG010 | A fourth open writer lane, counting returned-but-unintegrated ones | Five writers launched in one instant, nothing integrated for hours |
+| CG010 | A fourth open writer lane, counting returned-but-unintegrated ones, or reusing a route key whose lane is still open | Five writers launched in one instant, nothing integrated for hours |
 | CG011 | A third steer of the same run | One worker was chaperoned past 64 turns instead of being stopped and split |
 | CG012 | Class 3 implementation with a label instead of a justification | Class 3 became the default for mechanical repairs |
 | CG013 | An ephemeral `/tmp` or `$TMPDIR` worktree path | |
 | CG014 | Spawning an agent through bash (`codex exec`, `claude -p`, `pi -p`) | Otherwise the guard only guards the polite path |
+| CG016 | An action the guard cannot classify, since it may start or extend a run | A read-only one belongs in the guard's management list, named there rather than assumed |
 | CG015 | `git reset --hard`, `git stash`, `git restore`, `git checkout -- <path>`, force push | A campaign created a backup branch, ran `git reset --hard`, and destroyed a pending dependency override |
 
 Every refusal names the exact unblock action, so a blocked call is one corrected retry
@@ -78,8 +79,13 @@ away rather than a stall.
 ## What it cannot do
 
 Judgment stays with the coordinator. The guard checks that a class was declared and that
-the declared class matches the model; it cannot tell whether the slice was really class 2
-work. It enforces the shell, not the thinking.
+the declared class matches the model at the effort it was pinned at; it cannot tell whether
+the slice was really class 2 work. It enforces the shell, not the thinking.
+
+Workflow scripts are read as text, not parsed as JavaScript. Children must therefore be
+written as literal `agent`, `model`, and `task` fields; shorthand or variables are refused
+rather than waved through, because a child whose model cannot be read is a child whose
+model was never pinned.
 
 No harness can force text out of a running agent. Status cadence is therefore enforced
 three ways: launches fail while the block is stale, the contract is restated in the system

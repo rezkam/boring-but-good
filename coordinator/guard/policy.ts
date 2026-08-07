@@ -289,7 +289,12 @@ export function readStatusBlock(text: string): { ok: boolean; missing: string[] 
 export function laneKindFor(agent: string | undefined, task: string): LaneKind {
 	const known = agent ? KIND_BY_AGENT[agent.toLowerCase()] : undefined;
 	if (known === "review") return "review";
-	const writes = /(implementer subagent|\b(implement|fix|repair|refactor|migrate|extract|compose)\b)/i.test(task);
+	// Writing a report is not mutating a repository, so "write your findings" stays read-only
+	// while "write the migration" does not.
+	const writes =
+		/(implementer subagent|\b(implement|fix|repair|refactor|migrate|extract|compose|introduce|rename|delete|remove|update)\b|\badd\b(?!\s+(a\s+)?(note|comment|finding|severity))|\bwrite\b(?!\s+(the\s+|your\s+)?(findings|report|notes|summary|result)))/i.test(
+			task,
+		);
 
 	// A review reads and reports; it never owns the tree. Detect that assignment directly,
 	// because a reviewer prompt is full of remediation words ("findings the author would fix")
@@ -297,7 +302,7 @@ export function laneKindFor(agent: string | undefined, task: string): LaneKind {
 	const route = parseRouteHeader(task);
 	const reviewKey = route ? /\b(review|accept|audit)/i.test(route.key) : false;
 	const reviewPhrase =
-		/(read-only review|independent review|acceptance review|whole-branch review|review of the|review the (change|diff|branch|commit)|re-?review|return every finding)/i.test(
+		/(read-only review|independent review|acceptance review|whole-branch review|review of the|review the (change|diff|branch|commit)|re-?review|return every finding|audit the (diff|change|branch|commit)|for regressions|report (bugs|defects|regressions)|defect-first)/i.test(
 			task,
 		);
 	if (reviewKey || reviewPhrase) return "review";
@@ -328,9 +333,9 @@ function firstInstruction(task: string): string {
 export function isManagementAction(input: Record<string, unknown>): boolean {
 	const action = text(input.action);
 	if (!action) return false;
-	// A scheduling action creates executions, so it is a launch however it is named.
-	if (!MANAGEMENT_ACTIONS.has(action) && (text(input.task) || text(input.workflowScript))) return false;
-	return true;
+	// An action that carries work is a launch however it is named.
+	if (text(input.task) || text(input.workflowScript)) return false;
+	return MANAGEMENT_ACTIONS.has(action);
 }
 
 function isLaunch(input: Record<string, unknown>): boolean {
@@ -363,6 +368,8 @@ function checkBash(command: string): GuardDecision {
 		[new RegExp(`${git}restore(\\s|$)`, "i"), "git restore"],
 		[new RegExp(`${git}checkout\\s+--\\s`, "i"), "git checkout -- <path>"],
 		[new RegExp(`${git}push\\s+(.*\\s)?(--force(-with-lease)?(=\\S*)?|-f)(\\s|$)`, "i"), "a force push"],
+		// git's own force syntax: a refspec whose source is prefixed with +.
+		[new RegExp(`${git}push\\s+(\\S+\\s+)*\\+\\S+:`, "i"), "a force push by refspec"],
 		[new RegExp(`${git}worktree\\s+remove\\s+.*--force`, "i"), "git worktree remove --force"],
 	];
 	for (const [pattern, label] of destructive) {
@@ -390,6 +397,11 @@ function collectScriptModels(script: string): { agents: number; models: string[]
 /** Every routing header in a text, in order, one per child. */
 export function parseRouteHeaders(text: string): RouteHeader[] {
 	return scriptRoutes(text);
+}
+
+/** Each child's own prompt text, taken from its routing header to the next one. */
+function splitRouteChunks(script: string): string[] {
+	return script.split(/(?=ROUTE:)/i).filter((chunk) => /^ROUTE:/i.test(chunk));
 }
 
 /** Every routing header in a script, in order, one per child. */
@@ -479,6 +491,16 @@ export function evaluate(request: GuardRequest): GuardDecision {
 
 	if (request.tool !== "subagent") return { allow: true };
 
+	const action = text(input.action);
+	if (action && !isManagementAction(input) && !text(input.task) && !text(input.workflowScript) && campaign) {
+		// An unrecognised action may start or extend a run, and the guard cannot tell from here.
+		// Refusing is the honest answer: a read-only one belongs in the management list.
+		return deny(
+			"CG016",
+			`The guard cannot classify the action "${action}", so it cannot tell whether it starts work. If it launches or extends a run, dispatch it as a normal launch with a pinned model and a routing header. If it only inspects existing runs, add it to the guard's management list.`,
+		);
+	}
+
 	if (isManagementAction(input)) {
 		if (input.action === "steer" && campaign) {
 			const runId = runIdOf(input);
@@ -508,7 +530,19 @@ export function evaluate(request: GuardRequest): GuardDecision {
 	if (!budgets.allow) return budgets;
 
 	if (script) {
+		if (/[{,]\s*(agent|model|task)\s*[,}]/.test(script)) {
+			return deny(
+				"CG002",
+				"Write each child's agent, model, and task as literal fields in the script. Shorthand or variable references cannot be checked, and a child whose model cannot be read is a child whose model was never pinned.",
+			);
+		}
 		const { agents, models } = collectScriptModels(script);
+		if (agents === 0) {
+			return deny(
+				"CG002",
+				"No child agent could be read from this script as a literal field, so nothing about it can be verified. Write the children out literally.",
+			);
+		}
 		const unpinned = models.filter((model) => parseModelPin(model) === null);
 		if (models.length < agents || unpinned.length > 0) {
 			return deny(
@@ -562,8 +596,12 @@ export function evaluate(request: GuardRequest): GuardDecision {
 		);
 	}
 	const gitWrite = /\b(commit|commits|committing|stage|staged|staging|rebase|cherry-pick|push)\b/i;
-	const realWork = /\b(implement\w*|fix|repair|add|write|refactor|migrate|port|extract|design|review|audit|investigate|inventory|analy[sz]e|research|reconnaissance|compose)\b/i;
-	if (gitWrite.test(task) && !realWork.test(task)) {
+	const realWork =
+		/\b(implement\w*|fix|repair|add|write|update|create|introduce|rename|delete|remove|wire|refactor|migrate|port|extract|design|review|audit|investigate|inventory|analy[sz]e|research|reconnaissance|compose)\b/i;
+	// The prompt is required to forbid pushing, so that mandatory sentence must not itself read
+	// as an instruction to push.
+	const withoutBoundaries = task.replace(/\b(never|do not|don't|no)\s+(push|run\s+gh|open\s+(a\s+)?pr)\b/gi, " ");
+	if (gitWrite.test(withoutBoundaries) && !realWork.test(task)) {
 		return deny(
 			"CG007",
 			"This dispatch is git plumbing with no implementation in it. Committing, staging, rebasing, pushing, and PR state belong to the coordinator alone: run git yourself. Handing a subagent write access to your branch to save one tool call is a bad trade every time.",
@@ -645,8 +683,25 @@ export function evaluate(request: GuardRequest): GuardDecision {
 		);
 	}
 
-	const lint = lintPrompt(task, kind, campaign);
-	if (!lint.allow) return lint;
+	// Each child of a script receives its own prompt, so each one is linted on its own: a
+	// sibling supplying the worktree and the push boundary does not supply them to the others.
+	if (script) {
+		for (const chunk of splitRouteChunks(script)) {
+			const chunkLint = lintPrompt(chunk, laneKindFor(undefined, chunk), campaign);
+			if (!chunkLint.allow) return chunkLint;
+		}
+	} else {
+		const lint = lintPrompt(task, kind, campaign);
+		if (!lint.allow) return lint;
+	}
+
+	const reused = campaign.lanes.find((lane) => lane.key === route.key && lane.state !== "integrated");
+	if (reused) {
+		return deny(
+			"CG010",
+			`Lane ${route.key} is already open (${reused.state}). Reusing the key would drop the first attempt from the accounting, so its partial work would stop holding capacity and stop blocking review. Integrate it with coordinator_lane, or mark it dead if the run failed, then dispatch again.`,
+		);
+	}
 
 	if (kind === "implement") {
 		const open = campaign.lanes.filter((lane) => lane.kind === "implement" && lane.state !== "integrated");
