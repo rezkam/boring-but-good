@@ -66,6 +66,9 @@ the driver reports the failure instead of quietly implementing it itself.
 Give the agent a complete world. A dispatch missing any of these produces a report you
 cannot trust:
 
+- its own routing row as the first line, which is what makes the table match the calls:
+  `ROUTE: <key> | class <1|2|3> | <provider/model:effort> | <why this class>`
+
 - the full resolved worktree path, stated verbatim, and the branch name
 - the exact expected `HEAD` sha, with an instruction to STOP and report if it differs
 - the one slice, its acceptance criteria, and how it will be verified
@@ -88,6 +91,11 @@ fanout, under a header telling them the path was verified.
 Only in separate worktrees with disjoint file ownership, integrated one lane at a time in
 the approved order, with the touched gates re-run after each integration. Read-only
 agents may share a frozen revision. Two writers never share a worktree.
+
+At most three writer lanes are open at once, and a lane counts as open until you have
+integrated it and run its gates yourself. A campaign that launches faster than it
+integrates is accumulating integration debt: five writers went out in a single instant of
+one campaign, and four hours later the branch had received none of them.
 
 Every dispatched agent stops immediately and reports `BLOCKED_CONCURRENT_MUTATION` if
 `HEAD`, `git status`, or file contents change in a way it cannot attribute to itself.

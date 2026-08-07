@@ -57,7 +57,48 @@ transcripts, kept out of the repo by `.gitignore`).
    deviation gets an explicit verdict before the slice closes: ratified (a good call, logged with why) or remediated
    (reverted or fixed via a follow-up dispatch).
 
+## Long-session decay modes (from a 19 hour pi campaign, 2026-08-07)
+
+One session produced all five. They are grouped because they share a cause: every rule in this skill was prose, read
+once, and nothing compared the rules to the calls. They are now refused at the tool boundary by `../guard/`, whose
+codes map onto this list.
+
+10. **pin-decay-over-session-length.** Pinning discipline present in hour one vanished by hour three and stayed gone
+    for roughly seventy launches, every one inheriting the session's most expensive model at its highest effort; five
+    later launches carried a bare model id that silently resolved to the builtin role's own `high` default. The audit
+    script existed, ran six times in nineteen hours, and never after the fan-out that needed it. Fix: the routing row
+    is a header on the dispatch itself (`ROUTE: key | class n | provider/model:effort | why`), and a launch without a
+    valid pin or a matching header fails (CG002, CG003, CG004, CG012).
+
+11. **builtin-role-substitution.** The harness's own role registry (`worker`, `reviewer`, `oracle`, `scout`, `commit`)
+    silently replaced this skill's roles: zero dispatches rendered the implementer or reviewer template, prompts were
+    hand-rolled without report path, status vocabulary, or escalation channel, and choosing a builtin role chose no
+    model at all. Fix: builtin roles are transport for a rendered template, never a role; the harness `commit` builtin
+    is on the never-dispatch list by name (CG007).
+
+12. **review-loop-multiplication.** Twenty-three reviewers ran during implementation, one per parallel track, each
+    rejection spawning a repair and each repair a re-review. Review became the bottleneck and the budget sink while the
+    branch received nothing and the plan sat at seven of twenty-nine slices for five hours. Fix: reviewer dispatches
+    before the single final pass are refused, whatever the prompt is labelled, and only one reviewer runs at a time
+    (CG006).
+
+13. **fan-out-without-integration.** Five writers launched in one instant across fifteen worktrees, with per-lane
+    review and repair loops, and nothing integrated for hours. Parallelism became the product. Fix: at most three open
+    writer lanes, where a returned lane stays open until the coordinator integrates it and runs its gates (CG010), and
+    steering the same run a third time is refused in favour of stopping and splitting it (CG011).
+
+14. **scope-change-becomes-shadow-campaign.** A one-line user addition ("there is a 0.84.1, use that too") was executed
+    as an improvised eight-track parallel migration that appeared in no plan, and the user had to ask twice why nothing
+    was progressing and once to say "follow the plan that we have". Fix: a mid-campaign instruction that changes the
+    base, dependencies, or scope is a plan-reshaping stop condition: amend the plan, print the delta, then work it.
+
 ## Coordinator-side modes (from the same review, not per-record)
+
+- **status-silence-at-peak-load.** Status blocks stopped entirely during the two hours of heaviest fan-out, and the
+  blocks that were printed dropped the worktree and PR lines while using `DIRECT` for narration rather than
+  non-dispatch justification. The user asked for status seven times. Fix: a launch behind a status block older than
+  five minutes fails, the block's required fields are checked before it counts as fresh, and a turn that ends with
+  lanes still open queues an automatic continuation (CG008).
 
 - **over-asking-on-fix-scope.** Escalating confirmed-defect fixes that have an obvious conservative default, instead
   of fixing under the P0-P2 bar and logging a deviation. Fix: a narrower stop condition, so only plan-reshaping
