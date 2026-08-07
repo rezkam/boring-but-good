@@ -318,7 +318,10 @@ function checkBudgets(input: Record<string, unknown>, script: string): GuardDeci
 
 export function evaluate(request: GuardRequest): GuardDecision {
 	const config = request.config ?? DEFAULT_CONFIG;
-	const { input, campaign, now } = request;
+	const { input, now } = request;
+	// A closed campaign is history, not a live one: enforcement returns to inert so ordinary
+	// work is not held hostage by a campaign that already ended.
+	const campaign = request.campaign && request.campaign.status !== "closed" ? request.campaign : null;
 
 	if (request.tool === "bash") {
 		if (!campaign && !request.armed) return { allow: true };
@@ -349,10 +352,6 @@ export function evaluate(request: GuardRequest): GuardDecision {
 			"CG001",
 			"The coordinator skill is loaded but no campaign is registered, so no routing, lane, or status rule can be enforced. Call coordinator_campaign with action \"start\" (slug, worktree, plan path, slice count, authorization scope) before the first dispatch.",
 		);
-	}
-
-	if (campaign.status === "closed") {
-		return deny("CG001", `Campaign ${campaign.slug} is closed. Start a new campaign before dispatching again.`);
 	}
 
 	const script = text(input.workflowScript);
