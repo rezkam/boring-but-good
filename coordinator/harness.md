@@ -128,6 +128,10 @@ and open the single review pass with `open-review`. See [guard/README.md](guard/
 for the refusal codes. When a call is blocked, the refusal names the fix: correct it and
 retry in the same turn. Never work around a refusal by routing through bash.
 
+Structural rules are checked mechanically; the rules that depend on what a prompt says are
+checked by a small model that reads it and answers a fixed set of questions. That judge
+fails closed, so a dispatch it cannot read is refused rather than assumed compliant.
+
 **Re-read this skill and the notes file at the start of every campaign turn.** A 19 hour
 campaign quoted these rules correctly in hour one and had lost them by hour three, for
 roughly seventy dispatches. The conversation is not the campaign's memory: the notes file

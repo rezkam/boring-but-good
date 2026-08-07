@@ -8,23 +8,26 @@
  * while agents are in flight.
  */
 
+import { complete } from "@earendil-works/pi-ai/compat";
+import type { Model, UserMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+
+import { judgeCacheKey, judgeDispatch, type JudgeCall, type PromptVerdict } from "./judge.ts";
 
 import {
 	continuationPrompt,
 	contractPrompt,
-	evaluate,
+	evaluateStructure,
+	evaluateVerdicts,
 	isManagementAction,
-	laneKindFor,
 	laneSummary,
 	newCampaign,
 	openReview,
 	parseRouteHeader,
-	parseScriptChildren,
 	readStatusBlock,
 	type Campaign,
-	type Lane,
+	type JudgeTarget,
 } from "./policy.ts";
 
 const STATE_TYPE = "coordinator-guard";
@@ -36,10 +39,22 @@ const CONTINUATION_INTERVAL_MS = 5 * 60_000;
 /** After this many continuations with no lane changing state, the campaign is stuck and the user decides. */
 const MAX_NO_PROGRESS_CONTINUATIONS = 10;
 
+/**
+ * The judge reads prompts, so it wants to be cheap and fast rather than clever. It is
+ * overridable because model availability is a local fact, not something this can assume.
+ */
+const DEFAULT_JUDGE_MODEL = "openai-codex/gpt-5.6-luna:low";
+const JUDGE_MAX_TOKENS = 700;
+
+/** Mirrors the policy's correction actions, for counting what the guard already allowed. */
+const CORRECTION_ACTIONS = new Set(["steer", "resume"]);
+
 interface PersistedState {
 	version: 1;
 	armed: boolean;
 	campaign: Campaign | null;
+	judgeModel: string;
+	judgeEnabled: boolean;
 }
 
 const StartParams = Type.Object({
@@ -67,6 +82,9 @@ const LaneParams = Type.Object({
 export default function coordinatorGuard(pi: ExtensionAPI) {
 	let campaign: Campaign | null = null;
 	let armed = false;
+	let judgeModel = DEFAULT_JUDGE_MODEL;
+	let judgeEnabled = true;
+	const verdictCache = new Map<string, PromptVerdict>();
 	let noProgressContinuations = 0;
 	let lastContinuationAt = 0;
 	let continuationQueued = false;
@@ -96,7 +114,83 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 	}
 
 	function persist(): void {
-		pi.appendEntry<PersistedState>(STATE_TYPE, { version: 1, armed, campaign });
+		pi.appendEntry<PersistedState>(STATE_TYPE, { version: 1, armed, campaign, judgeModel, judgeEnabled });
+	}
+
+	/**
+	 * Ask the judge about one prompt. Structural facts never reach it, so this only runs for
+	 * dispatches that already passed phase one: a handful per campaign, not per tool call.
+	 */
+	async function judgePrompt(
+		ctx: ExtensionContext,
+		target: { prompt: string; agent?: string; declaredClass: 1 | 2 | 3 },
+	): Promise<{ ok: true; verdict: PromptVerdict } | { ok: false; error: string }> {
+		if (!judgeEnabled) {
+			return {
+				ok: true,
+				verdict: {
+					kind: "implement",
+					worktree: null,
+					expectedHead: null,
+					stopsOnHeadMismatch: true,
+					forbidsPush: true,
+					coordinatorGitWork: "none",
+					unrenderedPlaceholders: [],
+					classJustification: "substantive",
+				},
+			};
+		}
+
+		const request = { prompt: target.prompt, agent: target.agent, declaredClass: target.declaredClass };
+		const key = judgeCacheKey(request);
+		const cached = verdictCache.get(key);
+		if (cached) return { ok: true, verdict: cached };
+
+		const resolved = resolveJudgeModel(ctx);
+		if (!resolved) {
+			return { ok: false, error: `the judge model ${judgeModel} is not available; set another with /campaign judge <provider/model:effort>` };
+		}
+		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(resolved.model);
+		if (!auth.ok) return { ok: false, error: `no credentials are configured for ${judgeModel}` };
+
+		const call: JudgeCall = async (systemPrompt, message) => {
+			const userMessage: UserMessage = { role: "user", content: [{ type: "text", text: message }], timestamp: Date.now() };
+			const response = await complete(
+				resolved.model,
+				{ systemPrompt, messages: [userMessage] },
+				{
+					apiKey: auth.apiKey,
+					headers: auth.headers,
+					signal: ctx.signal,
+					maxTokens: JUDGE_MAX_TOKENS,
+					...(resolved.effort ? { reasoning: resolved.effort } : {}),
+				} as Parameters<typeof complete>[2],
+			);
+			const text = response.content
+				.filter((block): block is { type: "text"; text: string } => block.type === "text")
+				.map((block) => block.text)
+				.join("\n");
+			return { text, stopReason: response.stopReason };
+		};
+
+		const outcome = await judgeDispatch(call, request);
+		if (!outcome.ok) return { ok: false, error: outcome.error };
+		verdictCache.set(key, outcome.verdict);
+		return { ok: true, verdict: outcome.verdict };
+	}
+
+	/** `provider/model` with an optional `:effort` suffix, resolved against the live registry. */
+	function resolveJudgeModel(ctx: ExtensionContext): { model: Model<any>; effort?: string } | null {
+		const colon = judgeModel.lastIndexOf(":");
+		const slash = judgeModel.indexOf("/");
+		if (slash <= 0) return null;
+		const hasEffort = colon > slash;
+		const spec = hasEffort ? judgeModel.slice(0, colon) : judgeModel;
+		const effort = hasEffort ? judgeModel.slice(colon + 1) : undefined;
+		const provider = spec.slice(0, spec.indexOf("/"));
+		const id = spec.slice(spec.indexOf("/") + 1);
+		const model = ctx.modelRegistry.find(provider, id);
+		return model ? { model, effort } : null;
 	}
 
 	function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "info"): void {
@@ -117,6 +211,9 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 	function reconstruct(ctx: ExtensionContext): void {
 		campaign = null;
 		armed = false;
+		judgeModel = DEFAULT_JUDGE_MODEL;
+		judgeEnabled = true;
+		verdictCache.clear();
 		noProgressContinuations = 0;
 		continuationQueued = false;
 		if (continuationTimer) clearTimeout(continuationTimer);
@@ -128,12 +225,19 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			if (!data) continue;
 			armed = data.armed === true;
 			campaign = data.campaign ?? null;
+			judgeModel = typeof data.judgeModel === "string" && data.judgeModel ? data.judgeModel : DEFAULT_JUDGE_MODEL;
+			judgeEnabled = data.judgeEnabled !== false;
 		}
 		updateStatusLine(ctx);
 	}
 
 	pi.on("session_start", async (_event, ctx) => reconstruct(ctx));
 	pi.on("session_tree", async (_event, ctx) => reconstruct(ctx));
+
+	pi.on("session_shutdown", async () => {
+		if (continuationTimer) clearTimeout(continuationTimer);
+		continuationTimer = null;
+	});
 
 	pi.on("input", async (event) => {
 		if (!armed && /\/skill:coordinator|\buse the coordinator\b/i.test(event.text ?? "")) {
@@ -160,34 +264,64 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 				return;
 			}
 
-			const decision = evaluate({
+			const request = {
 				tool: event.toolName,
 				input: event.input as Record<string, unknown>,
 				now: Date.now(),
 				armed,
 				campaign,
-			});
+			};
 
-			if (!decision.allow) {
-				notify(ctx, `Guard ${decision.code}: dispatch refused`, "warning");
-				return { block: true, reason: `[coordinator-guard ${decision.code}] ${decision.reason}` };
+			// Phase one is free: a malformed dispatch is refused without spending a model call.
+			const structure = evaluateStructure(request);
+			if (!structure.allow) {
+				notify(ctx, `Guard ${structure.code}: refused`, "warning");
+				return { block: true, reason: `[coordinator-guard ${structure.code}] ${structure.reason}` };
+			}
+			if (structure.judge.length === 0) return;
+
+			// Phase two reads the prompts. An unread prompt is an unchecked one, so a judge that
+			// cannot answer refuses the dispatch rather than waving it through.
+			const judgements: Array<{ target: (typeof structure.judge)[number]; verdict: PromptVerdict }> = [];
+			for (const target of structure.judge) {
+				const outcome = await judgePrompt(ctx, target);
+				if (!outcome.ok) {
+					notify(ctx, `Guard: the judge could not read this dispatch (${outcome.error})`, "error");
+					return {
+						block: true,
+						reason: `[coordinator-guard CG018] This dispatch could not be checked, because ${outcome.error}. The guard refuses what it cannot read. Retry, pick another judge model with /campaign judge <provider/model:effort>, or have the user turn the judge off with /campaign judge off.`,
+					};
+				}
+				judgements.push({ target, verdict: outcome.verdict });
 			}
 
-			if (event.toolName === "subagent") recordLaunch(event.toolCallId, event.input as Record<string, unknown>, ctx);
+			const judged = evaluateVerdicts(request, judgements);
+			if (!judged.allow) {
+				notify(ctx, `Guard ${judged.code}: refused`, "warning");
+				return { block: true, reason: `[coordinator-guard ${judged.code}] ${judged.reason}` };
+			}
+
+			if (event.toolName === "subagent") {
+				recordLaunch(event.toolCallId, event.input as Record<string, unknown>, ctx, judgements);
+			}
 		} catch (error) {
 			notify(ctx, `coordinator-guard internal error, allowing the call: ${String(error)}`, "error");
 		}
 	});
 
-	function recordLaunch(toolCallId: string, input: Record<string, unknown>, ctx: ExtensionContext): void {
+	function recordLaunch(
+		toolCallId: string,
+		input: Record<string, unknown>,
+		ctx: ExtensionContext,
+		judgements: Array<{ target: JudgeTarget; verdict: PromptVerdict }>,
+	): void {
 		// A closed campaign enforces nothing, so it must not accumulate lanes a later resume
 		// would treat as its own.
 		if (!campaign || campaign.status === "closed") return;
-		// A scheduling action creates a run, so it becomes a lane like any other launch. Only a
-		// genuine management action returns here.
 		if (isManagementAction(input)) {
-			if (input.action === "steer") {
-				const runId = typeof input.id === "string" ? input.id : typeof input.runId === "string" ? input.runId : "";
+			if (CORRECTION_ACTIONS.has(String(input.action))) {
+				const runId =
+					typeof input.id === "string" ? input.id : typeof input.runId === "string" ? input.runId : typeof input.dir === "string" ? input.dir : "";
 				if (runId) {
 					campaign.steers[runId] = (campaign.steers[runId] ?? 0) + 1;
 					persist();
@@ -195,38 +329,25 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			}
 			return;
 		}
-		const script = typeof input.workflowScript === "string" ? input.workflowScript : "";
-		const task = typeof input.task === "string" ? input.task : script;
-		const agent = typeof input.agent === "string" ? input.agent : undefined;
-		// Each child is classified from its own prompt and its own agent, the same pair admission
-		// judged, so a lane is never recorded as a kind the guard did not actually allow.
-		const launches = script
-			? parseScriptChildren(script).children.map((child) => ({ prompt: child.task, agent: child.agent }))
-			: [{ prompt: task, agent }];
-		const lanes: Lane[] = [];
-		for (const launch of launches) {
-			const route = parseRouteHeader(launch.prompt);
-			if (!route) continue;
-			lanes.push({
-				key: route.key,
-				kind: laneKindFor(launch.agent, launch.prompt),
-				model: route.model,
+		if (judgements.length === 0) return;
+
+		// The lane records the kind the guard actually admitted, so accounting and admission
+		// can never disagree about what was launched.
+		for (const { target, verdict } of judgements) {
+			campaign.lanes.push({
+				key: target.routeKey,
+				kind: verdict.kind,
+				model: target.model,
 				startedAt: Date.now(),
 				state: "running",
 			});
-			campaign.routes.push(route);
+			const route = parseRouteHeader(target.prompt);
+			if (route) campaign.routes.push(route);
 		}
-		if (lanes.length === 0) return;
-		const routes = lanes;
-		campaign.lanes.push(...lanes);
-		// Dispatches run in the background unless async is explicitly false, so only a declared
-		// foreground run finishes when its tool result arrives. Background lanes are closed by
-		// the coordinator through coordinator_lane, which is what the continuation asks for. Both
-		// are tracked, because a launch that errors immediately must not leave a phantom lane.
 		// The launch had to declare its mode, so the lane is tracked from that declaration rather
 		// than from a default the guard cannot see. clarify keeps a run in the foreground too.
 		const foreground = input.async === false || input.clarify === true;
-		laneByToolCall.set(toolCallId, { keys: routes.map((lane) => lane.key), foreground });
+		laneByToolCall.set(toolCallId, { keys: judgements.map((entry) => entry.target.routeKey), foreground });
 		recordProgress();
 		persist();
 		updateStatusLine(ctx);
@@ -303,13 +424,20 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		const wait = Math.max(0, CONTINUATION_INTERVAL_MS - (Date.now() - lastContinuationAt));
 		continuationTimer = setTimeout(() => {
 			continuationTimer = null;
-			if (!campaign || campaign.status === "closed") return;
-			if (campaign.lanes.every((lane) => lane.state === "integrated")) return;
-			if (continuationQueued || ctx.hasPendingMessages() || !ctx.isIdle()) return;
-			continuationQueued = true;
-			noProgressContinuations += 1;
-			lastContinuationAt = Date.now();
-			pi.sendMessage({ customType: CONTINUATION_TYPE, content: continuationPrompt(campaign), display: false }, { triggerTurn: true });
+			// This fires long after the turn that scheduled it, and the session may have been
+			// replaced, reloaded, or ended in between. A captured ctx throws once that happens, so
+			// a missed continuation has to stay a missed continuation rather than a crashed pi.
+			try {
+				if (!campaign || campaign.status === "closed") return;
+				if (campaign.lanes.every((lane) => lane.state === "integrated")) return;
+				if (continuationQueued || ctx.hasPendingMessages() || !ctx.isIdle()) return;
+				continuationQueued = true;
+				noProgressContinuations += 1;
+				lastContinuationAt = Date.now();
+				pi.sendMessage({ customType: CONTINUATION_TYPE, content: continuationPrompt(campaign), display: false }, { triggerTurn: true });
+			} catch {
+				continuationQueued = false;
+			}
 		}, wait);
 		continuationTimer.unref?.();
 	});
@@ -471,8 +599,32 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 					persist();
 					show("Campaign active.");
 					break;
-				default:
-					show("Usage: /campaign [arm|disarm|close|resume]");
+				default: {
+					if (command === "judge" || command.startsWith("judge ")) {
+						const argument = command.slice("judge".length).trim();
+						if (!argument) {
+							show(`Judge ${judgeEnabled ? `on, using ${judgeModel}` : "off: prompt rules are not enforced"}.`);
+						} else if (argument === "off") {
+							judgeEnabled = false;
+							persist();
+							show("Judge off. Structural rules still apply; nothing that depends on reading a prompt does.");
+						} else if (argument === "on") {
+							judgeEnabled = true;
+							persist();
+							show(`Judge on, using ${judgeModel}.`);
+						} else if (argument.includes("/")) {
+							judgeModel = argument;
+							judgeEnabled = true;
+							verdictCache.clear();
+							persist();
+							show(`Judge model set to ${judgeModel}.`);
+						} else {
+							show("Usage: /campaign judge [on|off|<provider/model:effort>]");
+						}
+						break;
+					}
+					show("Usage: /campaign [arm|disarm|close|resume|judge]");
+				}
 			}
 			updateStatusLine(ctx);
 		},
