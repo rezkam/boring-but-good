@@ -110,7 +110,7 @@ Known limits:
 
 Gemini uses the WebUI API path and live account discovery where possible:
 
-- Default auth source is the AI Chat owned Browser Tools browser. Gemini commands stop that owned browser with its matching owner token after completion or failure.
+- Default auth source is the AI Chat owned Browser Tools browser. Every provider stops that owned browser with its matching owner token after completion or failure.
 - Explicit fallback is `--cookie-source chrome-profile --chrome-profile <profile-folder>`.
 - `--verify-session` reports direct API readiness and browser UI readiness separately.
 - Exposed browser modes are `gemini-3.6-flash` and `gemini-3.6-flash-extended-thinking`.

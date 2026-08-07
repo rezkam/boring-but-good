@@ -442,7 +442,6 @@ export const geminiProvider = {
   url: 'https://gemini.google.com/app',
   trustedConversationHostnames: GEMINI_APP_HOSTNAMES,
   transport: 'webui-api',
-  closeBrowserAfterRun: true,
 
   defaultModel: 'gemini-3.6-flash',
   taskModels: {
