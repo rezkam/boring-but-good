@@ -795,6 +795,51 @@ test('runAiChat stops its owned browser after a Gemini request completes', async
   }
 });
 
+test('runAiChat stops its owned browser after any provider request completes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-provider-browser-stop-'));
+  try {
+    const stateFile = join(dir, 'browser.json');
+    const stopCalls = [];
+    let disconnects = 0;
+    const browser = { disconnect: () => { disconnects += 1; } };
+    const request = buildAiChatRequest({
+      providerName: 'browser-provider',
+      modelName: 'default',
+      prompt: 'hello',
+      jsonOutput: true,
+      browserStateFile: stateFile,
+    });
+
+    await runAiChat(request, {
+      provider: {
+        name: 'browser-provider',
+        runRequiresBrowser: () => true,
+        async run() {
+          return { text: 'answer', rawText: 'answer', done: true, modelUsed: 'default' };
+        },
+      },
+      async startChrome() {
+        return { status: 'started', port: 4600, ownerToken: 'provider-owner-token', profileName: 'Default', requestedProfileName: 'Default' };
+      },
+      async connectBrowser() {
+        return browser;
+      },
+      stopChrome(args) {
+        stopCalls.push(args);
+        return { status: 'stopped', port: args.port };
+      },
+      cache: noCache(),
+      io: { stdout: () => {}, writeFile: () => assert.fail('no file expected') },
+    });
+
+    assert.equal(disconnects, 1);
+    assert.deepEqual(stopCalls, [{ port: 4600, ownerToken: 'provider-owner-token', clean: false }]);
+    assert.equal(JSON.parse(readFileSync(stateFile, 'utf-8')).status, 'stopped');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('runAiChat stops its owned browser when a Gemini request fails', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ai-chat-gemini-browser-stop-error-'));
   try {
@@ -1155,17 +1200,20 @@ test('runAiChat stops its owned Gemini browser after model listing', async () =>
   }
 });
 
-test('runAiChat reuses the AI Chat owned browser across providers', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-browser-reuse-'));
+test('runAiChat starts and closes its own browser for each provider command', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-browser-per-command-'));
   try {
     const stateFile = join(dir, 'browser.json');
     const connectCalls = [];
     const runCalls = [];
+    const stopCalls = [];
     let startCount = 0;
+    let livePort = null;
     const browser = { disconnect() {} };
     const commonDeps = {
       async startChrome() {
         startCount += 1;
+        livePort = 4666;
         return { status: 'started', port: 4666, ownerToken: 'reuse-token', profileName: 'Default', requestedProfileName: 'Default', headless: true };
       },
       managedBrowserSafetyForPort(port) {
@@ -1180,10 +1228,16 @@ test('runAiChat reuses the AI Chat owned browser across providers', async () => 
         assert.equal(ownerToken, 'reuse-token');
         return { ok: true, ownerId: 'ai-chat' };
       },
-      browserWSEndpoint: async port => `ws://localhost:${port}`,
+      // Reflects reality: a stopped browser no longer answers on its debug port.
+      browserWSEndpoint: async port => (port === livePort ? `ws://localhost:${port}` : null),
       async connectBrowser(port, options) {
         connectCalls.push({ port, ownerToken: options.ownerToken });
         return browser;
+      },
+      stopChrome(args) {
+        stopCalls.push(args);
+        livePort = null;
+        return { status: 'stopped', port: args.port };
       },
       cache: noCache(),
       io: { stdout: () => {}, writeFile: () => assert.fail('no file expected') },
@@ -1204,7 +1258,11 @@ test('runAiChat reuses the AI Chat owned browser across providers', async () => 
       });
     }
 
-    assert.equal(startCount, 1);
+    assert.equal(startCount, 2, 'each command must start its own browser once the previous one closed');
+    assert.deepEqual(stopCalls, [
+      { port: 4666, ownerToken: 'reuse-token', clean: false },
+      { port: 4666, ownerToken: 'reuse-token', clean: false },
+    ]);
     assert.deepEqual(connectCalls, [
       { port: 4666, ownerToken: 'reuse-token' },
       { port: 4666, ownerToken: 'reuse-token' },
@@ -1338,13 +1396,14 @@ test('runAiChat refuses saved owned state when the debug port is unavailable', a
   }
 });
 
-test('runAiChat reuses a windowed AI Chat browser for UI providers', async () => {
+test('runAiChat adopts a windowed AI Chat browser for UI providers and closes it after the run', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ai-chat-browser-windowed-'));
   try {
     const stateFile = join(dir, 'browser.json');
     writeJson(stateFile, { version: 1, ownerId: 'ai-chat', ownerToken: 'owned-token', port: 4995, profileName: 'Default', headless: false });
     const request = buildAiChatRequest({ providerName: 'browser-provider', prompt: 'hello', browserStateFile: stateFile });
     const browser = { disconnect() {} };
+    const stopCalls = [];
 
     const result = await runAiChat(request, {
       provider: { name: 'browser-provider', runRequiresBrowser: () => true, run: () => ({ text: 'answer', rawText: 'answer', done: true, modelUsed: 'default' }) },
@@ -1354,10 +1413,16 @@ test('runAiChat reuses a windowed AI Chat browser for UI providers', async () =>
       browserWSEndpoint: async () => 'ws://localhost:4995',
       startChrome: () => assert.fail('windowed browser should be reused'),
       connectBrowser: async () => browser,
+      stopChrome(args) {
+        stopCalls.push(args);
+        return { status: 'stopped', port: args.port };
+      },
       cache: noCache(),
       io: { stdout: () => {}, writeFile: () => assert.fail('no file expected') },
     });
     assert.equal(result.result.text, 'answer');
+    assert.deepEqual(stopCalls, [{ port: 4995, ownerToken: 'owned-token', clean: false }]);
+    assert.equal(JSON.parse(readFileSync(stateFile, 'utf-8')).status, 'stopped');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

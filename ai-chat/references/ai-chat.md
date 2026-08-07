@@ -11,7 +11,7 @@ Normal AI Chat commands do not require a manual Browser Tools start.
 1. If a provider needs browser access, AI Chat reads its private browser state file or `AI_CHAT_BROWSER_STATE_FILE` when set.
 2. If the saved browser is healthy, Browser Tools managed, and owned by `ai-chat`, AI Chat reconnects with the saved owner token.
 3. If no usable owned browser exists, AI Chat starts Browser Tools with owner id `ai-chat`, task profile `ai-chat`, fallback Chrome profile `Default` when no task profile is configured, and auto port allocation unless `--port` is explicit.
-4. After a Gemini request or Gemini model-listing command, AI Chat disconnects from CDP and stops the owned browser with its matching owner token, including on failure. Other providers disconnect from CDP but leave Chrome running for reuse.
+4. After any provider request or model-listing command, AI Chat disconnects from CDP and stops the owned browser with its matching owner token, including on failure. A `--submit-only` request is the one exception: it leaves the browser alive for the `--final` command that collects the answer, and that command closes it. Once a browser has been closed its saved state counts as stale, so the next command starts a new one instead of refusing to attach.
 5. Explicit cleanup must use Browser Tools stop with the matching owner token. Use `--clean` to remove the copied profile when auth state is stale and a fresh sync is needed.
 
 AI Chat refuses to attach to unmanaged Chrome, another owner, missing owner token, wrong owner token, and a live owned browser whose debug port cannot be reached. Stale private state where the process is gone is removed and replaced by a new owned browser.

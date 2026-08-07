@@ -381,6 +381,11 @@ export async function validateAiChatBrowserState(state, {
     return { ok: false, stale: true, reason: 'missing-ai-chat-browser-state' };
   }
 
+  // A record we already closed describes a dead browser, so it is stale rather than a refusal.
+  if (state.status === 'stopped') {
+    return { ok: false, stale: true, reason: 'ai-chat-browser-already-closed' };
+  }
+
   let port;
   try {
     port = normalizePort(state.port || DEFAULT_PORT);
@@ -491,7 +496,7 @@ export async function ensureAiChatBrowserSession(request, deps = {}) {
           await finishAiChatBrowserSessionPreservingError({
             browserSession: { shouldDisconnect: true, request: { ...request, port: validation.port }, state: savedState },
             browser: null,
-            provider: { name: request.providerName, closeBrowserAfterRun: true },
+            provider: { name: request.providerName },
             request: { ...request, port: validation.port },
             deps,
           }, connectionError);
@@ -555,7 +560,7 @@ export async function ensureAiChatBrowserSession(request, deps = {}) {
       await finishAiChatBrowserSessionPreservingError({
         browserSession: { shouldDisconnect: true, request: { ...request, port: started.port }, state },
         browser: null,
-        provider: { name: request.providerName, closeBrowserAfterRun: true },
+        provider: { name: request.providerName },
         request: { ...request, port: started.port },
         deps,
       }, error);
@@ -572,7 +577,7 @@ async function finishAiChatBrowserSession({ browserSession, browser, provider, r
   } catch (error) {
     disconnectError = error;
   }
-  if (!provider?.closeBrowserAfterRun) {
+  if (!request?.closeBrowserAfterRun) {
     if (disconnectError) throw disconnectError;
     return;
   }
@@ -1647,11 +1652,16 @@ function validateProviderRequest(provider, request) {
   }
 }
 
+function closesBrowserAfterRun(request) {
+  // --submit-only deliberately hands the live browser to a later --final run, which closes it.
+  return !request?.submitOnly;
+}
+
 function browserRequestForProvider(request, provider) {
   return {
     ...request,
     ...(provider?.preferredBrowserHeadless ? { browserHeadless: true } : {}),
-    closeBrowserAfterRun: !!provider?.closeBrowserAfterRun,
+    closeBrowserAfterRun: closesBrowserAfterRun(request),
   };
 }
 
