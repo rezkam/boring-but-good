@@ -11,18 +11,24 @@ This turns the mechanical half of the skill into refusals at the tool boundary.
 - `policy.test.ts`: `node --test policy.test.ts`. Node 24 runs the TypeScript directly.
 - `pi-extension.ts`: the pi wiring. Blocks tool calls, restates the contract every turn,
   and keeps the session from going quiet while agents are in flight.
+- `index.ts`: the entry point pi discovers.
 
 ## Install on pi
 
-Add the extension to `~/.pi/agent/settings.json`:
+Symlink this directory into pi's extension directory, so the installed copy is this
+repository rather than a duplicate that drifts:
 
-```json
-{
-  "extensions": ["/absolute/path/to/coordinator/guard/pi-extension.ts"]
-}
+```bash
+ln -sfn "$PWD/coordinator/guard" ~/.pi/agent/extensions/coordinator-guard
 ```
 
-It stays inert until it arms, which happens when the coordinator skill is read
+Link the directory, not `pi-extension.ts`. pi's loader resolves relative imports against
+the symlink path rather than the real path, so a single-file link fails with
+`Cannot find module './policy.ts'`, and a broken extension path is a hard pi startup
+error for every session. For the same reason, never point the link at a git worktree that
+may be removed.
+
+The guard stays inert until it arms, which happens when the coordinator skill is read
 (`SKILL.md`, `dispatch.md`, `harness.md`) or the user says "use the coordinator". Once
 armed, dispatches fail until a campaign is registered.
 
