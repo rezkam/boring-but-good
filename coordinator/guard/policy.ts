@@ -70,7 +70,28 @@ export interface GuardRequest {
 
 export type GuardDecision = { allow: true } | { allow: false; code: string; reason: string };
 
-const STATUS_FIELDS = ["CAMPAIGN", "SLICES", "PR", "AGENTS", "DIRECT", "NEXT"] as const;
+const STATUS_FIELDS = ["CAMPAIGN", "WORKTREE", "SLICES", "PR", "AGENTS", "DIRECT", "PARKED", "NEEDS YOU", "NEXT"] as const;
+
+/** Actions that only inspect or control existing runs. Anything else carrying work is a launch. */
+const MANAGEMENT_ACTIONS = new Set([
+	"list",
+	"get",
+	"status",
+	"models",
+	"steer",
+	"stop",
+	"interrupt",
+	"resume",
+	"pending",
+	"reply",
+	"send",
+	"ask",
+	"transcript",
+	"view",
+	"fleet",
+	"cancel",
+	"delete",
+]);
 
 const KIND_BY_AGENT: Record<string, LaneKind> = {
 	worker: "implement",
@@ -183,8 +204,8 @@ Slices: ${campaign.slicesDone} done of ${campaign.slicesTotal}
 
 Do these in order:
 
-1. Check each running lane is actually alive with subagent action "status". A quiet agent is not a working agent, and a dispatch that returns nothing inside its liveness bound is a failed dispatch, not a slow one. Mark dead lanes with coordinator_lane action "dead".
-2. Integrate any returned lane into the campaign branch yourself, run the gates yourself, and record it with coordinator_lane action "integrated".
+1. Check each running lane is actually alive with subagent action "status". A quiet agent is not a working agent, and a dispatch that returns nothing inside its liveness bound is a failed dispatch, not a slow one. Mark dead lanes with coordinator_lane action "dead", and close a read-only lane that has reported with action "done".
+2. Integrate any returned writer lane into the campaign branch yourself, run the gates yourself, and record it with coordinator_lane action "integrated".
 3. Print the status block.
 4. Start the next unblocked slice, or if every slice is done, call coordinator_campaign action "open-review" and dispatch the single final reviewer.
 
@@ -200,17 +221,19 @@ export function parseModelPin(model: unknown): { id: string; effort: ThinkingLev
 	return { id: model.slice(0, colon), effort: effort as ThinkingLevel };
 }
 
-export function modelClass(modelId: string): ImplementationClass | null {
+export function modelClass(modelId: string, effort: ThinkingLevel): ImplementationClass | null {
 	const id = modelId.toLowerCase();
 	if (id.includes("luna") || id.includes("sonnet")) return 1;
 	if (id.includes("terra")) return 2;
-	if (id.includes("opus")) return 2;
+	// The tier table splits opus by effort: low is class 2, medium and above is class 3.
+	if (id.includes("opus")) return effort === "off" || effort === "minimal" || effort === "low" ? 2 : 3;
 	if (id.includes("sol") || id.includes("fable")) return 3;
 	return null;
 }
 
 export function parseRouteHeader(text: string): RouteHeader | null {
-	const match = /^[ \t>*-]*ROUTE:\s*(.+)$/im.exec(text);
+	// Line-anchored for a plain prompt, and after a quote or backtick for a child inside a script.
+	const match = /(?:^|[`'"])[ \t>*-]*ROUTE:\s*(.+)$/im.exec(text);
 	if (!match) return null;
 	const parts = match[1].split("|").map((part) => part.trim());
 	if (parts.length < 4) return null;
@@ -225,17 +248,32 @@ export function parseRouteHeader(text: string): RouteHeader | null {
 }
 
 export function readStatusBlock(text: string): { ok: boolean; missing: string[] } {
-	const missing = STATUS_FIELDS.filter((field) => !new RegExp(`^[ \\t>*-]*${field}\\b`, "im").test(text));
+	// Fields share lines in the block's real layout (CAMPAIGN sits beside WORKTREE), so this
+	// looks for each label rather than for a line that starts with it.
+	const missing = STATUS_FIELDS.filter((field) => !new RegExp(`\\b${field}\\b`, "i").test(text));
 	return { ok: missing.length === 0, missing };
 }
 
 export function laneKindFor(agent: string | undefined, task: string): LaneKind {
 	const known = agent ? KIND_BY_AGENT[agent.toLowerCase()] : undefined;
-	const reviewish = /\b(review|reviewing|acceptance|adjudicate|findings|defect-first)\b/i.test(task);
-	const implementish = /\b(implement|implementation|fix|repair|add|write|refactor|migrate|port|extract|build|compose)\b/i.test(task);
-	if (reviewish && !implementish) return "review";
+	if (known === "review") return "review";
+
+	// A review reads and reports; it never owns the tree. Detect that assignment directly,
+	// because a reviewer prompt is full of remediation words ("findings the author would fix")
+	// and a coordinator can always relabel the agent.
+	const route = parseRouteHeader(task);
+	const reviewKey = route ? /\b(review|accept|audit)/i.test(route.key) : false;
+	const reviewPhrase =
+		/\b(read-only review|independent review|acceptance review|whole-branch review|review of|re-?review|return every finding|do not modify files)\b/i.test(
+			task,
+		);
+	if (reviewKey || reviewPhrase) return "review";
+
 	if (known) return known;
-	return implementish ? "implement" : "investigate";
+	const assignment = firstInstruction(task);
+	return /\b(implement|fix|repair|add|write|refactor|migrate|port|extract|build|compose|commit)\b/i.test(assignment)
+		? "implement"
+		: "investigate";
 }
 
 function text(value: unknown): string {
@@ -252,12 +290,20 @@ function firstInstruction(task: string): string {
 }
 
 function isManagementAction(input: Record<string, unknown>): boolean {
-	return typeof input.action === "string" && input.action.length > 0;
+	const action = text(input.action);
+	if (!action) return false;
+	// A scheduling action creates executions, so it is a launch however it is named.
+	if (!MANAGEMENT_ACTIONS.has(action) && (text(input.task) || text(input.workflowScript))) return false;
+	return true;
 }
 
 function isLaunch(input: Record<string, unknown>): boolean {
 	if (isManagementAction(input)) return false;
 	return typeof input.agent === "string" || text(input.workflowScript).length > 0;
+}
+
+function runIdOf(input: Record<string, unknown>): string {
+	return text(input.id) || text(input.runId);
 }
 
 function deny(code: string, reason: string): GuardDecision {
@@ -277,7 +323,7 @@ function checkBash(command: string): GuardDecision {
 		[/git\s+stash(\s|$)/i, "git stash"],
 		[/git\s+restore(\s|$)/i, "git restore"],
 		[/git\s+checkout\s+--\s/i, "git checkout -- <path>"],
-		[/git\s+push\s+(.*\s)?(--force|-f)(\s|$)/i, "git push --force"],
+		[/git\s+push\s+(.*\s)?(--force(-with-lease)?(=\S*)?|-f)(\s|$)/i, "a force push"],
 		[/git\s+worktree\s+remove\s+.*--force/i, "git worktree remove --force"],
 	];
 	for (const [pattern, label] of destructive) {
@@ -295,6 +341,18 @@ function collectScriptModels(script: string): { agents: number; models: string[]
 	const agents = script.match(/\bagent\s*:/g)?.length ?? 0;
 	const models = [...script.matchAll(/\bmodel\s*:\s*['"`]([^'"`]+)['"`]/g)].map((match) => match[1]);
 	return { agents, models };
+}
+
+/** One kind per child, read from the agent names and from each child's own routing header. */
+function scriptChildKinds(script: string): LaneKind[] {
+	const kinds: LaneKind[] = [];
+	for (const match of script.matchAll(/\bagent\s*:\s*['"`]([^'"`]+)['"`]/g)) {
+		const known = KIND_BY_AGENT[match[1].toLowerCase()];
+		if (known) kinds.push(known);
+	}
+	const chunks = script.split(/(?=ROUTE:)/i).filter((chunk) => /^ROUTE:/i.test(chunk));
+	for (const chunk of chunks) kinds.push(laneKindFor(undefined, chunk));
+	return kinds;
 }
 
 function checkBudgets(input: Record<string, unknown>, script: string): GuardDecision {
@@ -332,7 +390,7 @@ export function evaluate(request: GuardRequest): GuardDecision {
 
 	if (isManagementAction(input)) {
 		if (input.action === "steer" && campaign) {
-			const runId = text(input.runId);
+			const runId = runIdOf(input);
 			const used = campaign.steers[runId] ?? 0;
 			if (runId && used >= config.steerCap) {
 				return deny(
@@ -365,6 +423,19 @@ export function evaluate(request: GuardRequest): GuardDecision {
 			return deny(
 				"CG002",
 				`Every agent in a workflow script needs its own model pinned as provider/model:effort. Found ${agents} agent entries and ${models.length} model values${unpinned.length > 0 ? `, and these carry no valid effort suffix: ${unpinned.join(", ")}` : ""}. An unpinned entry inherits the session model and effort silently.`,
+			);
+		}
+		const children = scriptChildKinds(script);
+		if (children.includes("implement")) {
+			return deny(
+				"CG010",
+				"A workflow script carries writers. Writers go out one dispatch at a time so each becomes a tracked lane you integrate before the next: a script hides them behind a single call, which is how five of them once opened in one instant and none landed for hours. Scripts are for independent read-only investigations.",
+			);
+		}
+		if (children.includes("review")) {
+			return deny(
+				"CG006",
+				"A workflow script carries a reviewer. Review is one dispatch, once, at the end, so it is never a child of a script.",
 			);
 		}
 	}
@@ -430,7 +501,7 @@ export function evaluate(request: GuardRequest): GuardDecision {
 	if (!pin) {
 		return deny("CG004", `The routing header model ${route.model} is not pinned as provider/model:effort.`);
 	}
-	const actualClass = modelClass(pin.id);
+	const actualClass = modelClass(pin.id, pin.effort);
 	if (actualClass === null) {
 		return deny(
 			"CG004",
@@ -477,7 +548,7 @@ export function evaluate(request: GuardRequest): GuardDecision {
 		);
 	}
 
-	const lint = lintPrompt(task, kind);
+	const lint = lintPrompt(task, kind, campaign);
 	if (!lint.allow) return lint;
 
 	if (kind === "implement") {
@@ -498,7 +569,7 @@ export function evaluate(request: GuardRequest): GuardDecision {
 	return { allow: true };
 }
 
-function lintPrompt(task: string, kind: LaneKind): GuardDecision {
+function lintPrompt(task: string, kind: LaneKind, campaign: Campaign): GuardDecision {
 	const placeholder = /\b(undefined|null|NaN)\b|\[[A-Z][A-Z _-]{3,}\]|\$\{[^}]*\}/;
 	const found = placeholder.exec(task);
 	if (found) {
@@ -517,11 +588,14 @@ function lintPrompt(task: string, kind: LaneKind): GuardDecision {
 		);
 	}
 
-	const hasWorktree = paths.some((path) => path.split("/").length >= 3);
+	// A lane usually runs in its own worktree beside the campaign's, so accept a sibling, but
+	// not an arbitrary deep path: /usr/bin/env is not a statement of where the work happens.
+	const worktreeParent = campaign.worktree.slice(0, campaign.worktree.lastIndexOf("/") + 1);
+	const hasWorktree = paths.some((path) => path === campaign.worktree || (worktreeParent.length > 1 && path.startsWith(worktreeParent)));
 	if (!hasWorktree) {
 		return deny(
 			"CG009",
-			"State the full resolved worktree path verbatim in the prompt. An agent spending turns rediscovering the environment is a dispatch defect, not agent initiative.",
+			`State the full resolved worktree path verbatim, and make it the campaign worktree ${campaign.worktree} or a lane worktree beside it. An agent spending turns rediscovering the environment is a dispatch defect, and an agent pointed at an unrelated tree is worse.`,
 		);
 	}
 

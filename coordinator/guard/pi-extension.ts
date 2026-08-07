@@ -57,7 +57,7 @@ const StartParams = Type.Object({
 });
 
 const LaneParams = Type.Object({
-	action: Type.Union([Type.Literal("returned"), Type.Literal("integrated"), Type.Literal("dead")]),
+	action: Type.Union([Type.Literal("returned"), Type.Literal("integrated"), Type.Literal("done"), Type.Literal("dead")]),
 	key: Type.String({ description: "The ROUTE key of the lane." }),
 	note: Type.Optional(Type.String()),
 });
@@ -162,9 +162,12 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 	function recordLaunch(toolCallId: string, input: Record<string, unknown>, ctx: ExtensionContext): void {
 		if (!campaign) return;
 		if (typeof input.action === "string" && input.action) {
-			if (input.action === "steer" && typeof input.runId === "string") {
-				campaign.steers[input.runId] = (campaign.steers[input.runId] ?? 0) + 1;
-				persist();
+			if (input.action === "steer") {
+				const runId = typeof input.id === "string" ? input.id : typeof input.runId === "string" ? input.runId : "";
+				if (runId) {
+					campaign.steers[runId] = (campaign.steers[runId] ?? 0) + 1;
+					persist();
+				}
 			}
 			return;
 		}
@@ -181,7 +184,10 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		campaign.lanes = campaign.lanes.filter((existing) => existing.key !== route.key || existing.state === "integrated");
 		campaign.lanes.push(lane);
 		campaign.routes.push(route);
-		if (input.async !== true) laneByToolCall.set(toolCallId, route.key);
+		// Dispatches run in the background unless async is explicitly false, so only a declared
+		// foreground run finishes when its tool result arrives. Background lanes are closed by
+		// the coordinator through coordinator_lane, which is what the continuation asks for.
+		if (input.async === false) laneByToolCall.set(toolCallId, route.key);
 		recordProgress();
 		persist();
 		updateStatusLine(ctx);
@@ -193,7 +199,8 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		laneByToolCall.delete(event.toolCallId);
 		const lane = campaign.lanes.find((candidate) => candidate.key === key && candidate.state === "running");
 		if (!lane) return;
-		lane.state = "returned";
+		// Only a writer lane has anything to integrate; a read-only lane is finished when it reports.
+		lane.state = lane.kind === "implement" ? "returned" : "integrated";
 		recordProgress();
 		persist();
 		updateStatusLine(ctx);
@@ -317,7 +324,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		name: "coordinator_lane",
 		label: "Coordinator Lane",
 		description:
-			"Record what happened to a dispatched lane. \"returned\" when its work came back, \"integrated\" once you have merged it into the campaign branch and run the gates yourself, \"dead\" when the run died. Open lanes count against the writer cap until they are integrated.",
+			"Record what happened to a dispatched lane. \"returned\" when a writer's work came back, \"integrated\" once you have merged that work into the campaign branch and run the gates yourself, \"done\" to close a read-only review or investigation lane that has reported, \"dead\" when the run died. Open lanes count against the writer cap until they are integrated.",
 		promptSnippet: "Record a dispatched lane as returned, integrated, or dead",
 		parameters: LaneParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -327,7 +334,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			if (params.action === "dead") {
 				campaign.lanes = campaign.lanes.filter((candidate) => candidate !== lane);
 			} else {
-				lane.state = params.action;
+				lane.state = params.action === "done" ? "integrated" : params.action;
 			}
 			recordProgress();
 			persist();
@@ -363,6 +370,8 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 				case "resume":
 					if (campaign) campaign.status = "active";
 					armed = true;
+					noProgressContinuations = 0;
+					lastContinuationAt = 0;
 					persist();
 					show("Campaign active.");
 					break;
