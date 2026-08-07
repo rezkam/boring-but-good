@@ -6,19 +6,19 @@ This records the implementation contract for the AI Chat provider unification wo
 
 AI Chat is the single multi-provider entry point for browser-authenticated Grok, ChatGPT, Gemini, and Perplexity work. Provider-specific skills can remain as references or deeper workflows, but AI Chat owns the common command shape, browser lifecycle, local conversation records, cache policy, metadata shape, output artifacts, and cross-provider verification.
 
-Provider adapters own provider-specific behavior only. They may build provider request payloads, parse provider streams, resolve provider model ids, and return provider state. Providers that require explicit cookie APIs may read only from the managed browser. Perplexity is stricter: credentials stay inside same-origin browser fetch and its adapter must not read cookie values. Adapters must not start or stop Chrome, write browser ownership state, choose global cache behavior, or emit private tokens to normal output.
+Provider adapters own provider-specific behavior only. Credentials remain inside managed-page same-origin requests; adapters do not read browser cookies. They build provider request payloads, parse provider streams, resolve provider model ids, and return provider state. They must not start or stop Chrome, write browser ownership state, choose global cache behavior, or emit private tokens to normal output.
 
 ## Browser ownership lifecycle
 
 AI Chat owns one Browser Tools managed Chrome session for normal AI Chat use.
 
-- Startup: when a request needs browser access and no usable AI Chat owned browser exists, AI Chat starts Browser Tools with owner id `ai-chat`, Browser Tools task profile `ai-chat`, and fallback Chrome profile `Default` when no task profile is configured. The current CLI exposes `--port` for the preferred debug port. Browser Tools auto-allocates another port when the default is busy and the port was not explicit.
-- Reuse: later AI Chat requests load the private AI Chat browser state, then connect only when Browser Tools safety checks, the owner token, and copied profile presence pass. The same owned browser is reused across providers.
-- Refusal: AI Chat refuses unmanaged Chrome, missing Browser Tools managed state, a browser owned by another agent, missing owner tokens, wrong owner tokens, and state where the owner id is not `ai-chat`. Recovery is to use the owning token, stop or clean that browser, choose another port, or remove stale AI Chat state.
+- Startup: when a request needs browser access and no usable AI Chat owned browser exists, AI Chat starts Browser Tools in headless mode with owner id `ai-chat`, Browser Tools task profile `ai-chat`, and fallback Chrome profile `Default` when no task profile is configured. The current CLI exposes `--port` for the preferred debug port. Browser Tools auto-allocates another port when the default is busy and the port was not explicit.
+- Reuse: later AI Chat requests load the private AI Chat browser state, then connect only when Browser Tools safety checks, the owner token, copied profile presence, and headless mode pass. The same owned headless browser is reused across providers.
+- Refusal: AI Chat refuses unmanaged Chrome, windowed Chrome, missing Browser Tools managed state, a browser owned by another agent, missing owner tokens, wrong owner tokens, and state where the owner id is not `ai-chat`. Recovery is to use the owning token, stop or clean that browser, choose another port, or remove stale AI Chat state.
 - Stale state: stale pid, missing process, invalid state file, or unavailable debug port cases go through Browser Tools lifecycle checks. AI Chat can discard its own stale private pointer and start a new owned browser when no live process is present. It must not kill or replace a live browser unless Browser Tools proves it is owned by AI Chat.
 - Cleanup: successful requests leave the AI Chat owned browser open and only disconnect from CDP. Cleanup is explicit. It may stop only a Browser Tools browser that passes AI Chat owner-token checks. Use Browser Tools `stop.mjs --clean` with the matching owner token when a fresh profile sync is needed.
 
-The owner token is private runtime state. It may be stored in `~/.cache/pi-browser-tools/ai-chat-browser.json` or `AI_CHAT_BROWSER_STATE_FILE` with local-user permissions so later CLI invocations can reconnect. It must not be printed in normal output, committed, cached with responses, or copied into provider metadata.
+The owner token is private runtime state. It may be stored in the private AI Chat browser state file or `AI_CHAT_BROWSER_STATE_FILE` with local-user permissions so later CLI invocations can reconnect. It must not be printed in normal output, committed, cached with responses, or copied into provider metadata.
 
 ## Profile sync and auth recovery
 
@@ -27,6 +27,10 @@ Browser Tools runs Chrome from a copied profile, not the live Chrome profile. AI
 Provider auth failures should point to profile-sync recovery, not to unsafe attachment to main Chrome. Providers should fail before prompt submission when a session is clearly missing or logged out.
 
 ## Conversation and provider state
+
+### ChatGPT provider sessions
+
+ChatGPT has no local conversation record, cache entry, pending-turn file, or checkpoint. Its identity is a provider conversation ID or a trusted clean `https://chatgpt.com/c/<id>` URL. Continuation reads baseline detail before visible composer work, verifies the loaded URL, then accepts completion only when the current branch changed and strict provider quorum is met. `--final` and no-prompt reattach are read-only; temporary chats reject detached reads and continuation. Conversation listing is a bounded authenticated GET performed inside managed Chrome. Live verification may be read-only only; provider UI drift remains a residual risk.
 
 AI Chat owns the provider-neutral session record lifecycle. A saved local conversation id is scoped by provider and stores enough private continuation state to send only the next user turn when the provider supports backend continuation.
 
@@ -65,26 +69,23 @@ Browser Tools owns:
 
 ## Perplexity parity scope
 
-Perplexity inside AI Chat uses one browser-authenticated network path derived from Browser Tools captures. It has no UI or DOM transport.
+Perplexity inside AI Chat should reach feature parity with the standalone Perplexity skill for the browser-authenticated WebUI API path.
 
 In scope:
 
-- headless-preferred Browser Tools startup from the `ai-chat` task profile or fallback Chrome profile `Default`
-- same-origin authenticated fetch where browser credentials never leave managed Chrome
+- session-cookie auth from the AI Chat owned Browser Tools browser, without printing or storing the Perplexity session token in public artifacts
 - auth recovery guidance aligned with Browser Tools copied-profile behavior
-- captured model ids, direct tool aliases, task defaults, Thinking variants, account-tier metadata, and live account acceptance verification
-- normal ask and deep research through `/rest/sse/perplexity_ask`, with schematized block-patch streaming and no DOM path
-- persistent-by-default history, explicit Incognito, and save-to-library compatibility behavior, including conflict checks and SSE privacy metadata
-- source focus, search focus, time range, citation mode, language, and timezone
+- model ids, direct tool aliases, task defaults, thinking variants, account-tier metadata, and live account acceptance verification
+- normal ask and deep research through `/rest/sse/perplexity_ask`, not DOM scraping
+- source focus, search focus, time range, citation mode, language, timezone, provider-history default, and explicit incognito behavior
 - safe file attachments with path validation and metadata that avoids leaking file contents
 - Spaces selection by explicit user-provided Space identifier
 - streaming progress that still produces the same final structured output contract
-- safe backend UUID and canonical provider thread URL in new-response output, plus multi-turn continuation using the UUID and a private read-write token stored only in private local records
+- multi-turn continuation using backend UUID plus private read-write token stored only in private local records
 
 Out of scope for this unification pass:
 
-- making AI Chat shell out to another Perplexity CLI for normal requests
-- retaining or reintroducing Perplexity rendered HTML parsing, element interaction, or DOM fallback
+- making AI Chat shell out to the standalone Perplexity CLI for normal requests
 - committing live model acceptance output or account-specific provider evidence
 - supporting Max-tier-only behavior that is not present in the current skill contract
 - discovering private Perplexity Space ids without the user providing them

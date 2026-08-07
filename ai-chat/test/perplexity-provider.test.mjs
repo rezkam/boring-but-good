@@ -11,6 +11,7 @@ import {
   DEFAULT_PERPLEXITY_DEEP_RESEARCH_TIMEOUT_SECONDS,
   extractPerplexityState,
   formatCitations,
+  normalizePerplexityBackendId,
   normalizePerplexityFileAttachments,
   normalizePerplexitySpaceUuid,
   openPerplexityNetworkPage,
@@ -22,6 +23,7 @@ import {
   resolvePerplexityModel,
   resolvePerplexityRequestModel,
   resolvePerplexityTimeoutSeconds,
+  redactPerplexitySecrets,
   streamPerplexity,
   uploadPerplexityAttachments,
   validatePerplexitySession,
@@ -61,12 +63,27 @@ test('Perplexity exposes canonical provider thread URLs from backend UUIDs', () 
     providerId: backendUuid,
     providerState: { backend_uuid: backendUuid },
   });
-  assert.deepEqual(resolvePerplexityConversationAttachment({ target: url }), {
+  assert.deepEqual(resolvePerplexityConversationAttachment({ target: `https://WWW.perplexity.ai/search/${backendUuid.toUpperCase()}` }), {
     type: 'url',
     url,
     providerId: backendUuid,
     providerState: { backend_uuid: backendUuid },
   });
+});
+
+test('Perplexity rejects untrusted, missing, and malformed conversation targets', () => {
+  for (const target of [
+    'https://evil.example/search/123e4567-e89b-12d3-a456-426614174000',
+    'https://www.perplexity.ai/search/',
+    'https://www.perplexity.ai/search/not-an-id',
+    'https://www.perplexity.ai/?backend_uuid=123e4567-e89b-12d3-a456-426614174000',
+    'not-an-id',
+  ]) {
+    assert.throws(() => resolvePerplexityConversationAttachment({ target }), /Untrusted conversation URL|must contain a backend id|Invalid conversation backend id/);
+  }
+  assert.equal(normalizePerplexityBackendId('123E4567-E89B-12D3-A456-426614174000'), '123e4567-e89b-12d3-a456-426614174000');
+  const opaque = 'AbcdEfghIjklMnop_Qrst-123';
+  assert.equal(resolvePerplexityConversationAttachment({ target: opaque }).url, `https://www.perplexity.ai/search/${opaque}`);
 });
 
 test('lists Perplexity models with capability and account-tier metadata', async () => {
@@ -80,7 +97,8 @@ test('lists Perplexity models with capability and account-tier metadata', async 
   assert.equal(thinking.thinking_level, 'default');
   assert.equal(thinking.provider_family, 'openai');
   assert.equal(thinking.min_tier, 'pro');
-  assert.equal(thinking.source, 'browser-tools-network-capture');
+  assert.equal(Object.hasOwn(thinking, 'source'), false);
+  assert.equal(Object.hasOwn(thinking, 'contract_source'), false);
   assert.equal(thinking.account_specific, false);
   assert.deepEqual(thinking.account_tier, { required: 'pro', verified: null });
   assert.equal(perplexityProvider.historyPolicy.default, 'persistent');
@@ -205,7 +223,7 @@ test('Perplexity browser fetch uses page credentials and strips unsafe cookie he
         type: 'response',
         status: 200,
         statusText: 'OK',
-        headers: [['content-type', 'text/event-stream']],
+        headers: [['authorization', 'Bearer response-secret'], ['x-request-id', 'private-request-id']],
       });
       await calls[args.callbackName]({ type: 'chunk', chunk: 'data: {"answer":"ok"}\n\n' });
       await calls[args.callbackName]({ type: 'done' });
@@ -217,8 +235,16 @@ test('Perplexity browser fetch uses page credentials and strips unsafe cookie he
     method: 'POST',
     headers: {
       Cookie: '__Secure-next-auth.session-token=secret',
+      Authorization: 'Bearer request-secret',
+      'Proxy-Authorization': 'Basic secret',
+      'X-Api-Key': 'api-secret',
+      'X-Access-Key': 'access-secret',
+      'X-Amz-Signature': 'signature-secret',
+      'X-Goog-Credential': 'credential-secret',
+      'X-Custom-Token': 'token-secret',
       Origin: 'https://www.perplexity.ai',
       Referer: 'https://www.perplexity.ai/',
+      Accept: 'text/event-stream',
       'Content-Type': 'application/json',
     },
     body: '{"query":"hello"}',
@@ -229,7 +255,10 @@ test('Perplexity browser fetch uses page credentials and strips unsafe cookie he
   assert.equal(evaluated.options.headers.Cookie, undefined);
   assert.equal(evaluated.options.headers.Origin, undefined);
   assert.equal(evaluated.options.headers.Referer, undefined);
-  assert.equal(evaluated.options.headers['Content-Type'], 'application/json');
+  assert.deepEqual(evaluated.options.headers, { Accept: 'text/event-stream', 'Content-Type': 'application/json' });
+  assert.deepEqual([...response.headers.entries()], []);
+  assert.equal(JSON.stringify(evaluated).includes('request-secret'), false);
+  assert.equal(JSON.stringify(evaluated).includes('response-secret'), false);
   assert.equal(evaluated.options.body, '{"query":"hello"}');
 });
 
@@ -275,6 +304,24 @@ test('Perplexity stream timeout aborts the in-browser fetch', async () => {
     (error) => error.name === 'AbortError' && /Browser fetch aborted/.test(error.message),
   );
   assert.equal(browserAbortCalls, 1);
+});
+
+test('Perplexity FAILED SSE errors redact broad credential families', async () => {
+  const cases = [
+    ['x_amz_signature', 'amz-secret'], ['x_goog_credential', 'goog-secret'],
+    ['authorization', 'authorization-secret'], ['read_write_token', 'read-write-secret'],
+  ];
+  for (const [key, secret] of cases) {
+    const payload = buildPerplexityPayload({ query: 'hello', model: resolvePerplexityModel('perplexity/best') });
+    const sse = `data: ${JSON.stringify({ status: 'FAILED', text: JSON.stringify({ [key]: secret }) })}\n`;
+    const fetchImpl = async () => ({ ok: true, body: { getReader: () => ({ read: async () => ({ value: new TextEncoder().encode(sse), done: false }) }) } });
+    await assert.rejects(() => streamPerplexity({ payload, timeoutMs: 1000, citationMode: 'clean', fetchImpl }), error => {
+      assert.equal(error.message.includes(secret), false, key);
+      assert.match(error.message, /\[redacted\]/, key);
+      return true;
+    });
+  }
+  assert.equal(redactPerplexitySecrets('Authorization: Bearer bearer-secret').includes('bearer-secret'), false);
 });
 
 test('Perplexity auth failures include recovery guidance without token values', async () => {
@@ -325,7 +372,7 @@ test('Perplexity auth failures include recovery guidance without token values', 
   );
 });
 
-test('Perplexity live model verification uses private requests and reports accepted and rejected shape safely', async () => {
+test('Perplexity model verification stub reports accepted and rejected shape safely', async () => {
   const models = [resolvePerplexityModel('perplexity/best'), resolvePerplexityModel('openai/gpt-5.6-terra')];
   const payloads = [];
   const result = await verifyPerplexityModels({
@@ -360,7 +407,7 @@ test('Perplexity provider rejects unknown explicit model requests', async () => 
   );
 });
 
-test('Perplexity provider resolves defaults, task aliases, and captured Thinking variants', () => {
+test('Perplexity provider resolves defaults, task aliases, and supported Thinking variants', () => {
   const defaultModel = resolvePerplexityRequestModel({ request: { modelName: 'default' }, selectedModel: 'default' });
   const reasoningModel = resolvePerplexityRequestModel({ request: { modelName: 'default' }, selectedModel: 'reasoning' });
   const taskModel = resolvePerplexityRequestModel({ request: { modelName: 'default', modelTask: 'coding' }, selectedModel: perplexityProvider.taskModels.coding });
@@ -373,7 +420,7 @@ test('Perplexity provider resolves defaults, task aliases, and captured Thinking
   assert.equal(thinkingModel.identifier, 'gpt56_terra_thinking');
   assert.throws(
     () => resolvePerplexityRequestModel({ request: { thinking: true }, selectedModel: 'perplexity/sonar-2' }),
-    /has no captured Thinking variant/,
+    /has no supported Thinking variant/,
   );
 });
 
@@ -432,6 +479,15 @@ test('builds explicit Incognito payloads and defaults ordinary requests to persi
   assert.throws(
     () => buildPerplexityPayload({ query: 'conflict', model, options: { incognito: true, saveToLibrary: true } }),
     /either --incognito or --save-to-library/,
+  );
+  assert.throws(
+    () => buildPerplexityPayload({
+      query: 'continuation conflict',
+      model,
+      options: { incognito: true },
+      conversation: { record: { provider_state: { backend_uuid: '123e4567-e89b-12d3-a456-426614174000', read_write_token: 'rw-private' } } },
+    }),
+    /--incognito cannot continue or attach an existing conversation/,
   );
   assert.throws(
     () => buildPerplexityPayload({
@@ -539,45 +595,25 @@ test('validates Perplexity file attachments before network use', () => {
   }
 });
 
-test('uploads Perplexity file attachments with safe metadata', async () => {
+test('uploads Perplexity file attachments through the managed page without returning signed upload data', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pplx-upload-'));
-  const calls = [];
+  const callbacks = new Map(); const removed = []; let nodeFetchCalls = 0;
   try {
     const file = join(dir, 'report.txt');
     writeFileSync(file, 'hello file', 'utf-8');
-    const fetchImpl = async (url, options = {}) => {
-      calls.push({ url: String(url), options });
-      assert.ok(options.signal instanceof AbortSignal);
-      assert.equal(options.signal.aborted, false);
-      if (String(url).includes('/rest/uploads/batch_create_upload_urls')) {
-        const body = JSON.parse(options.body);
-        const fileUuid = Object.keys(body.files)[0];
-        assert.equal(body.files[fileUuid].filename, 'report.txt');
-        assert.equal(body.files[fileUuid].content_type, 'text/plain');
-        assert.equal(body.files[fileUuid].file_size, 10);
-        assert.equal(body.files[fileUuid].force_image, false);
-        return {
-          ok: true,
-          json: async () => ({
-            results: {
-              [fileUuid]: {
-                s3_bucket_url: 'https://s3.example.test/upload',
-                s3_object_url: 'https://uploads.example.test/report.txt',
-                fields: { key: 'report.txt', policy: 'policy' },
-              },
-            },
-          }),
-        };
-      }
-      assert.equal(String(url), 'https://s3.example.test/upload');
-      assert.equal(options.method, 'POST');
-      assert.equal(options.headers, undefined);
-      return { ok: true, status: 204, text: async () => '' };
+    const page = {
+      async exposeFunction(name, fn) { callbacks.set(name, fn); },
+      async removeExposedFunction(name) { removed.push(name); callbacks.delete(name); },
+      async evaluate(_fn, args) {
+        const bytes = await callbacks.get(args.callbackName)(0, 256 * 1024);
+        assert.equal(Buffer.from(bytes, 'base64').toString('utf-8'), 'hello file');
+        // This is all the managed page is permitted to send back to Node.
+        return { objectUrl: 'https://uploads.example.test/report.txt' };
+      },
     };
-
-    const uploaded = await uploadPerplexityAttachments({ files: [file], fetchImpl });
-    assert.equal(calls.length, 2);
-    assert.equal(calls[0].options.signal, calls[1].options.signal);
+    const uploaded = await uploadPerplexityAttachments({ files: [file], page, fetchImpl: () => { nodeFetchCalls += 1; } });
+    assert.equal(nodeFetchCalls, 0);
+    assert.equal(removed.length, 1);
     assert.equal(uploaded[0].url, 'https://uploads.example.test/report.txt');
     assert.deepEqual(uploaded[0].metadata, {
       filename: 'report.txt',
@@ -590,85 +626,40 @@ test('uploads Perplexity file attachments with safe metadata', async () => {
     });
     assert.equal(JSON.stringify(uploaded[0].metadata).includes(file), false);
     assert.equal(JSON.stringify(uploaded[0].metadata).includes('hello file'), false);
-    assert.equal(JSON.stringify(calls[0]).includes('Cookie'), false);
+    assert.equal(JSON.stringify(uploaded).includes('s3_bucket_url'), false);
+    assert.equal(JSON.stringify(uploaded).includes('policy'), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('Perplexity file upload timeout aborts stalled initialization and S3 requests', async () => {
+test('Perplexity file upload timeouts abort stalled in-page initialization and S3 fetches', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pplx-upload-timeout-'));
   try {
-    const file = join(dir, 'report.txt');
-    writeFileSync(file, 'hello file', 'utf-8');
-
-    let initSignal;
-    const initFetch = async (url, options = {}) => {
-      assert.ok(String(url).includes('/rest/uploads/batch_create_upload_urls'));
-      initSignal = options.signal;
-      if (!initSignal) throw new Error('missing upload initialization signal');
-      return new Promise((resolve, reject) => {
-        const guard = setTimeout(() => reject(new Error('test timed out waiting for upload initialization abort')), 100);
-        initSignal.addEventListener('abort', () => {
-          clearTimeout(guard);
-          const error = new Error('aborted');
-          error.name = 'AbortError';
-          reject(error);
-        }, { once: true });
-      });
-    };
-
-    await assert.rejects(
-      () => uploadPerplexityAttachments({ files: [file], fetchImpl: initFetch, timeoutMs: 5 }),
-      (error) => {
-        assert.match(error.message, /File upload timed out for report\.txt during upload initialization after 5ms/);
-        return true;
-      },
-    );
-    assert.equal(initSignal.aborted, true);
-
-    let s3Signal;
-    const s3Fetch = async (url, options = {}) => {
-      assert.ok(options.signal instanceof AbortSignal);
-      if (String(url).includes('/rest/uploads/batch_create_upload_urls')) {
-        const fileUuid = Object.keys(JSON.parse(options.body).files)[0];
-        return {
-          ok: true,
-          json: async () => ({
-            results: {
-              [fileUuid]: {
-                s3_bucket_url: 'https://s3.example.test/upload',
-                s3_object_url: 'https://uploads.example.test/report.txt',
-                fields: { key: 'report.txt', policy: 'policy' },
-              },
-            },
-          }),
-        };
-      }
-      assert.equal(String(url), 'https://s3.example.test/upload');
-      s3Signal = options.signal;
-      return new Promise((resolve, reject) => {
-        const guard = setTimeout(() => reject(new Error('test timed out waiting for S3 upload abort')), 100);
-        s3Signal.addEventListener('abort', () => {
-          clearTimeout(guard);
-          const error = new Error('aborted');
-          error.name = 'AbortError';
-          reject(error);
-        }, { once: true });
-      });
-    };
-
-    await assert.rejects(
-      () => uploadPerplexityAttachments({ files: [file], fetchImpl: s3Fetch, timeoutMs: 5 }),
-      (error) => {
-        assert.match(error.message, /File upload timed out for report\.txt during S3 upload after 5ms/);
-        return true;
-      },
-    );
-    assert.equal(s3Signal.aborted, true);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+    const file = join(dir, 'report.txt'); writeFileSync(file, 'hello file', 'utf-8');
+    for (const stalledPhase of ['upload initialization', 'S3 upload']) {
+      let removed = 0; let aborted = false;
+      const page = {
+        async exposeFunction(name, fn) { globalThis[name] = fn; },
+        async removeExposedFunction(name) { removed += 1; delete globalThis[name]; },
+        async evaluate(fn, args) {
+          const originalFetch = globalThis.fetch;
+          globalThis.fetch = async (url, options = {}) => {
+            const isInit = String(url).includes('/rest/uploads/batch_create_upload_urls');
+            if ((stalledPhase === 'upload initialization' && isInit) || (stalledPhase === 'S3 upload' && !isInit)) {
+              return new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => { aborted = true; const error = new Error('aborted'); error.name = 'AbortError'; reject(error); }, { once: true }));
+            }
+            const uuid = Object.keys(JSON.parse(options.body).files)[0];
+            return { ok: true, json: async () => ({ results: { [uuid]: { s3_bucket_url: 'https://s3.example.test/upload', s3_object_url: 'https://uploads.example.test/report.txt', fields: { policy: 'signed-policy' } } } }) };
+          };
+          try { return await fn(args); } finally { globalThis.fetch = originalFetch; }
+        },
+      };
+      await assert.rejects(() => uploadPerplexityAttachments({ files: [file], page, timeoutMs: 5 }), new RegExp(`File upload timed out for report\\.txt during ${stalledPhase} after 5ms`));
+      assert.equal(aborted, true, `${stalledPhase} fetch was aborted in the page`);
+      assert.equal(removed, 1);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('validates Perplexity Space identifiers before network use', () => {

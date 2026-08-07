@@ -1,26 +1,37 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
   buildAiChatRequest,
+  aiChatResultExitCode,
   buildCacheInput,
+  buildOutput,
   buildMetadata,
+  captureEvidenceScreenshot,
+  createChatGptStreamEmitter,
   conversationRecordPath,
+  defaultBrowserStateFs,
+  defaultIo,
   parseAiChatArgs,
   resolveConversationReference,
   resolveInitialModel,
+  runPromptAttempt,
   runAiChat,
+  sanitizeChatGptStreamValue,
+  sanitizeProviderStateForOutput,
+  saveSidecarArtifacts,
   saveConversationReference,
   validateConversationUrlForProvider,
   writeAiChatBrowserState,
 } from '../scripts/ai-chat/module.mjs';
-import { chatgptProvider } from '../scripts/ai-chat/providers/chatgpt.mjs';
+import { chatgptProvider, createChatGptNetworkTracker } from '../scripts/ai-chat/providers/chatgpt.mjs';
 import { geminiProvider } from '../scripts/ai-chat/providers/gemini.mjs';
 import { grokProvider } from '../scripts/ai-chat/providers/grok.mjs';
 import { buildPerplexityPayload, perplexityProvider, resolvePerplexityModel } from '../scripts/ai-chat/providers/perplexity.mjs';
-import { getCacheConfig as getAiChatCacheConfig } from '../scripts/browser-query-cache.mjs';
+import { getCacheConfig as getAiChatCacheConfig, readCachedResponse, recordInvocation, writeCachedResponse } from '../scripts/browser-query-cache.mjs';
 
 function withEnv(env, fn) {
   const previous = {};
@@ -41,8 +52,10 @@ function withEnv(env, fn) {
 }
 
 function writeJson(path, value) {
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, 'utf-8');
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  chmodSync(dirname(path), 0o700);
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf-8', mode: 0o600 });
+  chmodSync(path, 0o600);
 }
 
 function noCache() {
@@ -52,6 +65,56 @@ function noCache() {
 function fileMode(path) {
   return statSync(path).mode & 0o777;
 }
+
+
+test('private cache artifacts are secured before overwrite and before reads', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-cache-permissions-'));
+  try {
+    await withEnv({ BROWSER_QUERY_CACHE_DIR: dir, BROWSER_QUERY_RUN_DIR: join(dir, 'run'), BROWSER_QUERY_STEP_ID: 'step' }, () => {
+      const input = { prompt: 'private prompt' };
+      const first = writeCachedResponse('provider', input, { output: 'response', rawText: 'raw', metadata: {} });
+      recordInvocation('provider', first.key, { input });
+      const invocationDir = join(dir, 'run', 'browser-tool-calls', 'step');
+      const invocation = join(invocationDir, readdirSync(invocationDir)[0]);
+      for (const path of [dir, join(dir, 'entries'), join(dir, 'responses'), join(dir, 'responses', 'provider'), join(dir, 'raw'), join(dir, 'raw', 'provider'), join(dir, 'run'), join(dir, 'run', 'browser-tool-calls'), invocationDir]) assert.equal(fileMode(path), 0o700, path);
+      for (const path of [first.responsePath, first.rawPath, first.entryPath, invocation]) assert.equal(fileMode(path), 0o600, path);
+      const originalResponse = readFileSync(first.responsePath, 'utf-8');
+      chmodSync(first.responsePath, 0o644);
+      assert.throws(() => writeCachedResponse('provider', input, { output: 'response two', rawText: 'raw two', metadata: {} }), /Refusing unsafe private file/);
+      assert.equal(fileMode(first.responsePath), 0o644);
+      assert.equal(readFileSync(first.responsePath, 'utf-8'), originalResponse);
+      assert.throws(() => readCachedResponse('provider', input), /Refusing unsafe private file/);
+      chmodSync(first.responsePath, 0o600);
+      const second = writeCachedResponse('provider', input, { output: 'response two', rawText: 'raw two', metadata: {} });
+      recordInvocation('provider', second.key, { input: 'again' });
+      const latestInvocation = join(invocationDir, readdirSync(invocationDir).sort().at(-1));
+      for (const path of [second.responsePath, second.rawPath, second.entryPath, latestInvocation]) assert.equal(fileMode(path), 0o600, path);
+      const target = join(dir, 'target.txt'); writeFileSync(target, 'unchanged');
+      rmSync(second.rawPath); symlinkSync(target, second.rawPath);
+      assert.throws(() => writeCachedResponse('provider', input, { output: 'nope', rawText: 'nope', metadata: {} }), /Refusing unsafe private file/);
+      assert.equal(readFileSync(target, 'utf-8'), 'unchanged');
+    });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('screenshot evidence presecures output and rejects a permissive requested parent', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ai-chat-evidence-permissions-'));
+  try {
+    chmodSync(root, 0o700);
+    const output = join(root, 'new', 'evidence.png');
+    let writes = 0;
+    const page = { url: () => 'https://provider.example/chat', screenshot: async ({ path }) => { writes += 1; assert.equal(fileMode(path), 0o600); writeFileSync(path, 'image'); } };
+    await captureEvidenceScreenshot({ browser: { pages: async () => [page] }, provider: { name: 'provider' }, result: { finalUrl: page.url() }, request: { captureEvidence: true, evidencePath: output } });
+    assert.equal(writes, 1); assert.equal(fileMode(dirname(output)), 0o700); assert.equal(fileMode(output), 0o600);
+    chmodSync(output, 0o644);
+    await captureEvidenceScreenshot({ browser: { pages: async () => [page] }, provider: { name: 'provider' }, result: { finalUrl: page.url() }, request: { captureEvidence: true, evidencePath: output } });
+    assert.equal(fileMode(output), 0o600);
+    const unsafe = join(root, 'unsafe'); mkdirSync(unsafe); chmodSync(unsafe, 0o755);
+    let screenshotCalled = false;
+    await assert.rejects(() => captureEvidenceScreenshot({ browser: { pages: async () => [{ url: () => 'https://provider.example/chat', screenshot: async () => { screenshotCalled = true; } }] }, provider: { name: 'provider' }, result: { finalUrl: 'https://provider.example/chat' }, request: { captureEvidence: true, evidencePath: join(unsafe, 'no.png') } }), /existing directory must be a real directory with mode 0700/);
+    assert.equal(screenshotCalled, false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test('parseAiChatArgs supports provider options and conversation flags', () => {
   const request = buildAiChatRequest(parseAiChatArgs([
@@ -117,6 +180,18 @@ test('parseAiChatArgs supports provider options and conversation flags', () => {
   assert.equal(request.jsonOutput, true);
 });
 
+test('parseAiChatArgs leaves history mode provider-specific and supports explicit incognito mode', () => {
+  const defaults = parseAiChatArgs(['--provider', 'perplexity', '--prompt', 'hello']);
+  const incognito = parseAiChatArgs(['--provider', 'perplexity', '--prompt', 'hello', '--incognito']);
+
+  assert.equal(defaults.providerOptions.saveToLibrary, undefined);
+  assert.equal(incognito.providerOptions.saveToLibrary, false);
+  assert.throws(
+    () => parseAiChatArgs(['--provider', 'perplexity', '--prompt', 'hello', '--save-to-library', '--incognito']),
+    /Cannot combine --save-to-library with --incognito/,
+  );
+});
+
 test('parseAiChatArgs rejects missing values for value options without breaking boolean flags', () => {
   assert.throws(() => parseAiChatArgs(['--provider', '--prompt', 'hello']), /Missing value after --provider/);
   assert.throws(() => parseAiChatArgs(['--prompt-file', '--json']), /Missing value after --prompt-file/);
@@ -168,29 +243,21 @@ test('parseAiChatArgs keeps repeated Perplexity source focus values in order', (
   assert.deepEqual(request.providerOptions.sourceFocus, ['academic', 'finance']);
 });
 
-test('parseAiChatArgs exposes explicit Perplexity incognito mode', () => {
-  const request = buildAiChatRequest(parseAiChatArgs([
-    '--provider', 'perplexity',
-    '--prompt', 'private question',
-    '--incognito',
-  ]));
-
-  assert.equal(request.providerOptions.incognito, true);
-  assert.equal(request.providerOptions.saveToLibrary, false);
-});
-
 test('AI Chat browser state writes enforce private file permissions and fail closed', () => {
   const dir = mkdtempSync(join(tmpdir(), 'ai-chat-browser-state-permissions-'));
   const stateFile = join(dir, 'browser.json');
   const ownerToken = 'owner-token-must-not-leak';
 
   try {
-    writeFileSync(stateFile, '{}\n', 'utf-8');
-    chmodSync(stateFile, 0o666);
+    writeFileSync(stateFile, '{}\n', { encoding: 'utf-8', mode: 0o600 });
+    chmodSync(stateFile, 0o600);
 
     writeAiChatBrowserState({ version: 1, ownerToken, port: 62100 }, stateFile);
 
     assert.equal(fileMode(stateFile), 0o600);
+    chmodSync(stateFile, 0o666);
+    assert.throws(() => writeAiChatBrowserState({ version: 1, ownerToken, port: 62100 }, stateFile), /real file with mode 0600/);
+    assert.equal(fileMode(stateFile), 0o666);
     assert.equal(JSON.parse(readFileSync(stateFile, 'utf-8')).ownerToken, ownerToken);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -198,9 +265,21 @@ test('AI Chat browser state writes enforce private file permissions and fail clo
 
   const writeCalls = [];
   const failingFs = {
-    mkdir: () => {},
-    writeFile: (...args) => writeCalls.push(args),
-    chmod: () => { throw new Error(`cannot chmod ${ownerToken}`); },
+    exists: path => path === '/tmp',
+    mkdir: () => assert.fail('existing private parent must not be recreated'),
+    stat: () => ({ mode: 0o700, isFile: () => true }),
+    lstat: path => {
+      if (path === '/tmp') return { mode: 0o700, isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false };
+      const error = new Error('missing');
+      error.code = 'ENOENT';
+      throw error;
+    },
+    writeFile: () => assert.fail('path-based private write must not be used'),
+    writeFileNoFollow: (...args) => {
+      writeCalls.push(args);
+      throw new Error(`cannot securely write ${ownerToken}`);
+    },
+    chmod: () => assert.fail('path-based chmod must not be used'),
   };
 
   assert.throws(
@@ -214,6 +293,90 @@ test('AI Chat browser state writes enforce private file permissions and fail clo
     },
   );
   assert.equal(writeCalls.length, 1);
+});
+
+test('AI Chat browser state rejects permissive existing parents and creates new private parents', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ai-chat-browser-state-parent-'));
+  const permissiveParent = join(root, 'shared');
+  const privateParent = join(root, 'private', 'nested');
+  const ownerToken = 'owner-token-must-not-leak';
+
+  try {
+    mkdirSync(permissiveParent, { recursive: true, mode: 0o755 });
+    chmodSync(permissiveParent, 0o755);
+    const rejectedPath = join(permissiveParent, 'browser.json');
+    assert.throws(
+      () => writeAiChatBrowserState({ version: 1, ownerToken, port: 62100 }, rejectedPath),
+      /existing directory must be a real directory with mode 0700/,
+    );
+    assert.equal(fileMode(permissiveParent), 0o755);
+    assert.equal(existsSync(rejectedPath), false);
+
+    const statePath = join(privateParent, 'browser.json');
+    writeAiChatBrowserState({ version: 1, ownerToken, port: 62100 }, statePath);
+    assert.equal(fileMode(privateParent), 0o700);
+    assert.equal(fileMode(statePath), 0o600);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('private JSON writers reject dangling browser-state and conversation-record symlinks before writing targets', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ai-chat-private-json-dangling-symlink-'));
+  chmodSync(root, 0o700);
+
+  try {
+    const browserStatePath = join(root, 'browser-state.json');
+    const browserStateTarget = join(root, 'missing-browser-state-target.json');
+    symlinkSync(browserStateTarget, browserStatePath);
+    assert.throws(
+      () => writeAiChatBrowserState({ version: 1, ownerToken: 'private-owner-token', port: 62100 }, browserStatePath),
+      /symlink/,
+    );
+    assert.equal(existsSync(browserStateTarget), false);
+    assert.equal(lstatSync(browserStatePath).isSymbolicLink(), true);
+
+    const racedStatePath = join(root, 'raced-browser-state.json');
+    const racedStateTarget = join(root, 'missing-race-target.json');
+    writeFileSync(racedStatePath, '{}\n', { encoding: 'utf-8', mode: 0o600 });
+    chmodSync(racedStatePath, 0o600);
+    const racingFs = {
+      ...defaultBrowserStateFs,
+      writeFileNoFollow(path, text, options) {
+        rmSync(path);
+        symlinkSync(racedStateTarget, path);
+        return defaultBrowserStateFs.writeFileNoFollow(path, text, options);
+      },
+    };
+    assert.throws(
+      () => writeAiChatBrowserState({ version: 1, ownerToken: 'private-owner-token', port: 62100 }, racedStatePath, racingFs),
+      /atomic no-follow write failed/,
+    );
+    assert.equal(existsSync(racedStateTarget), false);
+    assert.equal(lstatSync(racedStatePath).isSymbolicLink(), true);
+
+    const request = buildAiChatRequest({
+      providerName: 'perplexity',
+      modelName: 'perplexity/best',
+      prompt: 'private prompt',
+      saveConversation: 'research',
+      conversationStoreDir: root,
+    });
+    const provider = { name: 'perplexity' };
+    const result = { text: 'private answer', done: true, modelUsed: 'perplexity/best', providerState: { backend_uuid: 'thread' } };
+    const metadata = buildMetadata({ request, provider, result, fallbackFrom: null, fallbackTrail: ['perplexity/best'] });
+    const recordPath = conversationRecordPath({ providerName: provider.name, id: 'research', storeDir: root });
+    const recordTarget = join(root, 'missing-conversation-target.json');
+    mkdirSync(dirname(recordPath), { recursive: true, mode: 0o700 });
+    chmodSync(dirname(recordPath), 0o700);
+    symlinkSync(recordTarget, recordPath);
+
+    assert.throws(() => saveConversationReference(request, provider, result, metadata), /symlink/);
+    assert.equal(existsSync(recordTarget), false);
+    assert.equal(lstatSync(recordPath).isSymbolicLink(), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('buildCacheInput includes provider options and conversation target', () => {
@@ -254,26 +417,6 @@ test('direct provider conversation URLs allow only trusted selected provider hos
   for (const { provider, url } of cases) {
     assert.equal(validateConversationUrlForProvider(provider, url, { optionName: '--conversation' }), url);
   }
-});
-
-test('direct Perplexity thread URLs retain backend state for a follow-up request', () => {
-  const backendUuid = '1fcf54fa-dd85-4b77-a916-dc12f8a8efa5';
-  const url = `https://www.perplexity.ai/search/${backendUuid}`;
-  const conversation = resolveConversationReference(buildAiChatRequest({
-    providerName: 'perplexity',
-    prompt: 'continue this thread',
-    conversationTarget: url,
-  }), undefined, perplexityProvider);
-  const payload = buildPerplexityPayload({
-    query: 'continue this thread',
-    model: resolvePerplexityModel('perplexity/best'),
-    conversation,
-  });
-
-  assert.equal(conversation.url, url);
-  assert.deepEqual(conversation.providerState, { backend_uuid: backendUuid });
-  assert.equal(payload.params.last_backend_uuid, backendUuid);
-  assert.equal(payload.params.query_source, 'followup');
 });
 
 test('runAiChat rejects untrusted ChatGPT conversation URLs before browser navigation', async () => {
@@ -375,77 +518,44 @@ test('buildMetadata includes safe attachment metadata', () => {
   assert.equal(JSON.stringify(metadata).includes('https://uploads.example.test'), false);
 });
 
-test('runAiChat cache hits update JSON cache metadata and save conversation references', async () => {
+test('Perplexity rejects --incognito continuation and attachment before local writes or browser work', async () => {
+  const request = buildAiChatRequest({ providerName: 'perplexity', prompt: 'follow up', conversationTarget: 'saved', providerOptions: { incognito: true } });
+  await assert.rejects(() => runAiChat(request, { provider: perplexityProvider }), /--incognito cannot continue or attach an existing conversation/);
+  const attach = buildAiChatRequest({ providerName: 'perplexity', attachConversation: '123e4567-e89b-12d3-a456-426614174000', saveConversation: 'saved', providerOptions: { incognito: true } });
+  await assert.rejects(() => runAiChat(attach, { provider: perplexityProvider }), /--incognito cannot continue or attach an existing conversation/);
+});
+
+test('save-conversation bypasses public cache metadata and preserves private continuation state', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ai-chat-cache-conversation-'));
   try {
-    const request = buildAiChatRequest({
-      providerName: 'direct',
-      modelName: 'api-model',
-      prompt: 'hello',
-      jsonOutput: true,
-      saveConversation: 'research',
-      conversationStoreDir: dir,
-    });
-    const cachedMetadata = {
-      provider: 'direct',
-      model: 'api-model',
-      requested_model: 'api-model',
-      model_task: null,
-      fallback_from: null,
-      fallback_attempts: ['api-model'],
-      prompt_chars: 5,
-      response_chars: 13,
-      complete: true,
-      rate_limited: false,
-      final_url: 'https://example.test/thread',
-      conversation_id: null,
-      conversation_url: 'https://example.test/thread',
-      provider_state: { thread: 't1' },
-      search_results: [],
-      captured_at: '2026-01-01T00:00:00.000Z',
-      continue_chat: false,
-      prompt: 'hello',
-      cache_hit: false,
-    };
+    const recordPath = conversationRecordPath({ providerName: 'perplexity', id: 'research', storeDir: dir });
+    mkdirSync(dirname(recordPath), { recursive: true, mode: 0o700 });
+    writeFileSync(recordPath, JSON.stringify({
+      version: 1, kind: 'ai-chat-conversation', id: 'research', provider: 'perplexity',
+      provider_state: { backend_uuid: '123e4567-e89b-12d3-a456-426614174000', read_write_token: 'rw-private' }, messages: [],
+    }), { mode: 0o600 });
+    const request = buildAiChatRequest({ providerName: 'perplexity', prompt: 'hello', jsonOutput: true, conversationTarget: 'research', saveConversation: 'research', conversationStoreDir: dir });
     const stdout = [];
-    let cacheInput = null;
-
+    let cacheReads = 0;
     const result = await runAiChat(request, {
-      provider: { name: 'direct', run: () => assert.fail('cached response should not call provider') },
-      cache: {
-        read(tool, input) {
-          assert.equal(tool, 'ai-chat');
-          cacheInput = input;
-          return {
-            key: 'cache-key',
-            entry: {
-              created_at: '2026-01-01T00:00:01.000Z',
-              metadata: cachedMetadata,
-            },
-            output: JSON.stringify({ ...cachedMetadata, response: 'cached answer' }, null, 2),
-            rawText: 'cached answer',
-          };
+      provider: {
+        name: 'perplexity', runRequiresBrowser: false,
+        run: ({ conversation }) => {
+          assert.equal(conversation.record.provider_state.read_write_token, 'rw-private');
+          return { text: 'live answer', rawText: 'live answer', done: true, modelUsed: 'perplexity/best', finalUrl: 'https://www.perplexity.ai/search/123e4567-e89b-12d3-a456-426614174000', providerState: { backend_uuid: '123e4567-e89b-12d3-a456-426614174000', has_read_write_token: true }, privateProviderState: { backend_uuid: '123e4567-e89b-12d3-a456-426614174000', read_write_token: 'rw-private' } };
         },
-        write: () => assert.fail('cache hits should not write a new cache entry'),
       },
+      cache: { read: () => { cacheReads += 1; return assert.fail('save-conversation must not read cache'); }, write: () => assert.fail('save-conversation must not write cache') },
       io: { stdout: text => stdout.push(text), writeFile: () => assert.fail('no file expected') },
     });
-
-    assert.equal(cacheInput.save_conversation, 'research');
+    assert.equal(cacheReads, 0);
     const emitted = JSON.parse(stdout[0]);
-    assert.equal(emitted.cache_hit, true);
-    assert.equal(emitted.cache_key, 'cache-key');
-    assert.equal(emitted.response, 'cached answer');
-    assert.equal(emitted.conversation_id, 'research');
-    assert.match(emitted.conversation_record_path, /research\.json$/);
-
-    const recordPath = conversationRecordPath({ providerName: 'direct', id: 'research', storeDir: dir });
-    assert.equal(existsSync(recordPath), true);
+    assert.equal(emitted.cache_hit, false);
+    assert.equal(Object.hasOwn(emitted, 'conversation_record_path'), false);
+    assert.equal(JSON.stringify(emitted).includes(recordPath), false);
     const record = JSON.parse(readFileSync(recordPath, 'utf-8'));
-    assert.equal(record.provider_state.thread, 't1');
-    assert.deepEqual(record.messages.map(message => message.content), ['hello', 'cached answer']);
-    assert.equal(result.source, 'cache');
-    assert.equal(result.metadata.cache_hit, true);
+    assert.equal(record.provider_state.read_write_token, 'rw-private');
+    assert.equal(result.source, 'live');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -509,7 +619,6 @@ test('runAiChat starts a headless Google-enabled browser from the explicitly sel
     await runAiChat(request, {
       provider: {
         name: 'browser-provider',
-        preferredBrowserHeadless: true,
         runRequiresBrowser: () => true,
         async run({ browser: runBrowser, request: runRequest }) {
           assert.equal(runBrowser, browser);
@@ -1057,7 +1166,7 @@ test('runAiChat reuses the AI Chat owned browser across providers', async () => 
     const commonDeps = {
       async startChrome() {
         startCount += 1;
-        return { status: 'started', port: 4666, ownerToken: 'reuse-token', profileName: 'Default', requestedProfileName: 'Default' };
+        return { status: 'started', port: 4666, ownerToken: 'reuse-token', profileName: 'Default', requestedProfileName: 'Default', headless: true };
       },
       managedBrowserSafetyForPort(port) {
         assert.equal(port, 4666);
@@ -1065,7 +1174,7 @@ test('runAiChat reuses the AI Chat owned browser across providers', async () => 
       },
       readManagedStateForPort(port) {
         assert.equal(port, 4666);
-        return { managedBy: 'browser-tools', ownerId: 'ai-chat', profileName: 'Default' };
+        return { managedBy: 'browser-tools', ownerId: 'ai-chat', profileName: 'Default', headless: true };
       },
       managedBrowserOwnershipSafety({ ownerToken }) {
         assert.equal(ownerToken, 'reuse-token');
@@ -1129,9 +1238,10 @@ test('runAiChat discards stale private browser state and starts a new owned brow
       },
       managedBrowserSafetyForPort: port => ({ ok: false, reason: port === 4777 ? 'process-not-found' : 'unexpected-port' }),
       browserWSEndpoint: async () => null,
-      async startChrome() {
+      async startChrome(args) {
         startCount += 1;
-        return { status: 'started', port: 4888, ownerToken: 'new-token' };
+        assert.equal(args.headless, undefined);
+        return { status: 'started', port: 4888, ownerToken: 'new-token', headless: false };
       },
       connectBrowser: async () => browser,
       cache: noCache(),
@@ -1216,7 +1326,7 @@ test('runAiChat refuses saved owned state when the debug port is unavailable', a
     await assert.rejects(() => runAiChat(request, {
       provider: { name: 'browser-provider', runRequiresBrowser: () => true, run: () => assert.fail('provider should not run') },
       managedBrowserSafetyForPort: () => ({ ok: true }),
-      readManagedStateForPort: () => ({ managedBy: 'browser-tools', ownerId: 'ai-chat', profileName: 'Default' }),
+      readManagedStateForPort: () => ({ managedBy: 'browser-tools', ownerId: 'ai-chat', profileName: 'Default', headless: true }),
       managedBrowserOwnershipSafety: () => ({ ok: true, ownerId: 'ai-chat' }),
       browserWSEndpoint: async () => null,
       startChrome: () => assert.fail('unavailable debug port should not start over a live owned process'),
@@ -1228,19 +1338,44 @@ test('runAiChat refuses saved owned state when the debug port is unavailable', a
   }
 });
 
+test('runAiChat reuses a windowed AI Chat browser for UI providers', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-browser-windowed-'));
+  try {
+    const stateFile = join(dir, 'browser.json');
+    writeJson(stateFile, { version: 1, ownerId: 'ai-chat', ownerToken: 'owned-token', port: 4995, profileName: 'Default', headless: false });
+    const request = buildAiChatRequest({ providerName: 'browser-provider', prompt: 'hello', browserStateFile: stateFile });
+    const browser = { disconnect() {} };
+
+    const result = await runAiChat(request, {
+      provider: { name: 'browser-provider', runRequiresBrowser: () => true, run: () => ({ text: 'answer', rawText: 'answer', done: true, modelUsed: 'default' }) },
+      managedBrowserSafetyForPort: () => ({ ok: true }),
+      readManagedStateForPort: () => ({ managedBy: 'browser-tools', ownerId: 'ai-chat', profileName: 'Default', headless: false }),
+      managedBrowserOwnershipSafety: () => ({ ok: true, ownerId: 'ai-chat' }),
+      browserWSEndpoint: async () => 'ws://localhost:4995',
+      startChrome: () => assert.fail('windowed browser should be reused'),
+      connectBrowser: async () => browser,
+      cache: noCache(),
+      io: { stdout: () => {}, writeFile: () => assert.fail('no file expected') },
+    });
+    assert.equal(result.result.text, 'answer');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('runAiChat refuses old AI Chat browsers that were started with a fresh profile', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ai-chat-browser-profile-mismatch-'));
   try {
     const stateFile = join(dir, 'browser.json');
-    writeJson(stateFile, { version: 1, ownerId: 'ai-chat', ownerToken: 'owned-token', port: 4995, profileName: null });
+    writeJson(stateFile, { version: 1, ownerId: 'ai-chat', ownerToken: 'owned-token', port: 4996, profileName: null, headless: true });
     const request = buildAiChatRequest({ providerName: 'browser-provider', prompt: 'hello', browserStateFile: stateFile });
 
     await assert.rejects(() => runAiChat(request, {
       provider: { name: 'browser-provider', runRequiresBrowser: () => true, run: () => assert.fail('provider should not run') },
       managedBrowserSafetyForPort: () => ({ ok: true }),
-      readManagedStateForPort: () => ({ managedBy: 'browser-tools', ownerId: 'ai-chat', profileName: null }),
+      readManagedStateForPort: () => ({ managedBy: 'browser-tools', ownerId: 'ai-chat', profileName: null, headless: true }),
       managedBrowserOwnershipSafety: () => ({ ok: true, ownerId: 'ai-chat' }),
-      browserWSEndpoint: async () => 'ws://localhost:4995',
+      browserWSEndpoint: async () => 'ws://localhost:4996',
       startChrome: () => assert.fail('fresh-profile browser should not be reused or replaced silently'),
       connectBrowser: () => assert.fail('fresh-profile browser should not connect'),
       cache: noCache(),
@@ -1326,42 +1461,6 @@ test('runAiChat can skip Browser Tools connection for direct providers', async (
   assert.equal(JSON.parse(stdout[0]).response, 'no browser answer');
 });
 
-test('explicit Incognito requests bypass the local AI Chat response cache', async () => {
-  const stdout = [];
-  const request = buildAiChatRequest({
-    providerName: 'perplexity',
-    modelName: 'perplexity/best',
-    prompt: 'private question',
-    jsonOutput: true,
-    providerOptions: { incognito: true },
-  });
-
-  const result = await runAiChat(request, {
-    provider: {
-      name: 'perplexity',
-      runRequiresBrowser: () => false,
-      async run() {
-        return {
-          text: 'private answer',
-          rawText: 'private answer',
-          done: true,
-          modelUsed: 'perplexity/best',
-          providerState: { is_incognito: true, incognito_explicit: true },
-        };
-      },
-    },
-    cache: {
-      read: () => assert.fail('explicit Incognito must not read the response cache'),
-      write: () => assert.fail('explicit Incognito must not write the response cache'),
-    },
-    io: { stdout: text => stdout.push(text), writeFile: () => assert.fail('no file expected') },
-  });
-
-  assert.equal(result.source, 'live');
-  assert.equal(result.metadata.cache_hit, false);
-  assert.equal(JSON.parse(stdout[0]).provider_state.incognito_explicit, true);
-});
-
 test('ai-chat query cache rejects invalid TTL values', async () => {
   await withEnv({
     BROWSER_QUERY_CACHE_DIR: '/tmp/ai-chat-cache-test',
@@ -1372,60 +1471,85 @@ test('ai-chat query cache rejects invalid TTL values', async () => {
 });
 
 test('runAiChat keeps partial Perplexity SSE responses incomplete and uncached', async () => {
+  const encoder = new TextEncoder();
   const partialEvent = `data: ${JSON.stringify({
     backend_uuid: 'uuid-partial',
     text: JSON.stringify({ answer: 'partial answer', chunks: ['partial answer'] }),
   })}\n`;
+  let readCount = 0;
+  const previousFetch = globalThis.fetch;
   const stdout = [];
   const cacheWrites = [];
-  const exposed = {};
-  const page = {
-    url: () => 'https://www.perplexity.ai/api/auth/session',
-    async exposeFunction(name, callback) { exposed[name] = callback; },
-    async removeExposedFunction(name) { delete exposed[name]; },
-    async evaluate(_fn, args) {
-      const callback = exposed[args.callbackName];
-      if (args.url.endsWith('/api/auth/session')) {
-        await callback({ type: 'response', status: 200, headers: [['content-type', 'application/json']] });
-        await callback({ type: 'chunk', chunk: '{"user":{"id":"present"}}' });
-        await callback({ type: 'done' });
-        return;
-      }
-      assert.equal(args.url, 'https://www.perplexity.ai/rest/sse/perplexity_ask');
-      await callback({ type: 'response', status: 200, headers: [['content-type', 'text/event-stream']] });
-      await callback({ type: 'chunk', chunk: partialEvent });
-      await callback({ type: 'done' });
-    },
+
+  globalThis.fetch = async (url) => {
+    const href = String(url);
+    if (href.includes('/api/auth/session')) return { ok: true, json: async () => ({ user: { id: 'fixture-user' } }) };
+    if (href.includes('/search/new')) return { ok: true, text: async () => '' };
+    if (href.includes('/rest/sse/perplexity_ask')) {
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: async () => {
+              if (readCount > 0) return { done: true };
+              readCount += 1;
+              return { value: encoder.encode(partialEvent), done: false };
+            },
+          }),
+        },
+      };
+    }
+    throw new Error(`unexpected fetch URL: ${href}`);
   };
-  const request = buildAiChatRequest({
-    providerName: 'perplexity',
-    modelName: 'perplexity/best',
-    prompt: 'hello',
-    jsonOutput: true,
-  });
 
-  const result = await runAiChat(request, {
-    browser: { pages: async () => [page] },
-    provider: perplexityProvider,
-    cache: {
-      read: () => null,
-      write(...args) {
-        cacheWrites.push(args);
-        return { key: 'cache-key' };
+  try {
+    const request = buildAiChatRequest({
+      providerName: 'perplexity',
+      modelName: 'perplexity/best',
+      prompt: 'hello',
+      jsonOutput: true,
+    });
+    const provider = {
+      ...perplexityProvider,
+      runRequiresBrowser: () => false,
+      run: async () => ({
+        text: 'partial answer',
+        rawText: 'partial answer',
+        done: false,
+        modelUsed: 'perplexity/best',
+        providerState: {
+          transport: 'browser-network-sse',
+          network_only: true,
+          dom_processing: false,
+          stream_state: { status: 'partial', partial: true, timeout: true },
+        },
+      }),
+    };
+
+    const result = await runAiChat(request, {
+      provider,
+      cache: {
+        read: () => null,
+        write(...args) {
+          cacheWrites.push(args);
+          return { key: 'cache-key' };
+        },
       },
-    },
-    io: { stdout: text => stdout.push(text), writeFile: () => assert.fail('no file expected') },
-  });
+      io: { stdout: text => stdout.push(text), writeFile: () => assert.fail('no file expected') },
+    });
 
-  const emitted = JSON.parse(stdout[0]);
-  assert.equal(emitted.response, 'partial answer');
-  assert.equal(emitted.complete, false);
-  assert.equal(result.metadata.complete, false);
-  assert.equal(result.result.done, false);
-  assert.equal(emitted.provider_state.stream_state.status, 'partial');
-  assert.equal(emitted.provider_state.stream_state.partial, true);
-  assert.equal(emitted.provider_state.stream_state.timeout, true);
-  assert.equal(cacheWrites.length, 0);
+    const emitted = JSON.parse(stdout[0]);
+    assert.equal(emitted.response, 'partial answer');
+    assert.equal(emitted.complete, false);
+    assert.equal(result.metadata.complete, false);
+    assert.equal(result.result.done, false);
+    assert.equal(emitted.provider_state.stream_state.status, 'partial');
+    assert.equal(emitted.provider_state.stream_state.partial, true);
+    assert.equal(emitted.provider_state.stream_state.timeout, true);
+    assert.equal(cacheWrites.length, 0);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });
 
 test('runAiChat redacts Perplexity continuation tokens from public artifacts', async () => {
@@ -1484,19 +1608,15 @@ test('runAiChat redacts Perplexity continuation tokens from public artifacts', a
 
     const outputText = readFileSync(outFile, 'utf-8');
     const sidecarText = readFileSync(`${outFile}.meta.json`, 'utf-8');
-    assert.equal(fileMode(outFile), 0o600);
-    assert.equal(fileMode(`${outFile}.meta.json`), 0o600);
-    assert.equal(fileMode(`${outFile}.raw.txt`), 0o600);
     const publicTexts = [
       outputText,
       sidecarText,
-      cachedWrite.output,
       result.output,
-      JSON.stringify(cachedWrite.metadata),
       JSON.stringify(result.metadata),
       JSON.stringify(result.result),
     ];
     for (const text of publicTexts) assert.equal(text.includes(rawToken), false);
+    assert.equal(cachedWrite, null, '--save-conversation must bypass public cache writes');
 
     const emitted = JSON.parse(outputText);
     const sidecar = JSON.parse(sidecarText);
@@ -1512,8 +1632,8 @@ test('runAiChat redacts Perplexity continuation tokens from public artifacts', a
     assert.deepEqual(emitted.sources, [{ title: 'Source', url: 'https://example.test/source', snippet: 'Snippet' }]);
     assert.deepEqual(emitted.search_results, emitted.sources);
     assert.deepEqual(sidecar.provider_state, emitted.provider_state);
-    assert.deepEqual(cachedWrite.metadata.provider_state, emitted.provider_state);
-    assert.equal(cachedWrite.metadata.provider_state.read_write_token, undefined);
+    assert.equal(Object.hasOwn(emitted, 'conversation_record_path'), false);
+    assert.equal(Object.hasOwn(sidecar, 'conversation_record_path'), false);
 
     const recordPath = conversationRecordPath({ providerName: 'perplexity', id: 'research', storeDir: dir });
     assert.equal(fileMode(recordPath), 0o600);
@@ -1774,7 +1894,8 @@ test('runAiChat rechecks a saved provider request without a new prompt', async (
   const stdout = [];
 
   try {
-    writeJson(conversationRecordPath({ providerName: 'chatgpt', id: 'timed-out', storeDir: dir }), {
+    const recordPath = conversationRecordPath({ providerName: 'chatgpt', id: 'timed-out', storeDir: dir });
+    writeJson(recordPath, {
       version: 1,
       kind: 'ai-chat-conversation',
       id: 'timed-out',
@@ -1787,6 +1908,7 @@ test('runAiChat rechecks a saved provider request without a new prompt', async (
       },
       messages: [],
     });
+    chmodSync(dirname(recordPath), 0o700);
 
     const request = buildAiChatRequest({
       providerName: 'chatgpt',
@@ -1864,23 +1986,31 @@ test('conversation record writes enforce private file permissions and fail close
 
   try {
     const path = conversationRecordPath({ providerName: provider.name, id: 'research', storeDir: dir });
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, '{}\n', 'utf-8');
-    chmodSync(path, 0o666);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    chmodSync(dirname(path), 0o700);
+    writeFileSync(path, '{}\n', { encoding: 'utf-8', mode: 0o600 });
+    chmodSync(path, 0o600);
 
     const saved = saveConversationReference(request, provider, result, metadata);
 
+    assert.equal(fileMode(dirname(saved.path)), 0o700);
     assert.equal(fileMode(saved.path), 0o600);
+    chmodSync(path, 0o666);
+    assert.throws(() => saveConversationReference(request, provider, result, metadata), /real file with mode 0600/);
+    assert.equal(fileMode(path), 0o666);
     assert.equal(readFileSync(saved.path, 'utf-8').includes(rawToken), true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 
+  const recordDir = dirname(conversationRecordPath({ providerName: provider.name, id: 'research', storeDir: dir }));
   const failingFs = {
-    mkdir: () => {},
+    exists: path => path === recordDir,
+    mkdir: () => assert.fail('existing private parent must not be recreated'),
     writeFile: () => {},
     chmod: () => {},
-    stat: () => ({ mode: 0o644 }),
+    stat: path => ({ mode: path === recordDir ? 0o700 : 0o644, isFile: () => path !== recordDir }),
+    lstat: path => ({ mode: path === recordDir ? 0o700 : 0o644, isDirectory: () => path === recordDir, isFile: () => path !== recordDir, isSymbolicLink: () => false }),
   };
 
   assert.throws(
@@ -1934,4 +2064,520 @@ test('conversation references preserve provider state', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('submit-only and final flags validate the detached ChatGPT contract before browser startup', async () => {
+  const base = { name: 'chatgpt', capabilities: { localConversationState: false, cachePolicy: 'none', supportsSubmitOnly: true, supportsFinal: true }, resolveConversationAttachment: chatgptProvider.resolveConversationAttachment };
+  const submit = buildAiChatRequest(parseAiChatArgs(['--provider', 'chatgpt', '--prompt', 'x', '--submit-only']));
+  assert.equal(submit.prompt, 'x'); assert.equal(submit.submitOnly, true);
+  const finalWithoutPrompt = buildAiChatRequest(parseAiChatArgs(['--provider', 'chatgpt', '--conversation', 'provider_123', '--final']));
+  assert.equal(finalWithoutPrompt.prompt, ''); assert.equal(finalWithoutPrompt.final, true);
+  for (const [args, message] of [
+    [['--provider', 'chatgpt', '--prompt', 'x', '--submit-only', '--stream'], /--submit-only conflicts with --final and --stream/],
+    [['--provider', 'chatgpt', '--prompt', 'x', '--conversation', 'provider_123', '--final'], /--final cannot be used with --prompt/],
+  ]) {
+    const request = buildAiChatRequest(parseAiChatArgs(args));
+    await assert.rejects(() => runAiChat(request, { provider: base, cache: noCache() }), message);
+  }
+  await assert.rejects(() => runAiChat(buildAiChatRequest({ providerName: 'chatgpt', submitOnly: true, prompt: '' }), { provider: base, cache: noCache() }), /--submit-only requires --prompt/);
+  const request = buildAiChatRequest(parseAiChatArgs(['--provider', 'chatgpt', '--conversation', 'provider_123', '--final', '--json', '--timeout', '1']));
+  let reads = 0;
+  const result = await runAiChat(request, {
+    provider: { ...base, async recheckConversation({ conversation }) { assert.equal(conversation.providerId, 'provider_123'); return { text: '', done: false, status: 'in_progress', providerConversationId: conversation.providerId, finalUrl: conversation.url, providerState: { conversation_id: conversation.providerId } }; } },
+    fs: { exists: () => { reads += 1; throw new Error('local state read'); } },
+    cache: { read: () => { reads += 1; }, write: () => { reads += 1; } },
+    browser: {}, io: { stdout() {} },
+  });
+  assert.equal(reads, 0);
+  assert.equal(result.metadata.status, 'in_progress');
+  assert.equal(aiChatResultExitCode(request, result), 1);
+  assert.equal(aiChatResultExitCode(buildAiChatRequest({ providerName: 'chatgpt', prompt: 'x', submitOnly: true }), { metadata: { complete: false } }), 0);
+});
+
+test('submit-only preserves every prompt source while final stays stdin-free', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-submit-prompt-'));
+  const promptFile = join(dir, 'prompt.txt'); const stdinFile = join(dir, 'stdin.txt');
+  try {
+    writeFileSync(promptFile, 'file prompt\n', { mode: 0o600 }); writeFileSync(stdinFile, 'stdin prompt\n', { mode: 0o600 });
+    assert.equal(buildAiChatRequest(parseAiChatArgs(['--prompt', 'inline prompt', '--submit-only'])).prompt, 'inline prompt');
+    assert.equal(buildAiChatRequest({ promptFile, submitOnly: true }).prompt, 'file prompt');
+    assert.equal(buildAiChatRequest({ prompt: 'programmatic prompt', submitOnly: true }).prompt, 'programmatic prompt');
+    assert.equal(buildAiChatRequest({ submitOnly: true, stdinPath: stdinFile }).prompt, 'stdin prompt');
+    assert.equal(buildAiChatRequest({ final: true, conversationTarget: 'provider_123', stdinPath: join(dir, 'missing') }).prompt, '');
+    assert.equal(buildAiChatRequest({ final: true, conversationTarget: 'provider_123', prompt: 'blocked' }).prompt, 'blocked');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('submit-only emits a provider id in plain and JSON output', () => {
+  const metadata = { provider: 'chatgpt', provider_conversation_id: 'provider_123', status: 'submitted', complete: false, conversation_url: 'https://chatgpt.com/c/provider_123' };
+  assert.equal(buildOutput({ request: buildAiChatRequest({ submitOnly: true, prompt: 'x' }), metadata, text: '' }).text, 'provider_123');
+  const json = JSON.parse(buildOutput({ request: buildAiChatRequest({ submitOnly: true, prompt: 'x', jsonOutput: true }), metadata, text: '' }).text);
+  assert.equal(json.provider_conversation_id, 'provider_123'); assert.equal(json.status, 'submitted'); assert.equal(json.complete, false); assert.equal(json.response, 'provider_123');
+});
+
+test('provider-only ChatGPT state and unsupported mode flags reject before browser, fs, or cache use', async () => {
+  const forbidden = { get() { throw new Error('unexpected local or browser access'); } };
+  const chatgpt = { name: 'chatgpt', capabilities: { localConversationState: false, cachePolicy: 'none', supportsSubmitOnly: true, supportsFinal: true }, resolveConversationAttachment: chatgptProvider.resolveConversationAttachment };
+  for (const request of [
+    buildAiChatRequest({ providerName: 'chatgpt', prompt: 'x', saveConversation: 'local' }),
+    buildAiChatRequest({ providerName: 'chatgpt', prompt: 'x', attachConversation: 'provider_123' }),
+  ]) await assert.rejects(() => runAiChat(request, { provider: chatgpt, fs: forbidden, cache: forbidden }), /--save-conversation and --attach-conversation are not supported; use the provider conversation id directly/);
+  const unsupported = { name: 'other', capabilities: {} };
+  await assert.rejects(() => runAiChat(buildAiChatRequest({ providerName: 'other', prompt: 'x', submitOnly: true }), { provider: unsupported, fs: forbidden, cache: forbidden }), /--submit-only is not supported/);
+  await assert.rejects(() => runAiChat(buildAiChatRequest({ providerName: 'other', final: true, conversationTarget: 'id' }), { provider: unsupported, fs: forbidden, cache: forbidden }), /--final is not supported/);
+});
+
+test('ChatGPT capability modes never touch local cache or conversation storage', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-chatgpt-stateless-'));
+  const calls = { cache: 0, fs: 0, run: 0 };
+  const provider = {
+    name: 'chatgpt', capabilities: { localConversationState: false, cachePolicy: 'none', supportsSubmitOnly: true, supportsFinal: true },
+    resolveConversationAttachment: chatgptProvider.resolveConversationAttachment,
+    async run({ request }) { calls.run += 1; return { text: request.submitOnly ? '' : 'answer', done: !request.submitOnly, status: request.submitOnly ? 'submitted' : 'complete', providerConversationId: 'provider_123', finalUrl: 'https://chatgpt.com/c/provider_123', providerState: { conversation_id: 'provider_123' } }; },
+    async recheckConversation({ conversation }) { return { text: '', done: false, status: 'in_progress', providerConversationId: conversation.providerId, finalUrl: conversation.url, providerState: { conversation_id: conversation.providerId } }; },
+  };
+  const fs = new Proxy({}, { get() { calls.fs += 1; throw new Error('local conversation fs accessed'); } });
+  const cache = { read() { calls.cache += 1; }, write() { calls.cache += 1; } };
+  try {
+    const results = [];
+    for (const request of [
+      buildAiChatRequest({ providerName: 'chatgpt', prompt: 'sync', conversationStoreDir: dir }),
+      buildAiChatRequest({ providerName: 'chatgpt', prompt: 'detach', submitOnly: true, conversationStoreDir: dir }),
+      buildAiChatRequest({ providerName: 'chatgpt', final: true, conversationTarget: 'provider_123', conversationStoreDir: dir }),
+    ]) results.push(await runAiChat(request, { provider, cache, fs, browser: {}, io: { stdout() {} } }));
+    assert.equal(calls.cache, 0); assert.equal(calls.fs, 0); assert.equal(calls.run, 2); assert.deepEqual(readdirSync(dir), []);
+    assert.deepEqual({ provider: results[1].metadata.provider, provider_conversation_id: results[1].metadata.provider_conversation_id, status: results[1].metadata.status, complete: results[1].metadata.complete, conversation_url: results[1].metadata.conversation_url }, { provider: 'chatgpt', provider_conversation_id: 'provider_123', status: 'submitted', complete: false, conversation_url: 'https://chatgpt.com/c/provider_123' });
+    assert.equal(results[2].metadata.status, 'in_progress'); assert.equal(results[2].metadata.complete, false); assert.equal(aiChatResultExitCode(buildAiChatRequest({ providerName: 'chatgpt', final: true }), results[2]), 1);
+    const completeFinal = await runAiChat(buildAiChatRequest({ providerName: 'chatgpt', final: true, conversationTarget: 'provider_123', conversationStoreDir: dir }), { provider: { ...provider, async recheckConversation({ conversation }) { return { text: 'answer', done: true, status: 'complete', providerConversationId: conversation.providerId, finalUrl: conversation.url, providerState: { conversation_id: conversation.providerId, structured_turn: { messages: [] } } }; } }, cache, fs, browser: {}, io: { stdout() {} } });
+    assert.equal(completeFinal.metadata.provider_conversation_id, 'provider_123'); assert.equal(completeFinal.metadata.status, 'complete'); assert.equal(completeFinal.metadata.complete, true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('submit-only disposes its attempt observer without closing the browser or page', async () => {
+  let disposed = 0; let closed = 0;
+  const page = { url: () => 'https://chatgpt.com/', evaluate: async () => 0, close: () => { closed += 1; } };
+  const browser = { pages: async () => [], close: () => { closed += 1; } };
+  const provider = {
+    name: 'chatgpt', findPage: async () => page, createAttemptContext: async () => ({ networkTracker: {} }),
+    clearInput: async () => {}, typePrompt: async () => {}, submit: async () => {},
+    waitForResponse: async () => ({ text: '', done: false, status: 'submitted', providerConversationId: 'provider_123', finalUrl: 'https://chatgpt.com/c/provider_123', providerState: { conversation_id: 'provider_123' } }),
+    disposeAttemptContext: async () => { disposed += 1; },
+  };
+  const result = await runPromptAttempt({ browser, provider, request: buildAiChatRequest({ providerName: 'chatgpt', prompt: 'detach', submitOnly: true }), selectedModel: 'default' });
+  assert.equal(result.providerConversationId, 'provider_123'); assert.equal(disposed, 1); assert.equal(closed, 0);
+});
+
+test('ChatGPT stream owns stdout as NDJSON and emits one terminal complete event', async () => {
+  const lines = [];
+  const provider = {
+    name: 'chatgpt', defaultModel: 'extra-high', transport: 'test',
+    capabilities: { localConversationState: false, cachePolicy: 'none', streamFormat: 'ndjson' },
+    runRequiresBrowser: () => false,
+    async run({ onStreamEvent }) {
+      onStreamEvent({ event: 'session', provider_conversation_id: 'provider_123', url: 'https://chatgpt.com/c/provider_123', source: 'live-cdp' });
+      onStreamEvent({ event: 'delta', provider_conversation_id: 'provider_123', text: 'answer', source: 'live-cdp' });
+      return { text: 'answer', rawText: 'answer', done: true, status: 'complete', modelUsed: 'gpt-test', providerConversationId: 'provider_123', finalUrl: 'https://chatgpt.com/c/provider_123', providerState: { conversation_id: 'provider_123', thinking_effort: 'max', structured_turn: { messages: [{ id: 'a', author: { role: 'assistant' }, content: { parts: ['answer'] } }] } } };
+    },
+  };
+  const result = await runAiChat(buildAiChatRequest({ providerName: 'chatgpt', prompt: 'hello', stream: true }), {
+    provider, cache: noCache(), io: { stdout: text => lines.push(text), writeFile: () => assert.fail('no file expected') },
+  });
+  const events = lines.map(line => JSON.parse(line));
+  assert.deepEqual(events.map(event => event.sequence), [1, 2, 3]);
+  assert.deepEqual(events.map(event => event.event), ['session', 'delta', 'complete']);
+  assert.equal(events.at(-1).complete, true);
+  assert.equal(events.at(-1).source, 'live-cdp');
+  assert.equal(events.at(-1).model, 'gpt-test'); assert.equal(events.at(-1).effort, 'max');
+  assert.equal(events.at(-1).url, 'https://chatgpt.com/c/provider_123');
+  assert.equal(events.at(-1).turn.messages[0].content.parts[0], 'answer');
+  assert.equal(aiChatResultExitCode({ stream: true }, result), 0);
+});
+
+test('ChatGPT NDJSON timeout emits one live terminal without normal output and exits nonzero', async () => {
+  const lines = [];
+  const provider = { name: 'chatgpt', defaultModel: 'extra-high', capabilities: { localConversationState: false, cachePolicy: 'none', streamFormat: 'ndjson' }, runRequiresBrowser: () => false, async run({ onStreamEvent }) { onStreamEvent({ event: 'session', provider_conversation_id: 'provider_123', source: 'live-cdp' }); return { text: 'partial', done: false, status: 'in_progress', providerConversationId: 'provider_123', finalUrl: 'https://chatgpt.com/c/provider_123', providerState: { conversation_id: 'provider_123', partial: true, structured_turn: { messages: [{ id: 'a', metadata: { resume_token: 'TEST_TIMEOUT_SECRET' }, content: { parts: ['partial'] } }] } } }; } };
+  const request = buildAiChatRequest({ providerName: 'chatgpt', prompt: 'hello', stream: true });
+  const result = await runAiChat(request, { provider, cache: noCache(), io: { stdout: line => lines.push(line) } });
+  const events = lines.map(line => JSON.parse(line));
+  assert.deepEqual(events.map(event => event.sequence), [1, 2]);
+  assert.equal(events.at(-1).event, 'timeout'); assert.equal(events.at(-1).source, 'live-cdp');
+  assert.equal(events.at(-1).response, 'partial'); assert.equal(JSON.stringify(events).includes('TEST_TIMEOUT_SECRET'), false);
+  assert.equal(aiChatResultExitCode(request, result), 1);
+});
+
+test('provider-ID reattachment streams snapshot messages then one provider-snapshot terminal without local state', async () => {
+  const lines = []; const calls = { cache: 0, fs: 0 };
+  const provider = {
+    name: 'chatgpt', defaultModel: 'extra-high', capabilities: { localConversationState: false, cachePolicy: 'none', streamFormat: 'ndjson' },
+    resolveConversationAttachment: chatgptProvider.resolveConversationAttachment, runRequiresBrowser: () => false,
+    async recheckConversation({ conversation, onStreamEvent }) { onStreamEvent({ event: 'session', provider_conversation_id: conversation.providerId, source: 'provider-snapshot' }); onStreamEvent({ event: 'message', provider_conversation_id: conversation.providerId, source: 'provider-snapshot', message: { id: 'a', content: { parts: ['answer'] } }, change: 'new' }); return { text: 'answer', done: true, status: 'complete', providerConversationId: conversation.providerId, finalUrl: conversation.url, modelUsed: 'gpt-test', providerState: { conversation_id: conversation.providerId, structured_turn: { messages: [{ id: 'a', content: { parts: ['answer'] } }] } } }; },
+  };
+  const request = buildAiChatRequest({ providerName: 'chatgpt', conversationTarget: 'provider_123', stream: true });
+  const result = await runAiChat(request, { provider, cache: { read() { calls.cache += 1; }, write() { calls.cache += 1; } }, fs: new Proxy({}, { get() { calls.fs += 1; throw new Error('local state accessed'); } }), io: { stdout: line => lines.push(line) } });
+  const events = lines.map(line => JSON.parse(line));
+  assert.deepEqual(events.map(event => event.event), ['session', 'message', 'complete']);
+  assert.equal(events.every(event => event.provider_conversation_id === 'provider_123'), true);
+  assert.equal(events.at(-1).source, 'provider-snapshot'); assert.equal(aiChatResultExitCode(request, result), 0);
+  assert.deepEqual(calls, { cache: 0, fs: 0 });
+});
+
+test('ChatGPT public output redacts credential query families in state, responses, and NDJSON', () => {
+  const queryFamilies = [
+    'auth', 'authorization', 'session', 'session_id', 'cookie', 'AWSAccessKeyId', 'GoogleAccessId',
+    'X-Goog-Credential', 'X-Goog-Signature',
+  ];
+  for (const parameter of queryFamilies) {
+    const secret = `LEAK_${parameter}`;
+    const url = `https://example.test/citation?${parameter}=${secret}&safe=ok#fragment`;
+    const state = { structured_turn: { citations: [{ url }] } };
+    const safeState = sanitizeProviderStateForOutput('chatgpt', state);
+    assert.doesNotMatch(JSON.stringify(safeState), new RegExp(secret), `${parameter} provider state`);
+    assert.match(JSON.stringify(safeState), /safe=ok#fragment/, `${parameter} provider state preserves safe URL content`);
+
+    const normalJson = buildOutput({ request: { jsonOutput: true, submitOnly: false }, metadata: { provider: 'chatgpt', provider_state: state }, text: `answer ${url}` }).text;
+    const normalPlain = buildOutput({ request: { jsonOutput: false, submitOnly: false }, metadata: { provider: 'chatgpt' }, text: `answer ${url}` }).text;
+    assert.doesNotMatch(normalJson, new RegExp(secret), `${parameter} JSON response`);
+    assert.doesNotMatch(normalPlain, new RegExp(secret), `${parameter} plain response`);
+    assert.match(normalJson, /safe=ok#fragment/, `${parameter} JSON response preserves safe URL content`);
+    assert.match(normalPlain, /safe=ok#fragment/, `${parameter} plain response preserves safe URL content`);
+
+    const lines = [];
+    const emitter = createChatGptStreamEmitter({ io: { stdout: line => lines.push(line) } });
+    emitter.emit('message', { source: 'live-cdp', message: { content: { parts: [`source ${url}`] } } });
+    assert.doesNotMatch(lines[0], new RegExp(secret), `${parameter} NDJSON`);
+    assert.match(lines[0], /safe=ok#fragment/, `${parameter} NDJSON preserves safe URL content`);
+  }
+  assert.equal(sanitizeChatGptStreamValue('API key and passwordless tokenization are prose.'), 'API key and passwordless tokenization are prose.');
+  assert.equal(sanitizeChatGptStreamValue('https://example.test/?key=harmless&safe=ok#fragment'), 'https://example.test/?key=harmless&safe=ok#fragment');
+});
+
+test('ChatGPT public surfaces redact structured and JSON-shaped signature credentials', () => {
+  const markers = ['SIGNATURE_MARKER', 'SIG_MARKER', 'AWS_MARKER', 'GOOGLE_MARKER', 'AMZ_MARKER', 'GOOG_MARKER'];
+  const secrets = { signature: markers[0], sig: markers[1], awsAccessKeyId: markers[2], googleAccessId: markers[3], xAmzCredential: markers[4], xGoogCredential: markers[5] };
+  const prose = `signature verification matters; tokenization; key=music; ${JSON.stringify(secrets)}`;
+  const state = { ...secrets, design: 'ordinary', nested: { note: prose } };
+  const safeState = sanitizeProviderStateForOutput('chatgpt', state);
+  const assertSafe = value => {
+    const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+    for (const marker of markers) assert.equal(serialized.includes(marker), false, marker);
+    assert.match(serialized, /signature verification matters; tokenization; key=music/);
+  };
+  assertSafe(safeState);
+  assert.equal(safeState.design, 'ordinary');
+
+  const metadata = { provider: 'chatgpt', provider_state: { structured_turn: { messages: [{ content: { parts: [prose] } }] }, ...state } };
+  assertSafe(buildOutput({ request: { jsonOutput: true, submitOnly: false }, metadata, text: prose }).text);
+  assertSafe(buildOutput({ request: { jsonOutput: false, submitOnly: false }, metadata, text: prose }).text);
+
+  const lines = [];
+  const emitter = createChatGptStreamEmitter({ io: { stdout: line => lines.push(line) } });
+  emitter.emit('message', { source: 'live-cdp', message: { ...secrets, content: { parts: [prose] } } });
+  emitter.emitTerminal('complete', { source: 'live-cdp', response: prose, turn: { ...secrets, messages: [{ content: { parts: [prose] } }] } });
+  for (const line of lines) assertSafe(line);
+});
+
+test('ChatGPT stream emitter keeps its envelope core-owned and preserves prose while redacting credentials', () => {
+  const lines = [];
+  const emitter = createChatGptStreamEmitter({ io: { stdout: line => lines.push(line) }, now: () => '2026-07-22T00:00:00.000Z' });
+  emitter.emit('delta', { event: 'error', provider: 'evil', sequence: 99, captured_at: 'evil-time', source: 'evil-source', provider_conversation_id: 'provider_123', text: 'Explain tokenization and secret management.', nested: { resume_token: 'TEST_SECRET', text: 'Bearer abc token=def' } });
+  const event = JSON.parse(lines[0]);
+  assert.deepEqual({ event: event.event, provider: event.provider, sequence: event.sequence, captured_at: event.captured_at, source: event.source }, { event: 'delta', provider: 'chatgpt', sequence: 1, captured_at: '2026-07-22T00:00:00.000Z', source: 'provider-snapshot' });
+  assert.equal(event.text, 'Explain tokenization and secret management.');
+  assert.equal(JSON.stringify(event).includes('TEST_SECRET'), false);
+  assert.equal(JSON.stringify(event).includes('abc'), false);
+  assert.equal(sanitizeChatGptStreamValue('API key and passwordless tokenization are prose.'), 'API key and passwordless tokenization are prose.');
+});
+
+test('ChatGPT NDJSON stream errors are terminal once and propagate only sanitized details', async () => {
+  const lines = [];
+  const secret = 'TEST_STREAM_SECRET';
+  const provider = { name: 'chatgpt', capabilities: { localConversationState: false, cachePolicy: 'none', streamFormat: 'ndjson' }, runRequiresBrowser: () => false, async run() { const error = new Error(`Bearer raw-value token=${secret} ${secret}`); error.code = secret; throw error; } };
+  const request = buildAiChatRequest({ providerName: 'chatgpt', prompt: 'hello', stream: true });
+  await assert.rejects(() => runAiChat(request, { provider, cache: noCache(), io: { stdout: line => lines.push(line) } }), error => {
+    assert.equal(error.message.includes(secret), false);
+    assert.equal(error.message.includes('raw-value'), false);
+    return true;
+  });
+  assert.equal(lines.length, 1);
+  const event = JSON.parse(lines[0]);
+  assert.equal(event.event, 'error'); assert.equal(event.complete, false);
+  assert.equal(event.source, 'live-cdp'); assert.equal(event.code, 'chatgpt_stream_error');
+  assert.equal(JSON.stringify(event).includes(secret), false);
+  assert.equal(aiChatResultExitCode(request, { provider, metadata: { complete: false } }), 1);
+});
+
+test('provider terminal progress is rejected as one safe terminal error and cannot be followed by complete', async () => {
+  const lines = []; const secret = 'PROGRESS_CODE_SECRET';
+  const provider = { name: 'chatgpt', capabilities: { localConversationState: false, cachePolicy: 'none', streamFormat: 'ndjson' }, runRequiresBrowser: () => false, async run({ onStreamEvent }) { onStreamEvent({ event: 'complete', source: 'live-cdp', code: secret }); return { text: 'must not return', done: true, providerConversationId: 'provider_123' }; } };
+  const request = buildAiChatRequest({ providerName: 'chatgpt', prompt: 'hello', stream: true });
+  await assert.rejects(() => runAiChat(request, { provider, cache: noCache(), io: { stdout: line => lines.push(line) } }), /Invalid provider ChatGPT stream progress event/);
+  const events = lines.map(line => JSON.parse(line));
+  assert.deepEqual(events.map(event => event.event), ['error']);
+  assert.equal(events[0].source, 'live-cdp');
+  assert.equal(JSON.stringify(events).includes(secret), false);
+});
+
+test('terminal reconciliation carries a provider id even without an earlier session event', async () => {
+  const lines = [];
+  const provider = { name: 'chatgpt', defaultModel: 'extra-high', capabilities: { localConversationState: false, cachePolicy: 'none', streamFormat: 'ndjson' }, runRequiresBrowser: () => false, async run() { return { text: 'answer', done: true, providerConversationId: 'provider_123', finalUrl: 'https://chatgpt.com/c/provider_123', providerState: { conversation_id: 'provider_123', structured_turn: { messages: [] } } }; } };
+  await runAiChat(buildAiChatRequest({ providerName: 'chatgpt', prompt: 'hello', stream: true }), { provider, cache: noCache(), io: { stdout: line => lines.push(line) } });
+  const terminal = JSON.parse(lines[0]);
+  assert.equal(terminal.event, 'complete'); assert.equal(terminal.provider_conversation_id, 'provider_123');
+});
+
+test('ChatGPT stream tracker turns an asynchronous private transcript append failure into one error terminal', async () => {
+  class FakeCdpSession extends EventEmitter {
+    async send(method) {
+      if (method === 'Network.streamResourceContent') return { bufferedData: Buffer.from('data: {"conversation_id":"provider_123"}\\n\\n').toString('base64') };
+      return {};
+    }
+    async detach() {}
+  }
+  const lines = []; const unhandled = [];
+  const onUnhandled = reason => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  const provider = {
+    name: 'chatgpt', defaultModel: 'instant', capabilities: { localConversationState: false, cachePolicy: 'none', streamFormat: 'ndjson' }, runRequiresBrowser: () => false,
+    async run({ onStreamEvent }) {
+      const client = new FakeCdpSession();
+      const tracker = await createChatGptNetworkTracker({ page: { target: () => ({ createCDPSession: async () => client }) }, selectedModel: 'instant', onStreamEvent });
+      client.emit('Network.requestWillBeSent', { requestId: 'request', request: { method: 'POST', url: 'https://chatgpt.com/backend-api/f/conversation' } });
+      client.emit('Network.responseReceived', { requestId: 'request', response: { status: 200, mimeType: 'text/event-stream' } });
+      await new Promise(resolve => setImmediate(resolve));
+      try {
+        return await chatgptProvider.waitForResponse({ page: { url: () => 'https://chatgpt.com/' }, timeoutMs: 100, networkTracker: tracker, selectedModel: 'instant', request: {}, sleepFn: async () => {} });
+      } finally {
+        await tracker.dispose();
+      }
+    },
+  };
+  const request = buildAiChatRequest({ providerName: 'chatgpt', prompt: 'hello', stream: true, outFile: 'private.ndjson' });
+  try {
+    await assert.rejects(() => runAiChat(request, { provider, cache: noCache(), io: { initializePrivateStreamFile() {}, appendPrivateStreamFile() { throw new Error('disk failure'); }, stdout: line => lines.push(line) } }), /Failed to emit ChatGPT stream progress/);
+    await new Promise(resolve => setImmediate(resolve));
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+  const events = lines.map(line => JSON.parse(line));
+  assert.deepEqual(events.map(event => event.event), ['error']);
+  assert.equal(events[0].code, 'stream_file_error'); assert.equal(events[0].complete, false);
+  assert.equal(unhandled.length, 0);
+});
+
+test('ChatGPT stream transcript appends before stdout and turns an append failure into one error terminal', () => {
+  const stdout = []; const file = [];
+  const emitter = createChatGptStreamEmitter({ outFile: 'explicit.ndjson', io: { stdout: line => stdout.push(line), appendPrivateStreamFile: (_path, line) => file.push(line) }, now: () => 'now' });
+  emitter.emitProgress('status', { source: 'live-cdp', status: 'submitted' });
+  emitter.emitTerminal('complete', { source: 'live-cdp', complete: true });
+  assert.deepEqual(stdout.map(line => `${line}\n`), file);
+  const failed = []; let appendCount = 0;
+  const failing = createChatGptStreamEmitter({ outFile: 'explicit.ndjson', io: { stdout: line => failed.push(line), appendPrivateStreamFile: () => { appendCount += 1; if (appendCount === 2) throw new Error('disk'); } }, now: () => 'now' });
+  failing.emitProgress('status', { source: 'live-cdp', status: 'submitted' });
+  assert.throws(() => failing.emitTerminal('complete', { source: 'live-cdp', complete: true }), /private NDJSON transcript/);
+  failing.emitTerminal('error', { source: 'live-cdp', complete: false, code: 'stream_file_error', message: 'safe' });
+  const failedEvents = failed.map(line => JSON.parse(line));
+  assert.deepEqual(failedEvents.map(line => line.event), ['status', 'error']);
+  assert.deepEqual(failedEvents.map(line => line.sequence), [1, 2]);
+  assert.equal(failedEvents.filter(line => ['complete', 'timeout', 'error'].includes(line.event)).length, 1);
+});
+
+test('listing parses bounded flags and rejects invalid limits before browser use', async () => {
+  const parsed = parseAiChatArgs(['--provider', 'chatgpt', '--list-conversations', '--conversation-limit', '20']);
+  assert.equal(parsed.listConversations, true); assert.equal(parsed.conversationLimit, 20);
+  for (const limit of ['0', '-1', '101', 'nope']) assert.throws(() => parseAiChatArgs(['--conversation-limit', limit]));
+  const request = buildAiChatRequest({ providerName: 'grok', listConversations: true });
+  await assert.rejects(() => runAiChat(request, { provider: { name: 'grok', capabilities: {} }, browserTools: { startChrome: async () => { throw new Error('browser started'); } } }), /not supported/);
+});
+
+test('ChatGPT stream validation emits one stdout terminal before browser work', async () => {
+  const lines = []; const provider = { name: 'chatgpt', capabilities: { streamFormat: 'ndjson' } };
+  await assert.rejects(() => runAiChat(buildAiChatRequest({ providerName: 'chatgpt', prompt: 'x', stream: true, submitOnly: true }), { provider, io: { stdout: line => lines.push(line) } }));
+  assert.deepEqual(lines.map(line => JSON.parse(line).event), ['error']);
+});
+test('stream initialization failure uses prompted and reattach sources', async () => {
+  for (const [request, source] of [[buildAiChatRequest({ providerName: 'chatgpt', prompt: 'x', stream: true, outFile: 'x' }), 'live-cdp'], [buildAiChatRequest({ providerName: 'chatgpt', conversationTarget: 'provider_1', stream: true, outFile: 'x' }), 'provider-snapshot']]) {
+    const lines = []; const provider = { name: 'chatgpt', capabilities: { streamFormat: 'ndjson', localConversationState: false } };
+    const result = await runAiChat(request, { provider, io: { stdout: line => lines.push(line), initializePrivateStreamFile: () => { throw new Error('no'); } } });
+    assert.equal(JSON.parse(lines[0]).source, source); assert.equal(aiChatResultExitCode(request, result), 1);
+  }
+});
+test('resolveInitialModel preserves ChatGPT continuation only when omitted', () => {
+  const provider = { ...chatgptProvider }; assert.equal(resolveInitialModel(provider, { modelName: 'default' }, { providerId: 'p' }), 'default'); assert.equal(resolveInitialModel(provider, { modelName: 'high', modelExplicit: true }, { providerId: 'p' }), 'high'); assert.equal(resolveInitialModel(provider, { modelName: 'default' }), 'extra-high');
+});
+test('ChatGPT listing invokes only listing transport and prints one JSON object', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-listing-'));
+  try {
+    const lines = []; let listed = 0; let started = 0; let connected = 0;
+    const browser = { disconnect() {} };
+    const provider = {
+      name: 'chatgpt', capabilities: { supportsConversationListing: true },
+      async listConversations({ request }) {
+        listed += 1; assert.equal(request.conversationLimit, 7);
+        return { provider: 'chatgpt', count: 1, conversations: [{ provider_conversation_id: 'provider_1' }] };
+      },
+    };
+    const result = await runAiChat(buildAiChatRequest({ providerName: 'chatgpt', listConversations: true, conversationLimit: 7, browserStateFile: join(dir, 'browser.json') }), {
+      provider,
+      startChrome: async () => { started += 1; return { ownerToken: 'owner', port: 4771, profileName: 'Default' }; },
+      connectBrowser: async () => { connected += 1; return browser; },
+      cache: { read: () => assert.fail('listing must not read cache'), write: () => assert.fail('listing must not write cache') },
+      fs: new Proxy({}, { get: () => () => assert.fail('listing must not use conversation storage') }),
+      io: { stdout: line => lines.push(line), writeFile: () => assert.fail('no output file requested') },
+    });
+    assert.deepEqual({ listed, started, connected }, { listed: 1, started: 1, connected: 1 });
+    assert.equal(result.source, 'provider-list');
+    assert.equal(lines.length, 1);
+    assert.equal(JSON.parse(lines[0]).conversations[0].provider_conversation_id, 'provider_1');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test('ChatGPT structured JSON exposes full turn fields', () => {
+  const output = JSON.parse(buildOutput({ request: { jsonOutput: true }, metadata: { provider: 'chatgpt', provider_state: { thinking_effort: 'high', structured_turn: { messages: [{ id: 'u' }], user_message_id: 'u', assistant_message_id: 'a', turn_exchange_id: 't', citations: [{ url: 'x' }], content_references: [], search_result_groups: [], story_events: [], started_at: 1, completed_at: 2 } }, response: 'x' }, text: 'x' }).text);
+  assert.equal(output.turn.user_message_id, 'u'); assert.equal(output.thinking_effort, 'high');
+  assert.deepEqual(Object.keys(output.turn).sort(), ['assistant_message_id', 'citations', 'completed_at', 'content_references', 'messages', 'search_result_groups', 'started_at', 'story_events', 'turn_exchange_id', 'user_message_id'].sort());
+});
+
+test('ChatGPT stream append failures produce one contiguous error terminal through runAiChat', async () => {
+  for (const progressBeforeFailure of [false, true]) {
+    const lines = []; let appends = 0;
+    const provider = {
+      name: 'chatgpt', defaultModel: 'extra-high', capabilities: { streamFormat: 'ndjson', localConversationState: false, cachePolicy: 'none' }, runRequiresBrowser: () => false,
+      async run({ onStreamEvent }) {
+        if (progressBeforeFailure) onStreamEvent({ event: 'status', status: 'submitted', source: 'live-cdp' });
+        return { text: 'answer', done: true, providerConversationId: 'provider_1', providerState: { conversation_id: 'provider_1', structured_turn: { messages: [] } } };
+      },
+    };
+    const failOn = progressBeforeFailure ? 2 : 1;
+    await assert.rejects(() => runAiChat(buildAiChatRequest({ providerName: 'chatgpt', prompt: 'x', stream: true, outFile: 'explicit.ndjson' }), {
+      provider, cache: noCache(), io: {
+        stdout: line => lines.push(line), initializePrivateStreamFile: () => {},
+        appendPrivateStreamFile: () => { appends += 1; if (appends === failOn) throw new Error('disk failure'); },
+      },
+    }), /private NDJSON transcript/);
+    const events = lines.map(JSON.parse);
+    assert.deepEqual(events.map(event => event.sequence), events.map((_, index) => index + 1));
+    assert.equal(events.at(-1).event, 'error');
+    assert.equal(events.filter(event => ['complete', 'timeout', 'error'].includes(event.event)).length, 1);
+    assert.equal(events.some(event => event.event === 'complete'), false);
+  }
+});
+
+test('default ChatGPT stream file IO creates private output without sidecars', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-stream-file-'));
+  try {
+    const output = join(dir, 'private', 'events.ndjson');
+    defaultIo.initializePrivateStreamFile(output);
+    defaultIo.appendPrivateStreamFile(output, '{"event":"complete"}\n');
+    assert.equal(statSync(dirname(output)).mode & 0o777, 0o700);
+    assert.equal(statSync(output).mode & 0o777, 0o600);
+    assert.equal(readFileSync(output, 'utf8'), '{"event":"complete"}\n');
+    assert.equal(existsSync(`${output}.meta.json`), false);
+    assert.equal(existsSync(`${output}.raw.txt`), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('private stream and generic output secure overwrite targets and reject shared parents', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-output-permissions-'));
+  try {
+    chmodSync(dir, 0o700);
+    const stream = join(dir, 'events.ndjson');
+    writeFileSync(stream, 'old'); chmodSync(stream, 0o644);
+    defaultIo.initializePrivateStreamFile(stream);
+    assert.equal(fileMode(stream), 0o600);
+    const generic = join(dir, 'answer.json');
+    writeFileSync(generic, 'old'); chmodSync(generic, 0o644);
+    defaultIo.writeFile(generic, 'new');
+    assert.equal(fileMode(generic), 0o600);
+    const shared = join(dir, 'shared'); mkdirSync(shared); chmodSync(shared, 0o755);
+    assert.throws(() => defaultIo.writeFile(join(shared, 'answer.json'), 'private'), /existing directory must already have mode 0700/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('private output, sidecar, NDJSON, and evidence reject file and directory symlinks without touching targets', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ai-chat-output-symlink-'));
+  try {
+    chmodSync(root, 0o700);
+    const target = join(root, 'target.txt'); writeFileSync(target, 'unchanged'); chmodSync(target, 0o644);
+    const linkedOutput = join(root, 'answer.json'); symlinkSync(target, linkedOutput);
+    assert.throws(() => defaultIo.writeFile(linkedOutput, 'private'), /symlink/);
+    assert.equal(readFileSync(target, 'utf8'), 'unchanged'); assert.equal(fileMode(target), 0o644);
+
+    const base = join(root, 'result');
+    const sidecarTarget = join(root, 'sidecar-target.txt'); writeFileSync(sidecarTarget, 'unchanged'); chmodSync(sidecarTarget, 0o644);
+    const rawSidecarTarget = join(root, 'raw-sidecar-target.txt'); writeFileSync(rawSidecarTarget, 'unchanged'); chmodSync(rawSidecarTarget, 0o644);
+    symlinkSync(sidecarTarget, `${base}.meta.json`); symlinkSync(rawSidecarTarget, `${base}.raw.txt`);
+    saveSidecarArtifacts(base, { private: 'metadata' }, 'private raw');
+    assert.equal(readFileSync(sidecarTarget, 'utf8'), 'unchanged'); assert.equal(fileMode(sidecarTarget), 0o644);
+    assert.equal(readFileSync(rawSidecarTarget, 'utf8'), 'unchanged'); assert.equal(fileMode(rawSidecarTarget), 0o644);
+
+    const streamTarget = join(root, 'stream-target.txt'); writeFileSync(streamTarget, 'unchanged'); chmodSync(streamTarget, 0o644);
+    const stream = join(root, 'events.ndjson'); symlinkSync(streamTarget, stream);
+    assert.throws(() => defaultIo.initializePrivateStreamFile(stream), /symlink/);
+    assert.equal(readFileSync(streamTarget, 'utf8'), 'unchanged'); assert.equal(fileMode(streamTarget), 0o644);
+
+    const evidenceTarget = join(root, 'evidence-target.txt'); writeFileSync(evidenceTarget, 'unchanged'); chmodSync(evidenceTarget, 0o644);
+    const evidence = join(root, 'evidence.png'); symlinkSync(evidenceTarget, evidence);
+    await assert.rejects(() => captureEvidenceScreenshot({ browser: { pages: async () => [] }, provider: { name: 'provider' }, result: { finalUrl: 'https://provider.example/chat' }, request: { captureEvidence: true, evidencePath: evidence } }), /symlink/);
+    assert.equal(readFileSync(evidenceTarget, 'utf8'), 'unchanged'); assert.equal(fileMode(evidenceTarget), 0o644);
+
+    const realDir = join(root, 'real-dir'); mkdirSync(realDir); chmodSync(realDir, 0o700);
+    const linkedDir = join(root, 'linked-dir'); symlinkSync(realDir, linkedDir);
+    assert.throws(() => defaultIo.writeFile(join(linkedDir, 'answer.json'), 'private'), /real directory/);
+    saveSidecarArtifacts(join(linkedDir, 'result'), { private: 'metadata' }, 'private raw');
+    assert.throws(() => defaultIo.initializePrivateStreamFile(join(linkedDir, 'events.ndjson')), /real directory/);
+    await assert.rejects(() => captureEvidenceScreenshot({ browser: { pages: async () => [] }, provider: { name: 'provider' }, result: { finalUrl: 'https://provider.example/chat' }, request: { captureEvidence: true, evidencePath: join(linkedDir, 'evidence.png') } }), /real directory/);
+    assert.equal(readdirSync(realDir).length, 0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('ChatGPT list-models conflicts reject before browser, cache, or conversation storage', async () => {
+  const provider = { name: 'chatgpt', capabilities: { streamFormat: 'ndjson', localConversationState: false, supportsConversationListing: true }, listModels: () => assert.fail('list models must not run') };
+  for (const conflict of [{ inlinePrompt: 'x' }, { conversationTarget: 'provider_1' }, { submitOnly: true }, { final: true }, { stream: true }, { listConversations: true }, { saveConversation: 'local' }, { attachConversation: 'provider_1' }]) {
+    const lines = [];
+    const request = buildAiChatRequest({ providerName: 'chatgpt', listModels: true, ...conflict });
+    await assert.rejects(() => runAiChat(request, {
+      provider, startChrome: () => assert.fail('browser must not start'), connectBrowser: () => assert.fail('browser must not connect'),
+      cache: { read: () => assert.fail('cache read'), write: () => assert.fail('cache write') },
+      fs: new Proxy({}, { get: () => () => assert.fail('conversation storage used') }), io: { stdout: line => lines.push(line) },
+    }), conflict.listConversations ? /list-conversations conflicts/ : /list-models conflicts/);
+    if (conflict.stream) assert.deepEqual(lines.map(line => JSON.parse(line).event), ['error']);
+    else assert.deepEqual(lines, []);
+  }
+  const result = await runAiChat(buildAiChatRequest({ providerName: 'chatgpt', listModels: true, verifyModels: true, verifyModelTimeoutSeconds: 7, jsonOutput: true }), { provider: { ...provider, listModels: () => [] }, io: { stdout: () => {} } });
+  assert.equal(result.source, 'models');
+});
+
+test('ChatGPT listing conflicts reject before browser, cache, or conversation storage', async () => {
+  const provider = { name: 'chatgpt', capabilities: { supportsConversationListing: true, streamFormat: 'ndjson', localConversationState: false } };
+  const conflicts = [
+    { inlinePrompt: 'x' }, { conversationTarget: 'provider_1' }, { submitOnly: true }, { final: true },
+    { stream: true }, { listModels: true }, { saveConversation: 'local' }, { attachConversation: 'provider_1' },
+  ];
+  for (const conflict of conflicts) {
+    const lines = [];
+    await assert.rejects(() => runAiChat(buildAiChatRequest({ providerName: 'chatgpt', listConversations: true, ...conflict }), {
+      provider,
+      startChrome: () => assert.fail('browser must not start'), connectBrowser: () => assert.fail('browser must not connect'),
+      cache: { read: () => assert.fail('cache read'), write: () => assert.fail('cache write') },
+      fs: new Proxy({}, { get: () => () => assert.fail('conversation storage used') }),
+      io: { stdout: line => lines.push(line) },
+    }), /list-conversations conflicts/);
+    if (conflict.stream) assert.deepEqual(lines.map(line => JSON.parse(line).event), ['error']);
+  }
+});
+
+test('runPromptAttempt passes minimal preflight context and skips ChatGPT pre-submit text reads', async () => {
+  const order = []; const page = { url: () => 'https://chatgpt.com/c/provider_1', evaluate: () => assert.fail('body text must not be read') };
+  const browser = { pages: async () => [page] };
+  const provider = {
+    name: 'chatgpt', capabilities: { requiresPreSubmitTextRead: false },
+    findPage: async () => page,
+    preflight: async () => { order.push('preflight'); return { expectedConversationId: 'provider_1', baselineCurrentNode: 'node_1' }; },
+    createAttemptContext: async ({ preflightContext }) => { order.push('observer'); assert.deepEqual(preflightContext, { expectedConversationId: 'provider_1', baselineCurrentNode: 'node_1' }); return { marker: true }; },
+    clearInput: async () => order.push('clear'), typePrompt: async () => order.push('type'), submit: async () => order.push('submit'),
+    waitForResponse: async ({ attemptContext }) => { order.push('wait'); assert.equal(attemptContext.marker, true); return { text: 'answer', done: true, providerConversationId: 'provider_1' }; },
+    disposeAttemptContext: async () => order.push('dispose'),
+  };
+  const result = await runPromptAttempt({ browser, provider, request: buildAiChatRequest({ providerName: 'chatgpt', prompt: 'follow-up' }), selectedModel: 'default', conversation: { providerId: 'provider_1' } });
+  assert.equal(result.providerConversationId, 'provider_1');
+  assert.deepEqual(order, ['preflight', 'observer', 'clear', 'type', 'submit', 'wait', 'dispose']);
 });

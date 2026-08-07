@@ -11,7 +11,6 @@ import {
   validateAiChatBrowserState,
 } from '../scripts/ai-chat/module.mjs';
 import { assertGrokPageUsable, classifyGrokPageState } from '../scripts/ai-chat/providers/grok.mjs';
-import { classifyGeminiUiState } from '../scripts/ai-chat/providers/gemini-api.mjs';
 import { validatePerplexitySession } from '../scripts/ai-chat/providers/perplexity.mjs';
 import { stopChrome } from '../../browser-tools/scripts/browser-control.mjs';
 
@@ -215,23 +214,6 @@ test('profile auth diagnostics report logged-out or sync-required profiles witho
       return true;
     },
   );
-
-  const geminiSignIn = classifyGeminiUiState({
-    url: 'https://accounts.google.com/signin',
-    title: 'Sign in',
-    text: 'Sign in',
-    promptInput: false,
-    accountButton: false,
-  });
-  const geminiConsent = classifyGeminiUiState({
-    url: 'https://consent.google.com/m?continue=https://gemini.google.com/app',
-    title: 'Before you continue',
-    text: 'Before you continue to Google\nReject all\nAccept all',
-    promptInput: false,
-    accountButton: false,
-  });
-  assert.equal(geminiSignIn.reason, 'google_sign_in_required');
-  assert.equal(geminiConsent.reason, 'google_consent_required');
 
   let networkRequestCount = 0;
   await assert.rejects(

@@ -16,8 +16,8 @@ The durable provider model is: use the browser session for authentication, then 
 | Provider | Current transport | Notes and next direction |
 | --- | --- | --- |
 | Perplexity | Headless-preferred managed-browser same-origin fetch, uploads API for files, and schematized SSE block-patch parsing | Only transport. Browser credentials remain inside Chrome. No cookie extraction, rendered HTML parsing, element interaction, or DOM fallback |
-| ChatGPT | Network-observed authenticated request. The UI creates valid context, the adapter rewrites backend payloads, then parses SSE and WebSocket catchups | Keep stream parsing first. DOM text remains fallback only and must be marked in metadata |
-| Gemini | WebUI API via Browser Tools managed Chrome cookies by default, account model RPC, and stream parser. Direct Chrome profile cookie fallback is explicit | Keep. Native continuation error `1097` remains a known provider limitation with transcript fallback |
+| ChatGPT | Visible UI model selection, composer entry, and one submit; CDP observes SSE/WebSocket and same-origin authenticated GET reads supply detail, final turn, and listing | Completion is strict provider quorum, never rendered text or stability |
+| Gemini | WebUI API via managed-browser same-origin requests, account model RPC, and stream parser | Keep. Native continuation error `1097` remains a known provider limitation with transcript fallback |
 | Grok | Browser UI submit, visible model labels, auth preflight, partial network progress tracking, DOM-derived response cleanup | Move toward structured network body parsing when a stable Grok stream body contract is captured. Until then, make DOM fallback and limitations visible |
 
 ## Adapter contract

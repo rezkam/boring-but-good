@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
 import { buildAiChatRequest, runAiChat } from '../scripts/ai-chat/module.mjs';
 import { classifyGrokPageState, grokProvider, isGrokPlaceholderResponse } from '../scripts/ai-chat/providers/grok.mjs';
 
@@ -294,10 +295,10 @@ test('Grok evidence capture uses the final conversation tab instead of the activ
   const stdout = [];
   const captured = [];
   const finalUrl = 'https://x.com/i/grok?conversation=abc123';
-  const evidencePath = '/tmp/grok-final-tab-evidence.png';
+  const evidencePath = '/tmp/.ai-chat-evidence-test/grok-final-tab-evidence.png';
   const grokPage = {
     url: () => finalUrl,
-    screenshot: async (options) => captured.push({ page: 'grok', options }),
+    screenshot: async (options) => { captured.push({ page: 'grok', options }); writeFileSync(options.path, 'png'); },
   };
   const activeNewTab = {
     url: () => 'chrome://new-tab-page/',

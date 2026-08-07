@@ -6,31 +6,33 @@ Use `scripts/ai-chat.mjs` for all browser-authenticated AI chat providers. AI Ch
 
 | Provider | Transport | Model strategy | Continuation strategy | Main limitations |
 | --- | --- | --- | --- | --- |
-| `perplexity` | Headless-preferred same-origin browser fetch to `/rest/sse/perplexity_ask`, with captured schematized SSE block-patch parsing | Network-contract registry, direct tool aliases, task defaults, captured Thinking variants, Max-tier filtering, and optional live `--verify-models` acceptance | Backend UUID plus private read-write token in local conversation record | Credentials stay inside managed Chrome. No UI or DOM fallback. Account tier decides accepted models. Responses usually have no final URL for screenshots |
-| `chatgpt` | Browser UI creates the authenticated request, then the adapter rewrites the backend payload and reads SSE plus WebSocket state through CDP | Static request profiles for `instant`, `extra-high`, `pro-extended`, and `gpt-5.5` aliases. Observed stream metadata reports the selected backend slug where available | Browser conversation URL plus backend conversation id, topic id, turn exchange id, message id, and stream state | No public model list API. Old `medium` and `high` `thinking_effort` payloads are not exposed because the current backend rejects them with HTTP 422. Live checks create normal ChatGPT conversations |
-| `gemini` | WebUI API with Browser Tools managed Chrome cookies by default. Direct Chrome profile cookie fallback is explicit | Live account model discovery through Gemini `otAQ7b` RPC, fallback known headers, aliases, tiers, thinking flags, defaults, task suggestions, and optional live `--verify-models` checks | Gemini metadata continuation first, explicit `1097` error reporting, then local transcript fallback | Direct auth can pass while the browser UI is not ready. Model fallback on `1052` must be explicit. Deep research is not a stable AI Chat profile |
-| `grok` | Browser UI with X/Grok composer auth preflight and partial network progress tracking | UI labels are account/UI dependent. `fast` is the reliable default in the current X/Grok app. `--list-models --verify-models` reports whether `auto` or `expert` are visible | Browser conversation URL | No backend model slug. Response text is DOM-derived with network completion heuristics. Live checks create normal Grok conversations |
+| `perplexity` | Headless-preferred same-origin browser fetch to `/rest/sse/perplexity_ask`, with captured schematized SSE block-patch parsing | Network-contract registry, direct tool aliases, task defaults, captured Thinking variants, and Max-tier filtering. `--verify-models` submits prompts only with explicit user authorization | Backend UUID plus private read-write token in local conversation record | Credentials stay inside managed Chrome. No UI or DOM fallback. Account tier decides accepted models. Responses usually have no final URL for screenshots |
+| `chatgpt` | Visible UI selects a profile and submits once; CDP observation plus authenticated same-origin reads provide progress, final state, and listing | Exactly `instant`, `medium`, `high`, `extra-high`, and `pro`; observed backend model and effort verify explicit selection | Provider conversation ID or trusted `/c/<id>` URL only, with zero local ChatGPT state | Continuation requires a baseline detail read and a changed current branch. Temporary chats reject detached read/continuation. Listing is read-only; automated writes are prohibited |
+| `gemini` | WebUI API through managed-browser same-origin requests | Read-only account model discovery through Gemini `otAQ7b` RPC, fallback known headers, aliases, tiers, thinking flags, defaults, and task suggestions. `--verify-models` submits prompts only with explicit user authorization | Gemini metadata continuation first, explicit `1097` error reporting, then local transcript fallback | Model fallback on `1052` must be explicit. Deep research is not a stable AI Chat profile |
+| `grok` | Browser UI with X/Grok composer auth preflight and partial network progress tracking | UI labels are account/UI dependent. `fast` is the reliable default in the current X/Grok app. Existing visible labels can be inspected read-only | Browser conversation URL | No backend model slug. Response text is DOM-derived with network completion heuristics. Provider writes require an explicit user invocation |
 
 ## Common commands
 
 ```bash
-# List or verify models.
+# Read-only model listings.
 scripts/ai-chat.mjs --provider perplexity --list-models --json
-scripts/ai-chat.mjs --provider perplexity --list-models --verify-models --verify-model-timeout 180 --json
-scripts/ai-chat.mjs --provider gemini --list-models --verify-models --json
+scripts/ai-chat.mjs --provider gemini --list-models --json
 scripts/ai-chat.mjs --provider chatgpt --list-models --json
 scripts/ai-chat.mjs --provider grok --list-models --json
 
+# Perplexity and Gemini --verify-models submit small provider prompts. Run only
+# after explicit user authorization and never from automated tests or evals.
+
 # Select models directly or through task defaults.
 scripts/ai-chat.mjs --provider grok --model fast --prompt "..." --json
-scripts/ai-chat.mjs --provider chatgpt --model extra-high --prompt-file /tmp/q.md --json
+scripts/ai-chat.mjs --provider chatgpt --model extra-high --prompt-file ./question.md --json
 scripts/ai-chat.mjs --provider gemini --task reasoning --prompt "..." --json
 scripts/ai-chat.mjs --provider perplexity --task coding --prompt "..." --json
 
 # Perplexity provider-specific features.
-scripts/ai-chat.mjs --provider perplexity --task deep_research --prompt-file /tmp/q.md --json
-scripts/ai-chat.mjs --provider perplexity --prompt "Analyze this file" --file /tmp/report.pdf --stream --json
-scripts/ai-chat.mjs --provider perplexity --prompt-file /tmp/q.md --source-focus all --time-range week --citation-mode markdown --json
+scripts/ai-chat.mjs --provider perplexity --task deep_research --prompt-file ./question.md --json
+scripts/ai-chat.mjs --provider perplexity --prompt "Analyze this file" --file ./report.pdf --stream --json
+scripts/ai-chat.mjs --provider perplexity --prompt-file ./question.md --source-focus all --time-range week --citation-mode markdown --json
 ```
 
 ## Conversation ids
@@ -39,15 +41,15 @@ Saved conversation ids are provider scoped:
 
 - `perplexity:research-x` stores Perplexity backend UUID and private read-write token when available.
 - `grok:research-x` stores a Grok conversation URL.
-- `chatgpt:research-x` stores a ChatGPT conversation URL and stream continuation identifiers.
+- ChatGPT accepts provider conversation IDs or trusted ChatGPT conversation URLs directly and never creates local conversation records.
 - `gemini:research-x` stores Gemini provider metadata and a local transcript fallback.
 
-Records live in `~/.cache/pi-browser-tools/ai-chat-conversations/<provider>/<id>.json`. Records can contain private provider continuation tokens. Normal JSON output redacts secrets and reports presence fields such as `has_read_write_token`.
+Records live in private AI Chat conversation storage. Records can contain private provider continuation tokens. Normal JSON output redacts secrets and reports presence fields such as `has_read_write_token`.
 
 Attach existing provider conversations without replaying transcript history:
 
 ```bash
-scripts/ai-chat.mjs --provider chatgpt --attach-conversation https://chatgpt.com/c/example-id --save-conversation imported-chatgpt --json
+scripts/ai-chat.mjs --provider chatgpt --conversation provider-id --prompt "Follow up" --json
 scripts/ai-chat.mjs --provider grok --attach-conversation https://x.com/i/grok?conversation=example-id --save-conversation imported-grok --json
 scripts/ai-chat.mjs --provider perplexity --attach-conversation 123e4567-e89b-12d3-a456-426614174000 --save-conversation imported-pplx --json
 scripts/ai-chat.mjs --provider gemini --attach-conversation https://gemini.google.com/app/example-id --save-conversation imported-gemini --json
@@ -62,7 +64,7 @@ scripts/ai-chat.mjs --provider perplexity --conversation imported-pplx --prompt 
 Recheck a saved ChatGPT timeout without sending a new prompt:
 
 ```bash
-scripts/ai-chat.mjs --provider chatgpt --conversation imported-chatgpt --save-conversation imported-chatgpt --json
+scripts/ai-chat.mjs --provider chatgpt --conversation provider-id --final --json
 ```
 
 ## Provider-specific behavior
@@ -75,7 +77,7 @@ Perplexity in AI Chat has one browser-authenticated network path:
 - Auth uses browser `fetch` with credentials inside managed Chrome. The adapter never reads the cookie and ignores `PERPLEXITY_SESSION_TOKEN` and `PPLX_SESSION_TOKEN`.
 - Rendered HTML parsing, element interaction, and DOM fallback are not supported.
 - Model ids, direct tool aliases, task defaults, captured Thinking variants, tiers, and provider families come from the network-contract registry. Max-tier models are filtered.
-- `--verify-models` sends tiny incognito WebUI API checks and reports accepted and rejected model ids for the current account.
+- `--verify-models` sends tiny Incognito WebUI API prompts and reports accepted and rejected model ids for the current account. It requires explicit user authorization and is never part of automated tests or evals.
 - Normal asks persist to provider history by default. Explicit Incognito, deep research, source focus, search focus, recency, citation mode, language, timezone, file attachments, Spaces, streaming, save-to-library compatibility, and multi-turn continuation use one output contract and one network transport.
 - The captured Incognito control maps to `params.is_incognito=true`; the terminal SSE reports `privacy_state`, expiry, reconnectability, thread access, and the backend UUID. AI Chat exposes the safe UUID plus canonical `/search/<uuid>` thread URL, while retaining any read-write token only in a saved local conversation. `--incognito` conflicts with `--save-to-library` and Spaces.
 - Continuation secrets stay in the private local conversation record. Public output exposes redacted state only.
@@ -92,15 +94,15 @@ Known limits:
 ChatGPT is optimized for long-running reasoning turns:
 
 - The UI is used to create valid authenticated request context.
-- The adapter rewrites the backend request payload to apply a selected request profile.
+- The visible picker applies a selected profile and observed network metadata verifies model and effort.
 - The adapter parses SSE, stream handoff events, WebSocket catchups, assistant text deltas, resolved model metadata, and completion state.
 - Metadata distinguishes stream closure from assistant turn completion. A stream `[DONE]` is not treated as final if the turn handed off to another stream.
-- Timeout, partial, empty response, handoff, resumed stream, DOM fallback, and recheck states are visible in `provider_state.stream_state`.
-- A saved timed-out request can be rechecked with `--conversation <id> --save-conversation <id>` and no prompt.
+- Timeout, partial, empty response, handoff, resumed stream, and strict terminal quorum are visible in `provider_state.stream_state`.
+- `--conversation <provider-id> --final --json` is a read-only current-turn retrieval. NDJSON watch/reattach includes the same safe full `turn`; `--out` mirrors NDJSON to an explicit private `0600` transcript with no sidecars.
 
 Known limits:
 
-- Direct synthetic requests are not used because ChatGPT page-local state and Sentinel flow are required.
+- Provider writes occur only through the visible managed-browser composer and send control.
 - `--verify-models` returns the static request profile list and does not perform a direct model acceptance prompt.
 - Deep research is not exposed as a stable AI Chat request profile.
 
@@ -127,12 +129,12 @@ Grok remains a browser UI provider:
 
 - The adapter preflights the X/Grok composer before prompt submission and reports login or stale-profile recovery guidance.
 - Model selection is by visible UI label, not backend slug.
-- `fast` is the reliable default for the current X/Grok app. `Auto` and `Expert` can be unavailable even on an authenticated session, so check `--list-models --verify-models` before selecting them.
+- `fast` is the reliable default for the current X/Grok app. `Auto` and `Expert` can be unavailable even on an authenticated session; inspect existing visible labels read-only, and obtain explicit user authorization before any provider write.
 - Response extraction is DOM-derived with network progress heuristics and cleanup. If a future adapter adds structured stream parsing, DOM cleanup should become fallback only.
 
 Known limits:
 
-- Live prompt checks create normal Grok conversations.
+- Automated verification is deterministic or read-only. Provider writes require an explicit user invocation.
 - Rate limits and quota banners are account-specific.
 - Deep research is not exposed as a stable AI Chat profile.
 
@@ -149,4 +151,4 @@ A provider feature is not considered working until these are true:
 7. Browser lifecycle evidence shows AI Chat started or reused an owned Browser Tools browser and did not attach to unmanaged or foreign browsers.
 8. If the verification started an AI Chat owned browser only for the test, cleanup uses Browser Tools stop with the matching owner token and does not stop other browsers.
 
-Private evidence belongs under `/tmp/ai-chat-verify/<provider>/<case>/` or another scratch directory outside the repo.
+Private evidence belongs under a user-supplied `<private-output-dir>/<provider>/<case>/` outside the repository.

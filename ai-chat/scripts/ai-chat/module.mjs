@@ -1,6 +1,6 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import {
   browserWSEndpoint,
   connectBrowser,
@@ -89,15 +89,22 @@ export function parseAiChatArgs(args = process.argv.slice(2)) {
   const verifyModelTimeoutSeconds = parsePositiveIntegerOption(args, '--verify-model-timeout', 90);
   const temporary = parseOptionalBooleanOption(args, '--temporary');
   const saveToLibrary = hasFlag(args, '--save-to-library');
+  const incognito = hasFlag(args, '--incognito');
   if (temporary === true && saveToLibrary) {
     throw new Error('--temporary true conflicts with --save-to-library');
   }
+  if (saveToLibrary && incognito) {
+    throw new Error('Cannot combine --save-to-library with --incognito');
+  }
+  const conversationLimit = parsePositiveIntegerOption(args, '--conversation-limit', 20);
+  if (args.includes('--conversation-limit') && conversationLimit > 100) throw new Error('Invalid --conversation-limit value: must be between 1 and 100');
 
   return {
     providerName,
     promptFile: promptFile === true ? null : promptFile,
     inlinePrompt: inlinePrompt === true ? null : inlinePrompt,
     modelName: modelName === true ? 'default' : modelName,
+    modelExplicit: args.includes('--model'),
     modelTask: modelTask === true ? null : modelTask,
     thinking: hasFlag(args, '--thinking'),
     outFile: outFile === true ? null : outFile,
@@ -110,11 +117,15 @@ export function parseAiChatArgs(args = process.argv.slice(2)) {
     timeoutExplicit: args.includes('--timeout'),
     jsonOutput: hasFlag(args, '--json'),
     stream: hasFlag(args, '--stream'),
+    submitOnly: hasFlag(args, '--submit-only'),
+    final: hasFlag(args, '--final'),
     continueChat: hasFlag(args, '--continue'),
     conversationTarget: conversationTarget === true ? null : conversationTarget,
     saveConversation: saveConversation === true ? null : saveConversation,
     attachConversation: attachConversation === true ? null : attachConversation,
     listModels: hasFlag(args, '--list-models'),
+    listConversations: hasFlag(args, '--list-conversations'),
+    conversationLimit,
     verifyModels: hasFlag(args, '--verify-models'),
     verifyModelTimeoutSeconds,
     includeConversation: hasFlag(args, '--include-conversation'),
@@ -128,12 +139,12 @@ export function parseAiChatArgs(args = process.argv.slice(2)) {
       citationMode: citationMode === true ? null : citationMode,
       language: language === true ? null : language,
       timezone: timezone === true ? null : timezone,
-      incognito: hasFlag(args, '--incognito'),
+      incognito,
       temporary,
-      saveToLibrary,
-      verifySession: hasFlag(args, '--verify-session') || hasFlag(args, '--auth-check'),
+      saveToLibrary: saveToLibrary ? true : (incognito ? false : undefined),
       chromeProfile: chromeProfile === true ? null : chromeProfile,
       cookieSource: cookieSource === true ? null : cookieSource,
+      verifySession: hasFlag(args, '--verify-session') || hasFlag(args, '--auth-check'),
       files,
       spaceUuid: spaceUuid === true ? null : spaceUuid,
     },
@@ -164,11 +175,25 @@ export function resolveAiChatBrowserStateFile(request = {}, deps = {}) {
 
 export function readAiChatBrowserState(stateFile = DEFAULT_BROWSER_STATE_FILE, fs = defaultBrowserStateFs) {
   if (!fs.exists(stateFile)) return null;
+  verifyPrivateReadPath(stateFile, fs, 'AI Chat browser state');
   try {
     return JSON.parse(fs.readFile(stateFile, 'utf-8'));
   } catch (error) {
     if (error instanceof SyntaxError) throw new Error(`Failed to parse AI Chat browser state ${stateFile}: ${error.message}`);
     throw error;
+  }
+}
+
+function verifyPrivateReadPath(path, fs, label) {
+  if (typeof fs.lstat !== 'function') throw new Error(`Failed to verify private permissions on ${label} at ${path}: lstat is required.`);
+  const parent = dirname(path);
+  let parentStats; let fileStats;
+  try { parentStats = fs.lstat(parent); fileStats = fs.lstat(path); } catch { throw new Error(`Failed to verify private permissions on ${label} at ${path}: lstat failed.`); }
+  if (parentStats?.isSymbolicLink?.() || !parentStats?.isDirectory?.() || (Number(parentStats.mode) & 0o777) !== 0o700) {
+    throw new Error(`Failed to verify private permissions on ${label} directory at ${parent}: it must be a real directory with mode 0700.`);
+  }
+  if (fileStats?.isSymbolicLink?.() || !fileStats?.isFile?.() || (Number(fileStats.mode) & 0o777) !== PRIVATE_STATE_FILE_MODE) {
+    throw new Error(`Failed to verify private permissions on ${label} at ${path}: it must be a real file with mode 0600.`);
   }
 }
 
@@ -187,6 +212,14 @@ function privatePermissionVerificationError({ label, path, observedMode = null, 
 }
 
 function enforcePrivateFilePermissions(path, fs, label) {
+  if (typeof fs.lstat !== 'function') {
+    throw privatePermissionEnforcementError({ label, path, action: 'lstat is not available from the fs dependency' });
+  }
+  let existing;
+  try { existing = fs.lstat(path); } catch { throw privatePermissionEnforcementError({ label, path, action: 'lstat failed' }); }
+  if (existing?.isSymbolicLink?.() || !existing?.isFile?.()) {
+    throw privatePermissionEnforcementError({ label, path, action: 'refusing to chmod a symlink or non-file path' });
+  }
   if (typeof fs.chmod !== 'function') {
     throw privatePermissionEnforcementError({ label, path, action: 'chmod 0600 is not available from the fs dependency' });
   }
@@ -214,11 +247,88 @@ function enforcePrivateFilePermissions(path, fs, label) {
   }
 }
 
+function ensurePrivateDirectory(path, fs, label) {
+  if (typeof fs.exists !== 'function' || typeof fs.mkdir !== 'function' || typeof fs.chmod !== 'function' || typeof fs.lstat !== 'function') {
+    throw new Error(`Failed to enforce private permissions on ${label} at ${path}: fs exists/mkdir/chmod/lstat is required.`);
+  }
+  if (fs.exists(path)) {
+    const stats = fs.lstat(path);
+    const mode = Number(stats?.mode);
+    if (stats?.isSymbolicLink?.() || !stats?.isDirectory?.() || !Number.isFinite(mode) || (mode & 0o777) !== 0o700) {
+      throw new Error(`Failed to verify private permissions on ${label} at ${path}: existing directory must be a real directory with mode 0700.`);
+    }
+    return;
+  }
+  fs.mkdir(path, { recursive: true, mode: 0o700 });
+  fs.chmod(path, 0o700);
+  const stats = fs.lstat(path);
+  const mode = Number(stats?.mode);
+  if (stats?.isSymbolicLink?.() || !stats?.isDirectory?.() || !Number.isFinite(mode) || (mode & 0o777) !== 0o700) {
+    throw new Error(`Failed to verify private permissions on ${label} at ${path}: newly created directory must be a real directory with mode 0700.`);
+  }
+}
+
+function writePrivateFileNoFollow(path, text, { expectedFile = null } = {}) {
+  if (!Number.isInteger(fsConstants.O_NOFOLLOW)) {
+    throw new Error('atomic no-follow writes are not supported on this platform');
+  }
+  const flags = fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW
+    | (expectedFile ? 0 : fsConstants.O_CREAT | fsConstants.O_EXCL);
+  let fd;
+  try {
+    fd = openSync(path, flags, PRIVATE_STATE_FILE_MODE);
+    let stats = fstatSync(fd);
+    if (!stats.isFile()) throw new Error('opened path is not a regular file');
+    if (expectedFile && (stats.dev !== expectedFile.dev || stats.ino !== expectedFile.ino)) {
+      throw new Error('private file changed before it could be opened');
+    }
+    if (!expectedFile) fchmodSync(fd, PRIVATE_STATE_FILE_MODE);
+    stats = fstatSync(fd);
+    if ((Number(stats.mode) & 0o777) !== PRIVATE_STATE_FILE_MODE) throw new Error('opened file is not mode 0600');
+    ftruncateSync(fd, 0);
+    writeFileSync(fd, text, { encoding: 'utf-8' });
+    stats = fstatSync(fd);
+    if (!stats.isFile() || (Number(stats.mode) & 0o777) !== PRIVATE_STATE_FILE_MODE) {
+      throw new Error('written file is not a private regular file');
+    }
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
 function writePrivateJsonFile(path, value, fs, label) {
-  fs.mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  if (typeof fs.exists === 'function' && fs.exists(path)) enforcePrivateFilePermissions(path, fs, label);
-  fs.writeFile(path, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf-8', mode: PRIVATE_STATE_FILE_MODE });
-  enforcePrivateFilePermissions(path, fs, label);
+  ensurePrivateDirectory(dirname(path), fs, `${label} directory`);
+  if (typeof fs.lstat !== 'function') {
+    throw new Error(`Failed to verify private permissions on ${label} at ${path}: lstat is required.`);
+  }
+
+  let existing = null;
+  try {
+    existing = fs.lstat(path);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      throw new Error(`Failed to verify private permissions on ${label} at ${path}: lstat failed.`);
+    }
+  }
+  if (existing) {
+    if (existing?.isSymbolicLink?.() || !existing?.isFile?.()) {
+      throw new Error(`Failed to verify private permissions on ${label} at ${path}: refusing to write a symlink or non-file path.`);
+    }
+    // Existing artifacts must already be private. Never repair a shared path.
+    verifyPrivateReadPath(path, fs, label);
+  }
+  if (typeof fs.writeFileNoFollow !== 'function') {
+    throw privatePermissionEnforcementError({ label, path, action: 'atomic no-follow writer is not available from the fs dependency' });
+  }
+
+  try {
+    fs.writeFileNoFollow(path, `${JSON.stringify(value, null, 2)}\n`, {
+      expectedFile: existing ? { dev: existing.dev, ino: existing.ino } : null,
+    });
+  } catch {
+    throw privatePermissionEnforcementError({ label, path, action: 'atomic no-follow write failed' });
+  }
+  verifyPrivateReadPath(path, fs, label);
 }
 
 export function writeAiChatBrowserState(state, stateFile = DEFAULT_BROWSER_STATE_FILE, fs = defaultBrowserStateFs) {
@@ -510,7 +620,8 @@ async function finishAiChatBrowserSessionPreservingError(args, operationError = 
 }
 
 export function buildAiChatRequest(options = {}) {
-  const prompt = options.listModels
+  const prompt = options.listModels || options.listConversations
+    || (options.final && !hasPromptInput(options))
     || (options.attachConversation && !hasPromptInput(options))
     || (options.conversationTarget && !hasPromptInput(options))
     ? ''
@@ -521,6 +632,7 @@ export function buildAiChatRequest(options = {}) {
   return {
     providerName: options.providerName || 'grok',
     modelName: options.modelName || 'default',
+    modelExplicit: typeof options.modelExplicit === 'boolean' ? options.modelExplicit : (typeof options.modelName === 'string' && options.modelName !== 'default'),
     modelTask: options.modelTask || null,
     thinking: !!options.thinking,
     outFile: options.outFile || null,
@@ -534,12 +646,17 @@ export function buildAiChatRequest(options = {}) {
     timeoutExplicit,
     jsonOutput: !!options.jsonOutput,
     stream: !!options.stream,
+    submitOnly: !!options.submitOnly,
+    final: !!options.final,
     continueChat: !!options.continueChat,
     conversationTarget: options.conversationTarget || null,
     saveConversation: options.saveConversation || null,
     attachConversation: options.attachConversation || null,
     conversationStoreDir: options.conversationStoreDir || DEFAULT_CONVERSATION_STORE_DIR,
     listModels: !!options.listModels,
+    listConversations: !!options.listConversations,
+    conversationLimit: options.conversationLimit || 20,
+    hasPromptInput: hasPromptInput(options),
     verifyModels: !!options.verifyModels,
     verifyModelTimeoutSeconds: options.verifyModelTimeoutSeconds || 90,
     includeConversation: !!options.includeConversation,
@@ -583,13 +700,23 @@ const SECRET_PROVIDER_STATE_KEYS = new Set([
   'apikey',
   'auth_token',
   'authorization',
+  'aws_access_key_id',
   'cookie',
+  'google_access_id',
   'id_token',
   'password',
   'read_write_token',
   'refresh_token',
   'secret',
   'session_token',
+  'sig',
+  'signature',
+  'x_amz_credential',
+  'x_amz_security_token',
+  'x_amz_signature',
+  'x_goog_credential',
+  'x_goog_security_token',
+  'x_goog_signature',
 ]);
 
 function normalizedProviderStateKey(key) {
@@ -601,22 +728,38 @@ function normalizedProviderStateKey(key) {
 }
 
 function isSecretProviderStateKey(key) {
-  return SECRET_PROVIDER_STATE_KEYS.has(normalizedProviderStateKey(key));
+  const normalized = normalizedProviderStateKey(key);
+  if (normalized.startsWith('has_')) return false;
+  return SECRET_PROVIDER_STATE_KEYS.has(normalized)
+    || /(?:authorization|cookie|token|sentinel|conduit|turnstile|proof|resume|secret|credential|password|api_?key|signature|(?:aws|google)_?access_?key?_?id|(?:aws|google)_?access_?id|x_?(?:amz|goog)_?(?:credential|security_?token|signature))/i.test(String(key || ''));
 }
 
 function secretPresenceKey(key) {
   return `has_${normalizedProviderStateKey(key) || 'secret'}`;
 }
 
-function sanitizeProviderStateValue(value) {
-  if (!value || typeof value !== 'object') return value;
-  if (Array.isArray(value)) return value.map(item => sanitizeProviderStateValue(item));
+const SENSITIVE_STRING_KEY = '(?:[a-z0-9_-]*(?:auth(?:orization)?|session|cookie|token|secret|credential|password|signature)[a-z0-9_-]*|(?:[a-z0-9_-]*(?:api|access)[_-]?key[a-z0-9_-]*)|sig|(?:aws|google)[_-]?access[_-]?(?:key[_-]?)?id|x[-_]?(?:amz|goog)[-_]?(?:credential|security[-_]?token|signature))';
+
+function sanitizeProviderString(value) {
+  const sensitiveKey = new RegExp(`((?:["']${SENSITIVE_STRING_KEY}["'])\\s*:\\s*["'])([^"']*)(["'])`, 'gi');
+  const assignment = new RegExp(`((?:${SENSITIVE_STRING_KEY})\\s*[=:]\\s*)([^\\s,;?&#}\\]]+)`, 'gi');
+  const query = new RegExp(`([?&]${SENSITIVE_STRING_KEY}=)[^&#\\s"']+`, 'gi');
+  return String(value)
+    .replace(/(Bearer\s+)[^\s,;]+/gi, '$1[redacted]')
+    .replace(sensitiveKey, '$1[redacted]$3')
+    .replace(assignment, '$1[redacted]')
+    .replace(query, '$1[redacted]');
+}
+
+function sanitizeProviderStateValue(value, sanitizeStrings = false) {
+  if (!value || typeof value !== 'object') return sanitizeStrings && typeof value === 'string' ? sanitizeProviderString(value) : value;
+  if (Array.isArray(value)) return value.map(item => sanitizeProviderStateValue(item, sanitizeStrings));
   const safe = {};
   for (const [key, item] of Object.entries(value)) {
     if (isSecretProviderStateKey(key)) {
       safe[secretPresenceKey(key)] = Boolean(item);
     } else {
-      safe[key] = sanitizeProviderStateValue(item);
+      safe[key] = sanitizeProviderStateValue(item, sanitizeStrings);
     }
   }
   return safe;
@@ -624,11 +767,114 @@ function sanitizeProviderStateValue(value) {
 
 export function sanitizeProviderStateForOutput(provider, providerState) {
   if (!providerState || typeof providerState !== 'object' || Array.isArray(providerState)) return providerState || null;
-  const safeState = sanitizeProviderStateValue(providerState);
+  const safeState = sanitizeProviderStateValue(providerState, provider === 'chatgpt');
   if (isPerplexityProvider(provider) && Object.prototype.hasOwnProperty.call(providerState, 'read_write_token')) {
     safeState.has_read_write_token = Boolean(providerState.read_write_token || safeState.has_read_write_token);
   }
   return safeState;
+}
+
+// ChatGPT's streaming transport sees provider data which must never become a
+// public event verbatim. Keep this deliberately recursive so new nested
+// transport fields default to the same treatment as existing provider state.
+export function sanitizeChatGptStreamValue(value, key = '') {
+  if (isSecretProviderStateKey(key)) return '[redacted]';
+  if (Array.isArray(value)) return value.map(item => sanitizeChatGptStreamValue(item));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([itemKey, item]) => [
+      itemKey,
+      sanitizeChatGptStreamValue(item, itemKey),
+    ]));
+  }
+  if (typeof value !== 'string') return value;
+  return sanitizeProviderString(value);
+}
+
+function sanitizeChatGptStreamErrorMessage(value) {
+  return sanitizeChatGptStreamValue(String(value || 'ChatGPT stream failed'))
+    .replace(/\b[A-Za-z0-9_-]*(?:secret|token|password|api[_-]?key)[A-Za-z0-9_-]*\b/gi, '[redacted]');
+}
+
+function safeChatGptStreamErrorCode(value) {
+  const code = String(value || '');
+  return /^[a-z][a-z0-9_]{0,63}$/i.test(code) && !/(?:token|secret|password|cookie|auth|api_?key|credential)/i.test(code)
+    ? code
+    : 'chatgpt_stream_error';
+}
+
+function isChatGptNdjsonStream(provider, request) {
+  return !!request?.stream && provider?.capabilities?.streamFormat === 'ndjson';
+}
+
+export function createChatGptStreamEmitter({ io = defaultIo, now = () => new Date().toISOString(), outFile = null } = {}) {
+  const eventNames = new Set(['session', 'status', 'delta', 'message', 'complete', 'timeout', 'error']);
+  const sources = new Set(['live-cdp', 'provider-snapshot']);
+  let sequence = 0;
+  let terminal = false;
+  let conversationId = null;
+  const write = (event, payload = {}, { terminalEvent = false } = {}) => {
+    if (terminal || (terminalEvent && terminal)) return null;
+    if (!eventNames.has(event)) {
+      return write('error', { code: 'invalid_stream_event', message: 'Invalid internal ChatGPT stream event.', source: 'provider-snapshot' }, { terminalEvent: true });
+    }
+    const safe = sanitizeChatGptStreamValue(payload);
+    const candidateId = safe.provider_conversation_id || safe.providerConversationId || conversationId || null;
+    const { event: _event, provider: _provider, provider_conversation_id: _providerConversationId, providerConversationId: _providerConversationIdAlias, sequence: _sequence, captured_at: _capturedAt, source: suppliedSource, ...content } = safe;
+    const line = {
+      ...content,
+      source: sources.has(suppliedSource) ? suppliedSource : 'provider-snapshot',
+      captured_at: now(),
+      sequence: sequence + 1,
+      provider_conversation_id: candidateId,
+      provider: 'chatgpt',
+      event,
+    };
+    const serialized = JSON.stringify(line);
+    if (outFile) {
+      try {
+        io.appendPrivateStreamFile(outFile, `${serialized}\n`);
+      } catch {
+        outFile = null;
+        const safe = new Error('Failed to append the requested private NDJSON transcript.');
+        safe.code = 'stream_file_error';
+        throw safe;
+      }
+    }
+    sequence += 1;
+    if (candidateId) conversationId = candidateId;
+    io.stdout(serialized);
+    if (terminalEvent) terminal = true;
+    return line;
+  };
+  const emitProgress = (event, payload = {}) => {
+    if (!['session', 'status', 'delta', 'message'].includes(event)) {
+      write('error', { code: 'invalid_stream_progress_event', message: 'Invalid provider ChatGPT stream progress event.', source: payload?.source }, { terminalEvent: true });
+      throw new Error('Invalid provider ChatGPT stream progress event.');
+    }
+    return write(event, payload);
+  };
+  const emitTerminal = (event, payload = {}) => {
+    if (!['complete', 'timeout', 'error'].includes(event)) throw new Error('Invalid internal ChatGPT stream terminal event.');
+    return write(event, payload, { terminalEvent: true });
+  };
+  return { emit: emitProgress, emitProgress, emitTerminal, get terminal() { return terminal; } };
+}
+
+function chatGptTerminalEvent(result, metadata, source) {
+  const providerState = sanitizeProviderStateForOutput('chatgpt', result?.providerState || metadata?.provider_state || null);
+  const structuredTurn = providerState?.structured_turn || null;
+  const common = {
+    source,
+    provider_conversation_id: result?.providerConversationId || providerState?.conversation_id || metadata?.provider_conversation_id || null,
+    response: sanitizeChatGptStreamValue(result?.text || ''),
+    turn: sanitizeChatGptStreamValue(structuredTurn),
+    provider_state: providerState,
+    model: result?.modelUsed || metadata?.model || null,
+    effort: providerState?.thinking_effort || null,
+    url: sanitizeConversationUrlForOutput(result?.finalUrl || metadata?.final_url || null),
+  };
+  if (result?.done) return { event: 'complete', payload: { ...common, complete: true, status: 'complete' } };
+  return { event: 'timeout', payload: { ...common, complete: false, status: 'in_progress' } };
 }
 
 const SAFE_ATTACHMENT_METADATA_KEYS = new Set([
@@ -675,7 +921,7 @@ function privateProviderStateForConversation(provider, result) {
 }
 
 function isSecretUrlParam(name) {
-  return /(token|secret|session|auth|password|api[_-]?key|apikey)/i.test(String(name || ''));
+  return isSecretProviderStateKey(name);
 }
 
 export function sanitizeConversationUrlForOutput(url) {
@@ -701,12 +947,15 @@ function attachPrivateProviderState(result, privateProviderState) {
   return result;
 }
 
-function publicProviderResult(result) {
-  return { ...result };
+function publicProviderResult(provider, result) {
+  if (provider?.name !== 'chatgpt') return { ...result };
+  return sanitizeChatGptStreamValue({ ...result });
 }
 
 export function buildMetadata({ request, provider, result, fallbackFrom, fallbackTrail, conversation }) {
-  const text = result.text || '';
+  const isChatGpt = provider.name === 'chatgpt';
+  const publicValue = value => isChatGpt ? sanitizeChatGptStreamValue(value) : value;
+  const text = publicValue(result.text || '');
   const safeFinalUrl = sanitizeConversationUrlForOutput(result.finalUrl || null);
   const safeConversationUrl = sanitizeConversationUrlForOutput(result.finalUrl || conversation?.url || null);
   const previousMessages = Array.isArray(conversation?.record?.messages) ? conversation.record.messages : [];
@@ -718,10 +967,10 @@ export function buildMetadata({ request, provider, result, fallbackFrom, fallbac
   const modelFallbackReason = result.modelFallbackReason || providerState?.model_fallback_reason || (fallbackFrom ? 'rate_limited' : null);
   const conversationMessages = [
     ...previousMessages,
-    ...(request.prompt ? [{ role: 'user', content: request.prompt }] : []),
+    ...(request.prompt ? [{ role: 'user', content: publicValue(request.prompt) }] : []),
     { role: 'assistant', content: text },
   ];
-  return {
+  const metadata = {
     provider: provider.name,
     model: result.modelUsed,
     selected_model: result.modelUsed,
@@ -734,9 +983,11 @@ export function buildMetadata({ request, provider, result, fallbackFrom, fallbac
     prompt_chars: request.prompt.length,
     response_chars: text.length,
     complete: !!result.done,
+    status: result.status || (result.done ? 'complete' : 'in_progress'),
     rate_limited: !!result.rateLimited,
     final_url: safeFinalUrl,
     conversation_id: conversation?.id || request.saveConversation || null,
+    provider_conversation_id: result.providerConversationId || providerState?.conversation_id || null,
     conversation_url: safeConversationUrl,
     provider_state: providerState,
     search_results: searchResults,
@@ -744,30 +995,69 @@ export function buildMetadata({ request, provider, result, fallbackFrom, fallbac
     ...(attachments.length ? { attachments } : {}),
     evidence_path: result.evidencePath || null,
     evidence_url: result.evidenceUrl || null,
-    conversation_messages: request.includeConversation ? conversationMessages : undefined,
+    conversation_messages: request.includeConversation ? publicValue(conversationMessages) : undefined,
     conversation_message_count: conversationMessages.length,
     captured_at: new Date().toISOString(),
     continue_chat: request.continueChat,
-    prompt: request.prompt,
+    prompt: publicValue(request.prompt),
     cache_hit: false,
   };
+  return publicValue(metadata);
 }
 
 export function buildOutput({ request, metadata, text }) {
+  const isChatGpt = metadata.provider === 'chatgpt';
+  const publicValue = value => isChatGpt ? sanitizeChatGptStreamValue(value) : value;
+  const submitOnlyText = publicValue(request.submitOnly ? (metadata.provider_conversation_id || text) : text);
+  const safeMetadata = publicValue(metadata);
   if (request.jsonOutput) {
     return {
       extension: 'json',
-      text: JSON.stringify({ ...metadata, response: text }, null, 2),
+      text: JSON.stringify({
+        ...safeMetadata,
+        ...(isChatGpt ? {
+          thinking_effort: safeMetadata.provider_state?.thinking_effort || null,
+          turn: safeMetadata.provider_state?.structured_turn || null,
+        } : {}),
+        response: submitOnlyText,
+      }, null, 2),
     };
   }
 
-  return { extension: 'md', text };
+  return { extension: 'md', text: submitOnlyText };
+}
+
+function nativeLstat(path) {
+  try { return lstatSync(path); } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function ensureNativePrivateDirectory(path, label) {
+  const existing = nativeLstat(path);
+  if (existing) {
+    if (existing.isSymbolicLink() || !existing.isDirectory() || (existing.mode & 0o777) !== 0o700) throw new Error(`Failed to verify private permissions on ${label} at ${path}: existing directory must already have mode 0700 and be a real directory.`);
+    return;
+  }
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  const created = nativeLstat(path);
+  if (!created || created.isSymbolicLink() || !created.isDirectory()) throw new Error(`Failed to verify private permissions on ${label} at ${path}: newly created directory must be a real directory with mode 0700.`);
+  chmodSync(path, 0o700);
+  if ((nativeLstat(path).mode & 0o777) !== 0o700) throw new Error(`Failed to verify private permissions on ${label} at ${path}: newly created directory must have mode 0700.`);
 }
 
 function writePrivateArtifact(path, text, encoding = 'utf-8') {
-  if (existsSync(path)) chmodSync(path, PRIVATE_STATE_FILE_MODE);
+  ensureNativePrivateDirectory(dirname(path), 'private output directory');
+  const existing = nativeLstat(path);
+  if (existing) {
+    if (existing.isSymbolicLink() || !existing.isFile()) throw new Error(`Failed to verify private permissions on private output at ${path}: refusing to write a symlink or non-file path.`);
+    chmodSync(path, PRIVATE_STATE_FILE_MODE);
+  }
+  // lstat above establishes that an existing target is a regular non-symlink.
   writeFileSync(path, text, { encoding, mode: PRIVATE_STATE_FILE_MODE });
-  chmodSync(path, PRIVATE_STATE_FILE_MODE);
+  const written = nativeLstat(path);
+  if (!written || written.isSymbolicLink() || !written.isFile() || (written.mode & 0o777) !== PRIVATE_STATE_FILE_MODE) throw new Error(`Failed to verify private permissions on private output at ${path}.`);
 }
 
 export function saveSidecarArtifacts(baseOutFile, metadata, rawText) {
@@ -908,6 +1198,11 @@ export function attachConversationReference(request, provider, fs = defaultFs) {
 export function resolveConversationReference(request, fs = defaultFs, provider = null) {
   const target = request.conversationTarget;
   if (!target) return null;
+  if (provider?.capabilities?.localConversationState === false) {
+    const attachment = resolveConversationAttachment(provider, target);
+    if (!attachment.provider_id || !attachment.url) throw new Error(`[${provider.name}] Invalid provider conversation id.`);
+    return { id: null, url: attachment.url, providerId: attachment.provider_id, providerState: attachment.provider_state, source: 'provider' };
+  }
   if (isHttpUrl(target)) {
     if (provider) validateConversationUrlForProvider(provider, target, { optionName: '--conversation' });
     const attachment = provider ? resolveConversationAttachment(provider, target) : null;
@@ -921,6 +1216,7 @@ export function resolveConversationReference(request, fs = defaultFs, provider =
 
   const path = conversationRecordPath({ providerName: request.providerName, id: target, storeDir: request.conversationStoreDir });
   if (!fs.exists(path)) throw new Error(`Conversation not found: ${target}`);
+  verifyPrivateReadPath(path, fs, 'AI Chat conversation record');
   const record = JSON.parse(fs.readFile(path, 'utf-8'));
   if (!record.final_url && !record.conversation_url && !record.provider_state) throw new Error(`Conversation record has no URL or provider state: ${target}`);
   return { id: target, url: record.final_url || record.conversation_url || null, source: path, record };
@@ -936,6 +1232,7 @@ function providerStateForConversationRecord(provider, result, conversation = nul
 }
 
 export function saveConversationReference(request, provider, result, metadata, fs = defaultFs, conversation = null) {
+  if (provider?.capabilities?.localConversationState === false) return null;
   const conversationId = request.saveConversation || conversation?.id;
   if (!conversationId) return null;
   const path = conversationRecordPath({ providerName: provider.name, id: conversationId, storeDir: request.conversationStoreDir });
@@ -1027,27 +1324,25 @@ export async function captureEvidenceScreenshot({ browser, provider, result, req
   if (!request?.captureEvidence) return null;
 
   const targetUrl = result?.finalUrl || result?.pageUrl || null;
-  if (!browser) {
-    return {
-      skipped: true,
-      reason: 'browser-unavailable',
-      warning: '[evidence] Skipped screenshot evidence: browser is not available for this provider transport.',
-      targetUrl,
-    };
-  }
-  if (!targetUrl) {
-    return {
-      skipped: true,
-      reason: 'missing-final-url',
-      warning: '[evidence] Skipped screenshot evidence: provider result did not include a final URL.',
-      targetUrl,
-    };
-  }
+  if (!browser) return { skipped: true, reason: 'browser-unavailable', warning: '[evidence] Skipped screenshot evidence: browser is not available for this provider transport.', targetUrl };
+  if (!targetUrl) return { skipped: true, reason: 'missing-final-url', warning: '[evidence] Skipped screenshot evidence: provider result did not include a final URL.', targetUrl };
 
-  const path = request.evidencePath || timestampedTmpPath(`ai-chat-${provider?.name || 'provider'}-evidence`, 'png');
-  fs.mkdir(dirname(path), { recursive: true });
+  const requestedPath = request.evidencePath || timestampedTmpPath(`ai-chat-${provider?.name || 'provider'}-evidence`, 'png');
+  // Default output gets a dedicated child directory. An explicit parent is never
+  // chmodded because it may be shared; it must already be private.
+  const path = request.evidencePath ? requestedPath : join(dirname(requestedPath), '.ai-chat-evidence', basename(requestedPath));
+  const evidenceDir = dirname(path);
+  ensurePrivateDirectory(evidenceDir, fs, 'screenshot evidence directory');
+  let existingEvidence = null;
+  try { existingEvidence = fs.lstat(path); } catch { /* lstat establishes that no file exists before creation. */ }
+  if (existingEvidence) enforcePrivateFilePermissions(path, fs, 'screenshot evidence');
+  else {
+    fs.writeFile(path, '', { encoding: 'utf-8', mode: PRIVATE_STATE_FILE_MODE });
+    enforcePrivateFilePermissions(path, fs, 'screenshot evidence');
+  }
   const page = await selectEvidencePage({ browser, targetUrl });
   await page.screenshot({ path, fullPage: !!request.evidenceFullPage });
+  enforcePrivateFilePermissions(path, fs, 'screenshot evidence');
   return { path, url: page.url(), targetUrl };
 }
 
@@ -1106,7 +1401,7 @@ export function buildCachedResponse({ request, cached, conversation = null }) {
   };
 }
 
-export function emitCachedResponse({ request, cached, io = defaultIo, metadata = null, result = null }) {
+export function emitCachedResponse({ request, cached, io = defaultIo, metadata = null, result = null, provider = null }) {
   const response = metadata && result ? { metadata, result } : buildCachedResponse({ request, cached });
   const outputText = request.jsonOutput
     ? buildOutput({ request, metadata: response.metadata, text: response.result.text }).text
@@ -1120,7 +1415,7 @@ export function emitCachedResponse({ request, cached, io = defaultIo, metadata =
     io,
   });
 
-  return { source: 'cache', metadata: response.metadata, result: publicProviderResult(response.result), output: outputText };
+  return { source: 'cache', metadata: response.metadata, result: publicProviderResult(provider || { name: response.metadata.provider || request.providerName }, response.result), output: outputText };
 }
 
 export async function runPromptAttempt({ browser, provider, request, selectedModel, conversation = null }) {
@@ -1132,7 +1427,7 @@ export async function runPromptAttempt({ browser, provider, request, selectedMod
       validateConversationUrlForProvider(provider, request.conversationTarget, { optionName: '--conversation' });
     }
     console.error(`[${provider.name}] Running provider transport: ${provider.transport || 'direct'}`);
-    const result = await provider.run({ browser, request, selectedModel, conversation });
+    const result = await provider.run({ browser, request, selectedModel, conversation, onStreamEvent: request.onStreamEvent });
     const normalized = normalizeProviderResult({ result, page: null, provider, request, selectedModel });
     if (normalized.rateLimited) {
       console.error(`[${provider.name}] Rate limit detected for model: ${selectedModel}`);
@@ -1159,16 +1454,18 @@ export async function runPromptAttempt({ browser, provider, request, selectedMod
       page = await provider.findPage({ browser, continueChat: request.continueChat, request });
     }
     console.error(`[${provider.name}] Page ready: ${page.url()}`);
-    await provider.preflight?.({ browser, page, request, selectedModel, conversation });
+    const preflightContext = await provider.preflight?.({ browser, page, request, selectedModel, conversation }) || null;
 
-    attemptContext = await provider.createAttemptContext?.({ browser, page, request, selectedModel, conversation }) || null;
+    attemptContext = await provider.createAttemptContext?.({ browser, page, request, selectedModel, conversation, preflightContext, onStreamEvent: request.onStreamEvent }) || null;
 
-    if (selectedModel !== 'default') {
+    if (selectedModel !== 'default' && provider.shouldSetModel?.({ request, conversation, selectedModel }) !== false) {
       console.error(`[${provider.name}] Setting model: ${selectedModel}`);
       await provider.setModel({ page, model: selectedModel, thinking: request.thinking, request, selectedModel });
     }
 
-    const preSubmitLen = await page.evaluate(() => document.body.innerText.length);
+    const preSubmitLen = provider.capabilities?.requiresPreSubmitTextRead === false
+      ? null
+      : await page.evaluate(() => document.body.innerText.length);
 
     await provider.clearInput({ page, request });
     console.error(`[${provider.name}] Typing ${request.prompt.length} chars...`);
@@ -1195,6 +1492,7 @@ export async function runPromptAttempt({ browser, provider, request, selectedMod
       prompt: request.prompt,
       selectedModel,
       request,
+      onStreamEvent: request.onStreamEvent,
     });
 
     let normalized = normalizeProviderResult({ result, page, provider, request, selectedModel });
@@ -1248,6 +1546,8 @@ export function normalizeProviderResult({ result, page, provider, request, selec
     attachments: sanitizeAttachmentMetadata(result?.attachments || providerState?.attachments || []),
     evidencePath: result?.evidencePath || null,
     evidenceUrl: result?.evidenceUrl || null,
+    providerConversationId: result?.providerConversationId || result?.provider_conversation_id || providerState?.conversation_id || null,
+    status: result?.status || (result?.done ? 'complete' : null),
   };
 
   return attachPrivateProviderState(normalized, privateProviderStateForConversation(provider, result));
@@ -1260,6 +1560,7 @@ function savedConversationModel(conversation = null) {
 }
 
 export function resolveInitialModel(provider, request, conversation = null) {
+  if (provider?.preserveContinuationModel?.({ request, conversation })) return 'default';
   if (request.modelName && request.modelName !== 'default') return request.modelName;
   if (request.modelTask && provider.taskModels?.[request.modelTask]) return provider.taskModels[request.modelTask];
   const conversationModel = savedConversationModel(conversation);
@@ -1303,8 +1604,47 @@ function requestHasFileAttachments(request = {}) {
   return !!files;
 }
 
-function requestBypassesCache(request = {}) {
-  return !!request.stream || !!request.providerOptions?.incognito || requestHasFileAttachments(request);
+function requestBypassesCache(request = {}, provider = null) {
+  // Cached public metadata intentionally excludes private continuation state. A save
+  // must therefore run live so it cannot replace a private record from cached state.
+  return provider?.capabilities?.cachePolicy === 'none' || !!request.stream || !!request.submitOnly || !!request.final || !!request.saveConversation || !!request.providerOptions?.incognito || requestHasFileAttachments(request);
+}
+
+export function aiChatResultExitCode(request, result) {
+  if (request?.stream && result?.provider?.capabilities?.streamFormat === 'ndjson') return result?.metadata?.complete ? 0 : 1;
+  return request?.final && result?.metadata?.complete === false ? 1 : 0;
+}
+
+function validateProviderRequest(provider, request) {
+  const caps = provider?.capabilities || {};
+  if (request.listConversations) {
+    if (!caps.supportsConversationListing) throw new Error(`[${provider.name}] --list-conversations is not supported by this provider.`);
+    if (!Number.isInteger(request.conversationLimit) || request.conversationLimit < 1 || request.conversationLimit > 100) throw new Error('--conversation-limit must be between 1 and 100');
+    if (request.hasPromptInput || request.conversationTarget || request.submitOnly || request.final || request.stream || request.listModels || request.saveConversation || request.attachConversation) {
+      throw new Error('--list-conversations conflicts with prompt, conversation, submit, final, stream, models, save, and attach options.');
+    }
+  }
+  if (request.listModels && (request.hasPromptInput || request.conversationTarget || request.submitOnly || request.final || request.stream || request.listConversations || request.saveConversation || request.attachConversation)) {
+    throw new Error('--list-models conflicts with prompt, conversation, submit, final, stream, list-conversations, save, and attach options.');
+  }
+  if (request.submitOnly && !request.prompt) throw new Error('--submit-only requires --prompt');
+  if (request.submitOnly && (request.final || request.stream)) throw new Error('--submit-only conflicts with --final and --stream');
+  if (request.final && request.prompt) throw new Error('--final cannot be used with --prompt');
+  if (request.final && !request.conversationTarget) throw new Error('--final requires --conversation <provider-id-or-url>');
+  if (request.stream && caps.streamFormat === 'ndjson' && !request.prompt && !request.conversationTarget) {
+    throw new Error('[chatgpt] --stream requires --prompt or --conversation <provider-id-or-url>.');
+  }
+  if (request.submitOnly && !caps.supportsSubmitOnly) throw new Error(`[${provider.name}] --submit-only is not supported by this provider.`);
+  if (request.final && !caps.supportsFinal) throw new Error(`[${provider.name}] --final is not supported by this provider.`);
+  if (caps.localConversationState === false && (request.saveConversation || request.attachConversation)) {
+    throw new Error(`[${provider.name}] --save-conversation and --attach-conversation are not supported; use the provider conversation id directly.`);
+  }
+  if (caps.localConversationState === false && request.providerOptions?.incognito && (request.submitOnly || request.final || request.conversationTarget)) {
+    throw new Error(`[${provider.name}] temporary chats cannot be used with detached submission or retrieval.`);
+  }
+  if (isPerplexityProvider(provider) && request.providerOptions?.incognito && (request.conversationTarget || request.attachConversation)) {
+    throw new Error('[perplexity] --incognito cannot continue or attach an existing conversation. Start a new Incognito query without --conversation or --attach-conversation.');
+  }
 }
 
 function browserRequestForProvider(request, provider) {
@@ -1324,6 +1664,53 @@ export async function runAiChat(request, deps = {}) {
   const cache = deps.cache || defaultCache;
   const io = deps.io || defaultIo;
   const fs = deps.fs || defaultFs;
+  let streamEmitter = null;
+  const emitStreamError = (error, source = request.prompt ? 'live-cdp' : 'provider-snapshot') => {
+    if (!streamEmitter) return error;
+    const safe = new Error(sanitizeChatGptStreamErrorMessage(error?.message));
+    safe.code = safeChatGptStreamErrorCode(error?.code);
+    streamEmitter.emitTerminal('error', { source, complete: false, code: safe.code, message: safe.message });
+    return safe;
+  };
+  try {
+    if (request.conversationTarget && isHttpUrl(request.conversationTarget)) {
+      validateConversationUrlForProvider(provider, request.conversationTarget, { optionName: '--conversation' });
+    }
+    if (request.attachConversation && isHttpUrl(request.attachConversation)) {
+      validateConversationUrlForProvider(provider, request.attachConversation, { optionName: '--attach-conversation' });
+    }
+    validateProviderRequest(provider, request);
+  } catch (error) {
+    if (!streamEmitter && isChatGptNdjsonStream(provider, request)) streamEmitter = createChatGptStreamEmitter({ io });
+    throw emitStreamError(error, 'provider-snapshot');
+  }
+
+  if (isChatGptNdjsonStream(provider, request)) {
+    try {
+      if (request.outFile) io.initializePrivateStreamFile(request.outFile);
+      streamEmitter = createChatGptStreamEmitter({ io, outFile: request.outFile });
+    } catch (error) {
+      // stdout remains a valid one-terminal-event NDJSON stream even when the optional transcript cannot be initialized.
+      streamEmitter = createChatGptStreamEmitter({ io });
+      streamEmitter.emitTerminal('error', { source: request.prompt ? 'live-cdp' : 'provider-snapshot', complete: false, code: 'stream_file_error', message: sanitizeChatGptStreamErrorMessage(error.message) });
+      return { source: 'stream-file-error', provider, metadata: { complete: false }, result: { text: '', done: false }, output: '' };
+    }
+  }
+
+  if (request.listConversations) {
+    let browser = null;
+    let browserSession = null;
+    try {
+      browserSession = await ensureAiChatBrowserSession(browserRequestForProvider(request, provider), deps);
+      browser = browserSession.browser;
+      const listing = await provider.listConversations({ browser, request: browserSession.request });
+      const output = JSON.stringify(listing, null, 2);
+      emitOutput({ request: { ...browserSession.request, jsonOutput: true }, outputText: output, metadata: listing, rawText: output, io });
+      return { source: 'provider-list', provider, metadata: listing, result: { text: output, done: true }, output };
+    } finally {
+      if (browserSession?.shouldDisconnect) browser?.disconnect();
+    }
+  }
 
   if (request.listModels) {
     let browser = null;
@@ -1364,11 +1751,21 @@ export async function runAiChat(request, deps = {}) {
     }
   }
 
-  const attachedConversation = request.attachConversation ? attachConversationReference(request, provider, fs) : null;
+  let attachedConversation;
+  try {
+    attachedConversation = request.attachConversation ? attachConversationReference(request, provider, fs) : null;
+  } catch (error) {
+    throw emitStreamError(error, 'provider-snapshot');
+  }
   if (request.conversationTarget && isHttpUrl(request.conversationTarget)) {
     validateConversationUrlForProvider(provider, request.conversationTarget, { optionName: '--conversation' });
   }
-  const conversation = deps.conversation || attachedConversation?.conversation || resolveConversationReference(request, fs, provider);
+  let conversation;
+  try {
+    conversation = deps.conversation || attachedConversation?.conversation || resolveConversationReference(request, fs, provider);
+  } catch (error) {
+    throw emitStreamError(error, 'provider-snapshot');
+  }
 
   if (request.attachConversation && !request.prompt) {
     const metadata = {
@@ -1384,7 +1781,6 @@ export async function runAiChat(request, deps = {}) {
       conversation_id: request.saveConversation,
       conversation_url: sanitizeConversationUrlForOutput(conversation?.record?.conversation_url || null),
       provider_state: sanitizeProviderStateForOutput(provider, conversation?.record?.provider_state || null),
-      conversation_record_path: attachedConversation.path,
       attached: true,
       captured_at: conversation?.record?.captured_at || new Date().toISOString(),
       cache_hit: false,
@@ -1401,13 +1797,12 @@ export async function runAiChat(request, deps = {}) {
   }
 
   const cacheInput = buildCacheInput(request);
-  const useCache = !request.captureEvidence && !!request.prompt && !requestBypassesCache(request);
+  const useCache = !request.captureEvidence && !!request.prompt && !requestBypassesCache(request, provider);
   const cached = useCache ? cache.read('ai-chat', cacheInput) : null;
   if (cached) {
     const cachedResponse = buildCachedResponse({ request, cached, conversation });
-    const savedConversation = saveConversationReference(request, provider, cachedResponse.result, cachedResponse.metadata, fs, conversation);
-    if (savedConversation) cachedResponse.metadata.conversation_record_path = savedConversation.path;
-    return emitCachedResponse({ request, cached, io, ...cachedResponse });
+    saveConversationReference(request, provider, cachedResponse.result, cachedResponse.metadata, fs, conversation);
+    return emitCachedResponse({ request, cached, io, provider, ...cachedResponse });
   }
 
   const needsBrowser = provider.runRequiresBrowser
@@ -1415,12 +1810,16 @@ export async function runAiChat(request, deps = {}) {
     : true;
   let browserSession = null;
   let browser = null;
-  let activeRequest = request;
+  let activeRequest = streamEmitter ? { ...request, onStreamEvent: event => streamEmitter.emitProgress(event.event, event) } : request;
   let operationError = null;
-  if (needsBrowser) {
-    browserSession = await ensureAiChatBrowserSession(browserRequestForProvider(request, provider), deps);
-    browser = browserSession.browser;
-    activeRequest = browserSession.request;
+  try {
+    if (needsBrowser) {
+      browserSession = await ensureAiChatBrowserSession(browserRequestForProvider(activeRequest, provider), deps);
+      browser = browserSession.browser;
+      activeRequest = streamEmitter ? { ...browserSession.request, onStreamEvent: event => streamEmitter.emitProgress(event.event, event) } : browserSession.request;
+    }
+  } catch (error) {
+    throw emitStreamError(error, activeRequest.prompt ? 'live-cdp' : 'provider-snapshot');
   }
 
   try {
@@ -1428,7 +1827,7 @@ export async function runAiChat(request, deps = {}) {
       const selectedModel = resolveInitialModel(provider, activeRequest, conversation);
       console.error(`[${provider.name}] Rechecking saved conversation: ${conversation.id || sanitizeConversationUrlForOutput(conversation.url) || 'provider-state'}`);
       const result = normalizeProviderResult({
-        result: await provider.recheckConversation({ browser, request: activeRequest, selectedModel, conversation }),
+        result: await provider.recheckConversation({ browser, request: activeRequest, selectedModel, conversation, onStreamEvent: activeRequest.onStreamEvent }),
         page: null,
         provider,
         request: activeRequest,
@@ -1450,12 +1849,14 @@ export async function runAiChat(request, deps = {}) {
         result.evidencePath = evidence.path;
         result.evidenceUrl = evidence.url;
       }
-      const savedConversation = saveConversationReference(activeRequest, provider, result, metadata, fs, conversation);
-      if (savedConversation) metadata.conversation_record_path = savedConversation.path;
+      saveConversationReference(activeRequest, provider, result, metadata, fs, conversation);
       const finalOutput = buildOutput({ request: activeRequest, metadata, text: result.text });
-      emitOutput({ request: activeRequest, outputText: finalOutput.text, metadata, rawText: result.rawText, io });
+      if (streamEmitter) {
+        const terminal = chatGptTerminalEvent(result, metadata, 'provider-snapshot');
+        streamEmitter.emitTerminal(terminal.event, terminal.payload);
+      } else emitOutput({ request: activeRequest, outputText: finalOutput.text, metadata, rawText: result.rawText, io });
       if (activeRequest.outFile) console.error(`[${provider.name}] Saved to ${activeRequest.outFile}`);
-      return { source: 'recheck', provider, result: publicProviderResult(result), metadata, output: finalOutput.text };
+      return { source: 'recheck', provider, result: publicProviderResult(provider, result), metadata, output: finalOutput.text };
     }
 
     const { result, fallbackFrom, fallbackTrail } = await runWithFallbacks({ browser, provider, request: activeRequest, conversation });
@@ -1487,17 +1888,19 @@ export async function runAiChat(request, deps = {}) {
       if (cacheWrite) metadata.cache_key = cacheWrite.key;
     }
 
-    const savedConversation = saveConversationReference(activeRequest, provider, result, metadata, fs, conversation);
-    if (savedConversation) metadata.conversation_record_path = savedConversation.path;
+    saveConversationReference(activeRequest, provider, result, metadata, fs, conversation);
 
     const finalOutput = buildOutput({ request: activeRequest, metadata, text: result.text });
-    emitOutput({ request: activeRequest, outputText: finalOutput.text, metadata, rawText: result.rawText, io });
+    if (streamEmitter) {
+      const terminal = chatGptTerminalEvent(result, metadata, 'live-cdp');
+      streamEmitter.emitTerminal(terminal.event, terminal.payload);
+    } else emitOutput({ request: activeRequest, outputText: finalOutput.text, metadata, rawText: result.rawText, io });
     if (activeRequest.outFile) console.error(`[${provider.name}] Saved to ${activeRequest.outFile}`);
 
-    return { source: 'live', provider, result: publicProviderResult(result), metadata, output: finalOutput.text };
+    return { source: 'live', provider, result: publicProviderResult(provider, result), metadata, output: finalOutput.text };
   } catch (error) {
-    operationError = error;
-    throw error;
+    operationError = emitStreamError(error, activeRequest.prompt ? 'live-cdp' : 'provider-snapshot');
+    throw operationError;
   } finally {
     await finishAiChatBrowserSessionPreservingError({ browserSession, browser, provider, request: activeRequest, deps }, operationError);
   }
@@ -1509,6 +1912,20 @@ export const defaultIo = {
   },
   writeFile(path, text, encoding = 'utf-8') {
     writePrivateArtifact(path, text, encoding);
+  },
+  initializePrivateStreamFile(path) {
+    ensureNativePrivateDirectory(dirname(path), 'ChatGPT NDJSON transcript directory');
+    const existing = nativeLstat(path);
+    if (existing) enforcePrivateFilePermissions(path, defaultFs, 'ChatGPT NDJSON transcript');
+    // lstat above establishes absence or a regular non-symlink before truncation.
+    writeFileSync(path, '', { encoding: 'utf-8', mode: PRIVATE_STATE_FILE_MODE });
+    enforcePrivateFilePermissions(path, defaultFs, 'ChatGPT NDJSON transcript');
+  },
+  appendPrivateStreamFile(path, text) {
+    // writeFile with append mode would weaken test injection; use the native append flag and verify mode.
+    enforcePrivateFilePermissions(path, defaultFs, 'ChatGPT NDJSON transcript');
+    writeFileSync(path, text, { encoding: 'utf-8', flag: 'a', mode: PRIVATE_STATE_FILE_MODE });
+    enforcePrivateFilePermissions(path, defaultFs, 'ChatGPT NDJSON transcript');
   },
 };
 
@@ -1522,8 +1939,10 @@ export const defaultFs = {
   mkdir: mkdirSync,
   readFile: readFileSync,
   writeFile: writeFileSync,
+  writeFileNoFollow: writePrivateFileNoFollow,
   chmod: chmodSync,
   stat: statSync,
+  lstat: lstatSync,
 };
 
 export const defaultBrowserStateFs = {
@@ -1531,8 +1950,10 @@ export const defaultBrowserStateFs = {
   mkdir: mkdirSync,
   readFile: readFileSync,
   writeFile: writeFileSync,
+  writeFileNoFollow: writePrivateFileNoFollow,
   chmod: chmodSync,
   stat: statSync,
+  lstat: lstatSync,
   rm: rmSync,
 };
 

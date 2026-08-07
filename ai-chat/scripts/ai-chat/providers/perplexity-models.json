@@ -6,8 +6,7 @@
     "identifier": "default",
     "tool_name": "pplx_best",
     "min_tier": "pro",
-    "mode": "search",
-    "contract_source": "browser-tools-network-capture"
+    "mode": "search"
   },
   {
     "id": "perplexity/deep-research",
@@ -16,8 +15,7 @@
     "identifier": "pplx_alpha",
     "tool_name": "pplx_deep_research",
     "min_tier": "pro",
-    "mode": "research",
-    "contract_source": "browser-network-live-verification"
+    "mode": "research"
   },
   {
     "id": "perplexity/sonar-2",
@@ -26,8 +24,7 @@
     "identifier": "experimental",
     "tool_name": "pplx_sonar",
     "min_tier": "pro",
-    "mode": "copilot",
-    "contract_source": "browser-tools-network-capture"
+    "mode": "copilot"
   },
   {
     "id": "openai/gpt-5.6-terra",
@@ -37,8 +34,7 @@
     "thinking_model_id": "openai/gpt-5.6-terra-thinking",
     "tool_name": "pplx_gpt56_terra",
     "min_tier": "pro",
-    "mode": "copilot",
-    "contract_source": "browser-tools-network-capture"
+    "mode": "copilot"
   },
   {
     "id": "openai/gpt-5.6-terra-thinking",
@@ -49,8 +45,7 @@
     "tool_name": "pplx_gpt56_terra_thinking",
     "min_tier": "pro",
     "mode": "copilot",
-    "thinking": true,
-    "contract_source": "browser-tools-network-capture"
+    "thinking": true
   },
   {
     "id": "nvidia/nemotron-3-ultra-thinking",
@@ -60,7 +55,6 @@
     "tool_name": "pplx_nemotron3_ultra_thinking",
     "min_tier": "pro",
     "mode": "copilot",
-    "thinking": true,
-    "contract_source": "browser-tools-network-capture"
+    "thinking": true
   }
 ]

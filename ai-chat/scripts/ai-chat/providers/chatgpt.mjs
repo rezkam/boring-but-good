@@ -1,164 +1,73 @@
-import { Buffer } from 'node:buffer';
 import { sleep, urlHasAllowedHostname } from './shared.mjs';
 
 const CHATGPT_ORIGIN = 'https://chatgpt.com';
 const CHATGPT_HOSTNAMES = ['chatgpt.com', 'www.chatgpt.com'];
-const CHATGPT_CONVERSATION_ENDPOINT_RE = /\/backend-api\/f\/conversation(?:$|[/?#])/;
+const CHATGPT_CONVERSATION_ENDPOINT = '/backend-api/f/conversation';
+const PRIVATE_KEYS = /(?:authorization|cookie|token|sentinel|conduit|turnstile|proof|resume|secret|credential|password|api[_-]?key|signature|(?:^|[_-])sig(?:$|[_-])|(?:aws|google)[_-]?access[_-]?(?:key[_-]?)?id|x[-_]?(?:amz|goog)[-_]?(?:credential|security[-_]?token|signature))/i;
+const SENSITIVE_STRING_KEY = '(?:[a-z0-9_-]*(?:auth(?:orization)?|session|cookie|token|secret|credential|password|signature)[a-z0-9_-]*|(?:[a-z0-9_-]*(?:api|access)[_-]?key[a-z0-9_-]*)|sig|(?:aws|google)[_-]?access[_-]?(?:key[_-]?)?id|x[-_]?(?:amz|goog)[-_]?(?:credential|security[-_]?token|signature))';
+const UI_WAIT_TIMEOUT_MS = 5_000;
+export const CHATGPT_PROVIDER_ID_OBSERVATION_TIMEOUT_MS = 30_000;
+
+export function chatGptSubmissionObservationTimeoutMs(timeoutMs) {
+  const requested = Number(timeoutMs);
+  return Math.max(1, Math.min(Number.isFinite(requested) && requested > 0 ? requested : CHATGPT_PROVIDER_ID_OBSERVATION_TIMEOUT_MS, CHATGPT_PROVIDER_ID_OBSERVATION_TIMEOUT_MS));
+}
+
+function rejectedChatGptSubmissionStatus(snapshot = {}) {
+  if (snapshot.acceptedResponse || snapshot.conversationId) return null;
+  return Array.isArray(snapshot.responseStatuses)
+    ? snapshot.responseStatuses.find(item => Number.isInteger(item?.status) && item.status >= 400 && item.status <= 599)?.status || null
+    : null;
+}
 
 function isChatGptUrl(url) {
   return urlHasAllowedHostname(url, CHATGPT_HOSTNAMES);
 }
 
-function isChatGptConversationUrl(url) {
-  if (!isChatGptUrl(url)) return false;
-  try {
-    return new URL(url).pathname.startsWith('/c/');
-  } catch {
-    return false;
+export function normalizeChatGptConversationId(value) {
+  const id = String(value || '').trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,255}$/.test(id)) throw new Error('[chatgpt] Invalid provider conversation id.');
+  return id;
+}
+
+export function chatGptConversationUrl(id) {
+  if (id === null || id === undefined || String(id).trim() === '') return null;
+  return `${CHATGPT_ORIGIN}/c/${encodeURIComponent(normalizeChatGptConversationId(id))}`;
+}
+
+export function chatGptConversationIdFromUrl(url) {
+  let parsed;
+  try { parsed = new URL(url); } catch { throw new Error('[chatgpt] Invalid conversation URL.'); }
+  if (parsed.protocol !== 'https:' || !CHATGPT_HOSTNAMES.includes(parsed.hostname.toLowerCase()) || parsed.search || parsed.hash) {
+    throw new Error('[chatgpt] Conversation URL must be a trusted chatgpt.com /c/<id> URL.');
   }
+  const encoded = parsed.pathname.match(/^\/c\/([^/]+)$/)?.[1];
+  if (!encoded) throw new Error('[chatgpt] Conversation URL must use /c/<id>.');
+  try { return normalizeChatGptConversationId(decodeURIComponent(encoded)); } catch { throw new Error('[chatgpt] Invalid provider conversation id.'); }
 }
 
-function isChatGptConversationEndpointUrl(url) {
-  if (!isChatGptUrl(url)) return false;
-  try {
-    const parsed = new URL(url);
-    return CHATGPT_CONVERSATION_ENDPOINT_RE.test(`${parsed.pathname}${parsed.search}${parsed.hash}`);
-  } catch {
-    return false;
-  }
-}
-
-function isChatGptConversationSubmitEndpointUrl(url) {
-  if (!isChatGptUrl(url)) return false;
-  try {
-    const parsed = new URL(url);
-    return parsed.pathname === '/backend-api/f/conversation';
-  } catch {
-    return false;
-  }
-}
-
-function isChatGptConversationStreamEndpointUrl(url) {
-  if (!isChatGptUrl(url)) return false;
-  try {
-    const parsed = new URL(url);
-    return parsed.pathname === '/backend-api/f/conversation' || parsed.pathname === '/backend-api/f/conversation/resume';
-  } catch {
-    return false;
-  }
-}
-
-function chatGptConversationUrl(conversationId) {
-  const value = String(conversationId || '').trim();
-  return value ? `${CHATGPT_ORIGIN}/c/${encodeURIComponent(value)}` : null;
-}
-
-function chatGptConversationIdFromUrl(url) {
-  if (!url || typeof url !== 'string') return null;
-  try {
-    const parsed = new URL(url);
-    const match = parsed.pathname.match(/^\/c\/([^/?#]+)/);
-    return match?.[1] || null;
-  } catch {
-    return null;
-  }
-}
-
-export function resolveChatGptConversationUrl(conversation = {}) {
-  const record = conversation?.record || null;
-  const providerState = record?.provider_state || conversation?.providerState || conversation?.provider_state || null;
-  const providerConversationId = providerState?.conversation_id || providerState?.conversationId || record?.provider_id || conversation?.provider_id || null;
-  const stateUrl = chatGptConversationUrl(providerConversationId);
-  const directUrl = conversation?.url || record?.final_url || record?.conversation_url || null;
-  const directConversationId = chatGptConversationIdFromUrl(directUrl);
-  if (directConversationId) return directUrl;
-  return stateUrl || directUrl || null;
-}
-
-export function resolveChatGptConversationAttachment({ target }) {
+export function resolveChatGptConversationTarget(target) {
   const value = String(target || '').trim();
-  if (!value) throw new Error('[chatgpt] Conversation attachment is empty');
-  if (/^https?:\/\//i.test(value)) {
-    const conversationId = chatGptConversationIdFromUrl(value);
-    return {
-      type: 'url',
-      url: value,
-      providerId: conversationId,
-      providerState: conversationId ? { conversation_id: conversationId } : null,
-    };
-  }
-  return {
-    type: 'provider_id',
-    url: chatGptConversationUrl(value),
-    providerId: value,
-    providerState: { conversation_id: value },
-  };
+  const id = /^https?:\/\//i.test(value) ? chatGptConversationIdFromUrl(value) : normalizeChatGptConversationId(value);
+  return { providerId: id, url: chatGptConversationUrl(id) };
+}
+
+function normalize(value) {
+  return String(value || '').trim().toLowerCase().replace(/[\s_]+/g, '-');
 }
 
 export const CHATGPT_MODEL_LEVELS = [
-  {
-    id: 'instant',
-    name: 'Instant',
-    model: 'gpt-5-5',
-    thinking_effort: null,
-    aliases: ['fast', 'quick', 'low'],
-    source: 'chatgpt-webui-request-profile',
-  },
-  {
-    id: 'extra-high',
-    name: 'Extra High',
-    model: 'gpt-5-5-thinking',
-    thinking_effort: 'max',
-    aliases: ['default', 'thinking', 'think', 'reasoning', 'extra', 'max', 'best'],
-    source: 'live-captured-chatgpt-webui-request',
-  },
-  {
-    id: 'pro-extended',
-    name: 'Pro Extended',
-    model: 'gpt-5-5-thinking-pro',
-    thinking_effort: 'max',
-    aliases: ['pro', 'extended', 'research'],
-    source: 'chatgpt-webui-request-profile-unverified',
-  },
-  {
-    id: 'gpt-5.5',
-    name: 'GPT-5.5',
-    model: 'gpt-5-5-thinking',
-    thinking_effort: 'max',
-    aliases: ['gpt-5-5', 'gpt5.5', 'gpt55'],
-    source: 'chatgpt-webui-request-profile-unverified',
-  },
+  { id: 'instant', name: 'Instant', uiLabel: 'Instant', model: 'gpt-5-5-instant', thinking_effort: null },
+  { id: 'medium', name: 'Medium', uiLabel: 'Medium', model: 'gpt-5-6-thinking', thinking_effort: 'standard' },
+  { id: 'high', name: 'High', uiLabel: 'High', model: 'gpt-5-6-thinking', thinking_effort: 'extended' },
+  { id: 'extra-high', name: 'Extra High', uiLabel: 'Extra High', model: 'gpt-5-6-thinking', thinking_effort: 'max' },
+  { id: 'pro', name: 'Pro', uiLabel: 'Pro', model: 'gpt-5-6-pro', thinking_effort: 'standard' },
 ];
 
-function normalizeModelName(value) {
-  return String(value || 'default').trim().toLowerCase().replace(/[\s_]+/g, '-');
-}
-
-function uniqueStrings(values) {
-  return [...new Set(values.filter(value => typeof value === 'string' && value.trim()).map(value => value.trim()))];
-}
-
 export function resolveChatGptModel(modelName = 'default') {
-  const normalized = normalizeModelName(modelName);
-  if (!normalized || normalized === 'default') return CHATGPT_MODEL_LEVELS.find(model => model.id === 'extra-high');
-  const direct = CHATGPT_MODEL_LEVELS.find(model => {
-    const candidates = [model.id, model.name, model.model, ...(model.aliases || [])];
-    return candidates.some(candidate => normalizeModelName(candidate) === normalized);
-  });
-  if (direct) return direct;
-
-  if (/^gpt[-\w.]+$/i.test(String(modelName || ''))) {
-    return {
-      id: String(modelName),
-      name: String(modelName),
-      model: String(modelName),
-      thinking_effort: null,
-      aliases: [],
-      source: 'explicit-chatgpt-model-id',
-    };
-  }
-
-  return null;
+  const value = normalize(modelName);
+  if (value === 'default' || !value) return CHATGPT_MODEL_LEVELS.find(model => model.id === 'extra-high');
+  return CHATGPT_MODEL_LEVELS.find(model => model.id === value) || null;
 }
 
 export function chatGptModelRecord(model) {
@@ -167,85 +76,100 @@ export function chatGptModelRecord(model) {
     name: model.name,
     model: model.model,
     thinking_effort: model.thinking_effort,
-    aliases: model.aliases || [],
     account_specific: true,
-    source: model.source,
-    selected_by: uniqueStrings(['--model', model.id, model.name, model.model, ...(model.aliases || [])]),
-    transport: 'network-request-payload',
-    verification: model.source?.includes('unverified')
-      ? { status: 'needs-live-capture' }
-      : { status: 'known-request-profile' },
+    source: 'chatgpt-ui-picker',
+    selected_by: [model.id],
+    transport: 'ui-picker-then-network-verification',
+    verification: { status: 'post-submit-network-verification' },
   };
 }
 
-export function applyChatGptModelToPayload(payload, modelConfig) {
-  if (!payload || typeof payload !== 'object') return { changed: false, payload };
-  let changed = false;
-  if (modelConfig?.model && payload.model !== modelConfig.model) {
-    payload.model = modelConfig.model;
-    changed = true;
-  }
-  if (modelConfig?.thinking_effort) {
-    if (payload.thinking_effort !== modelConfig.thinking_effort) {
-      payload.thinking_effort = modelConfig.thinking_effort;
-      changed = true;
-    }
-  } else if (Object.prototype.hasOwnProperty.call(payload, 'thinking_effort')) {
-    delete payload.thinking_effort;
-    changed = true;
-  }
-  return { changed, payload };
+export function verifyChatGptObservedModel(modelConfig, observedModel, observedThinkingEffort) {
+  if (!observedModel) return { status: 'pending', verified: false };
+  const expected = modelConfig?.id;
+  const acceptedModel = expected === 'instant'
+    ? ['gpt-5-5-instant', 'gpt-5-5'].includes(observedModel)
+    : observedModel === modelConfig?.model;
+  const acceptedEffort = expected === 'instant'
+    ? true
+    : observedThinkingEffort === modelConfig?.thinking_effort;
+  return acceptedModel && acceptedEffort
+    ? { status: 'verified', verified: true }
+    : {
+        status: 'mismatch',
+        verified: false,
+        expected_profile: expected || null,
+        observed_model: observedModel || null,
+        observed_thinking_effort: observedThinkingEffort || null,
+      };
 }
 
 export function parseChatGptSseEvents(text) {
   const events = [];
   let event = 'message';
   let data = [];
+
   for (const line of String(text || '').split(/\r?\n/)) {
-    if (line === '') {
-      if (data.length) {
-        events.push({ event, data: data.join('\n') });
-        event = 'message';
-        data = [];
-      }
-      continue;
+    if (!line) {
+      if (data.length) events.push({ event, data: data.join('\n') });
+      event = 'message';
+      data = [];
+    } else if (line.startsWith('event:')) {
+      event = line.slice(6).trim();
+    } else if (line.startsWith('data:')) {
+      data.push(line.slice(5).trimStart());
     }
-    if (line.startsWith('event:')) event = line.slice(6).trim();
-    else if (line.startsWith('data:')) data.push(line.slice(5).trimStart());
   }
   if (data.length) events.push({ event, data: data.join('\n') });
   return events;
 }
 
-export function extractChatGptStreamStateFromEncodedItem(encodedItem, state = {}) {
-  const next = {
-    text: '',
-    rawItems: [],
-    searchResults: [],
-    done: false,
-    streamClosed: false,
-    streamClosedCount: 0,
-    assistantTurnComplete: false,
-    awaitingResume: false,
-    resumedStream: false,
-    ...state,
+export function createChatGptSseDecoder(state = {}) {
+  const decoder = new TextDecoder();
+  let pending = '';
+
+  function splitCompleteFrames() {
+    const events = [];
+    while (true) {
+      const match = /\r?\n\r?\n/.exec(pending);
+      if (!match) return events;
+      const end = match.index + match[0].length;
+      events.push(...parseChatGptSseEvents(pending.slice(0, end)));
+      pending = pending.slice(end);
+    }
+  }
+
+  return {
+    push(base64) {
+      pending += decoder.decode(Buffer.from(base64 || '', 'base64'), { stream: true });
+      return splitCompleteFrames();
+    },
+    flush() {
+      pending += decoder.decode();
+      const events = [...splitCompleteFrames(), ...parseChatGptSseEvents(pending)];
+      pending = '';
+      return events;
+    },
+    state,
   };
-  let lastTextAppendPath = next.lastTextAppendPath || null;
-  for (const event of parseChatGptSseEvents(encodedItem)) {
-    next.rawItems.push(event.data);
+}
+
+function applySseEvents(events, state = {}) {
+  const next = {
+    text: '', rawItems: [], searchResults: [], done: false,
+    streamClosed: false, streamClosedCount: 0, assistantTurnComplete: false,
+    awaitingResume: false, resumedStream: false, ...state,
+  };
+  let appendPath = next.lastTextAppendPath || null;
+
+  for (const event of events) {
     if (event.data === '[DONE]') {
-      // [DONE] closes the current HTTP/SSE stream. It is not the same as the
-      // assistant turn finishing when a reasoning request has handed the turn to
-      // a resumed stream.
       next.streamClosed = true;
-      next.streamClosedCount = (next.streamClosedCount || 0) + 1;
+      next.streamClosedCount += 1;
       next.lastStreamCloseReason = 'sse_done';
       if (!next.handedOff && !next.awaitingResume) {
-        next.assistantTurnComplete = true;
         next.done = true;
-        next.doneReason = next.doneReason || 'stream_closed_without_handoff';
-      } else {
-        next.done = !!next.assistantTurnComplete;
+        next.doneReason ||= 'stream_closed_without_handoff';
       }
       continue;
     }
@@ -256,84 +180,67 @@ export function extractChatGptStreamStateFromEncodedItem(encodedItem, state = {}
     } catch {
       continue;
     }
-
     if (data.conversation_id) next.conversationId = data.conversation_id;
     if (data.turn_exchange_id) next.turnExchangeId = data.turn_exchange_id;
-    if (data.type === 'resume_conversation_token') {
+
+    if (data.type === 'stream_handoff' || data.type === 'resume_conversation_token') {
       next.handedOff = true;
       next.awaitingResume = !next.assistantTurnComplete;
-      next.resumeToken = data.token || next.resumeToken;
-      next.conversationId = data.conversation_id || next.conversationId;
-      if (!next.assistantTurnComplete) next.done = false;
+      next.streamHandoff ||= data.type === 'stream_handoff';
+      const options = data.options || [];
+      const websocket = options.find(option => option.type === 'subscribe_ws_topic');
+      const sse = options.find(option => option.type === 'resume_sse_endpoint');
+      next.topicId = websocket?.topic_id || sse?.topic_id || next.topicId;
+      next.resumeTransport = websocket ? 'websocket' : (sse ? 'sse' : next.resumeTransport);
+      continue;
     }
-    if (data.type === 'stream_handoff') {
-      next.handedOff = true;
-      next.awaitingResume = !next.assistantTurnComplete;
-      next.streamHandoff = true;
-      next.conversationId = data.conversation_id || next.conversationId;
-      next.turnExchangeId = data.turn_exchange_id || next.turnExchangeId;
-      const wsOption = (data.options || []).find(option => option.type === 'subscribe_ws_topic');
-      const sseOption = (data.options || []).find(option => option.type === 'resume_sse_endpoint');
-      next.topicId = wsOption?.topic_id || sseOption?.topic_id || next.topicId;
-      next.resumeTransport = wsOption ? 'websocket' : (sseOption ? 'sse' : next.resumeTransport);
-      if (!next.assistantTurnComplete) next.done = false;
-    }
-    if (data.type === 'message_stream_complete') {
-      next.messageStreamComplete = true;
+
+    if (data.type === 'message_stream_complete' || data.type === 'assistant_turn_complete') {
+      next.messageStreamComplete ||= data.type === 'message_stream_complete';
       next.assistantTurnComplete = true;
       next.awaitingResume = false;
       next.done = true;
-      next.doneReason = 'message_stream_complete';
     }
-    if (data.type === 'server_ste_metadata') next.serverMetadata = data.metadata || null;
-    if (data.type === 'conversation_detail_metadata') next.conversationDetailMetadata = data;
 
     const message = data.v?.message;
     if (message?.metadata) {
       next.messageId = message.id || next.messageId;
-      next.modelSlug = message.metadata.model_slug || message.metadata.default_model_slug || message.metadata.resolved_model_slug || next.modelSlug;
+      next.modelSlug = message.metadata.model_slug || message.metadata.default_model_slug || next.modelSlug;
       next.thinkingEffort = message.metadata.thinking_effort || next.thinkingEffort;
       next.requestId = message.metadata.request_id || next.requestId;
-      next.turnExchangeId = message.metadata.turn_exchange_id || next.turnExchangeId;
     }
     if (message?.author?.role === 'assistant' && message.channel === 'final') {
       next.finalMessageId = message.id || next.finalMessageId;
       const part = message.content?.parts?.[0];
-      if (typeof part === 'string' && part) {
-        if (!next.text || part.startsWith(next.text)) next.text = part;
-        else if (!next.text.endsWith(part)) next.text += part;
-      }
+      if (typeof part === 'string') next.text = !next.text || part.startsWith(next.text) ? part : next.text;
     }
 
     if (data.p === '/message/content/parts/0' && data.o === 'append' && typeof data.v === 'string') {
       next.text += data.v;
-      lastTextAppendPath = data.p;
-    } else if (!data.p && !data.o && typeof data.v === 'string' && lastTextAppendPath === '/message/content/parts/0') {
+      appendPath = data.p;
+    } else if (!data.p && !data.o && typeof data.v === 'string' && appendPath === '/message/content/parts/0') {
       next.text += data.v;
     }
-    if (data.p === '' && data.o === 'patch' && Array.isArray(data.v)) {
-      for (const patch of data.v) {
-        if (patch.p === '/message/content/parts/0' && patch.o === 'append' && typeof patch.v === 'string') {
-          next.text += patch.v;
-          lastTextAppendPath = patch.p;
-        }
-        if (patch.p === '/message/status' && patch.o === 'replace' && patch.v === 'finished_successfully') {
-          next.finalStatus = patch.v;
-        }
-        if (patch.p === '/message/end_turn' && patch.o === 'replace' && patch.v === true) {
-          next.endTurn = true;
-          // end_turn=true is the authoritative end-of-assistant-turn signal and
-          // survives the stream handoff, unlike the initial stream's [DONE].
-          next.assistantTurnComplete = true;
-          next.awaitingResume = false;
-          next.done = true;
-          next.doneReason = 'end_turn';
-        }
+    for (const patch of data.p === '' && data.o === 'patch' && Array.isArray(data.v) ? data.v : []) {
+      if (patch.p === '/message/content/parts/0' && patch.o === 'append' && typeof patch.v === 'string') {
+        next.text += patch.v;
+        appendPath = patch.p;
+      }
+      if (patch.p === '/message/status' && patch.v === 'finished_successfully') next.finalStatus = patch.v;
+      if (patch.p === '/message/end_turn' && patch.v === true) {
+        next.endTurn = true;
+        next.assistantTurnComplete = true;
+        next.awaitingResume = false;
+        next.done = true;
       }
     }
   }
-  next.lastTextAppendPath = lastTextAppendPath;
+  next.lastTextAppendPath = appendPath;
   return next;
+}
+
+export function extractChatGptStreamStateFromEncodedItem(text, state = {}) {
+  return applySseEvents(parseChatGptSseEvents(text), state);
 }
 
 export function extractChatGptWebSocketPayload(payloadData, state = {}) {
@@ -343,248 +250,639 @@ export function extractChatGptWebSocketPayload(payloadData, state = {}) {
   } catch {
     return state;
   }
-  if (!Array.isArray(frames)) return state;
 
   let next = state;
-  for (const frame of frames) {
-    const catchups = frame.reply?.catchups || [];
-    for (const catchup of catchups) {
-      const encodedItem = catchup.payload?.payload?.encoded_item;
-      if (encodedItem) {
-        next = extractChatGptStreamStateFromEncodedItem(encodedItem, {
-          ...next,
-          resumedStream: true,
-          resumeTransport: 'websocket',
-          websocketCatchup: true,
-          awaitingResume: false,
+  for (const frame of Array.isArray(frames) ? frames : []) {
+    for (const catchup of frame.reply?.catchups || []) {
+      const item = catchup.payload?.payload?.encoded_item;
+      if (item) {
+        next = extractChatGptStreamStateFromEncodedItem(item, {
+          ...next, resumedStream: true, resumeTransport: 'websocket', websocketCatchup: true, awaitingResume: false,
         });
       }
     }
-
-    const encodedItem = frame.payload?.payload?.encoded_item;
-    if (encodedItem) {
-      next = extractChatGptStreamStateFromEncodedItem(encodedItem, {
-        ...next,
-        resumedStream: true,
-        resumeTransport: 'websocket',
-        websocketFrame: true,
-        awaitingResume: false,
+    const item = frame.payload?.payload?.encoded_item;
+    if (item) {
+      next = extractChatGptStreamStateFromEncodedItem(item, {
+        ...next, resumedStream: true, resumeTransport: 'websocket', websocketFrame: true, awaitingResume: false,
       });
-    }
-    if (frame.payload?.payload?.type === 'done') {
-      next = {
-        ...next,
-        websocketDone: true,
-        streamClosed: true,
-        done: next.assistantTurnComplete || (!next.handedOff && !next.awaitingResume),
-      };
     }
   }
   return next;
 }
 
-function createInitialNetworkState(modelConfig) {
+function initialState(model, preserveSelection = false) {
   return {
-    text: '',
-    rawItems: [],
-    searchResults: [],
-    done: false,
-    streamClosed: false,
-    streamClosedCount: 0,
-    assistantTurnComplete: false,
-    handedOff: false,
-    awaitingResume: false,
-    resumedStream: false,
-    requestModified: false,
-    interceptedRequests: 0,
-    responseStatuses: [],
-    emptyNetworkResponses: 0,
-    modelSlug: modelConfig.model,
-    thinkingEffort: modelConfig.thinking_effort || null,
-    requestedModelProfile: modelConfig.id,
-    transport: 'network-observed-request',
+    text: '', rawItems: [], searchResults: [], done: false, streamClosed: false,
+    streamClosedCount: 0, assistantTurnComplete: false, handedOff: false,
+    awaitingResume: false, resumedStream: false, responseStatuses: [],
+    requestedModelProfile: preserveSelection ? null : model.id,
+    modelVerification: preserveSelection ? { status: 'observed', verified: false, preserved_selection: true } : { status: 'pending', verified: false },
+    transport: 'network-incremental-sse',
   };
 }
 
-export async function createChatGptNetworkTracker({ page, selectedModel }) {
-  const modelConfig = resolveChatGptModel(selectedModel) || resolveChatGptModel('default');
+export async function createChatGptNetworkTracker({ page, selectedModel, expectedConversationId = null, preserveSelection = false, sleepFn = sleep, now = Date.now, onStreamEvent = null }) {
+  const modelConfig = resolveChatGptModel(selectedModel) || resolveChatGptModel();
   const client = await page.target().createCDPSession();
-  const requestUrls = new Map();
-  let state = createInitialNetworkState(modelConfig);
+  let state = initialState(modelConfig, preserveSelection);
   let disposed = false;
+  let finalRequestId = null;
+  let decoder = null;
+  let streamSetup = null;
+  let fatalProgressError = null;
+  const streamed = new Set();
+  const emitted = { session: false, statuses: new Set(), deltas: new Set() };
+
+  function recordFatalProgressError(error) {
+    if (fatalProgressError) return;
+    fatalProgressError = new Error('Failed to emit ChatGPT stream progress.');
+    fatalProgressError.code = error?.code === 'stream_file_error' ? 'stream_file_error' : 'chatgpt_stream_progress_error';
+  }
+
+  function throwIfFatalProgressError() {
+    if (fatalProgressError) throw fatalProgressError;
+  }
+
+  function update(next) {
+    if (fatalProgressError) return;
+    const previous = state;
+    if (expectedConversationId && next.requestConversationId && next.requestConversationId !== expectedConversationId) next.error = '[chatgpt] Submission request conversation id did not match the requested provider conversation id.';
+    if (expectedConversationId && next.conversationId && next.conversationId !== expectedConversationId) next.error = '[chatgpt] Submission stream conversation id did not match the requested provider conversation id.';
+    state = next;
+    if (state.error) return;
+    try {
+      emitTrackerChanges(previous, state, onStreamEvent, emitted);
+    } catch (error) {
+      recordFatalProgressError(error);
+    }
+  }
+
+  function recordObservedPayload(postData) {
+    try {
+      const payload = JSON.parse(postData || '{}');
+      state.requestConversationId = payload.conversation_id || null;
+      if (expectedConversationId && state.requestConversationId && state.requestConversationId !== expectedConversationId) state.error = '[chatgpt] Submission request conversation id did not match the requested provider conversation id.';
+      state.observedPayloadModel = payload.model || null;
+      state.observedPayloadThinkingEffort = payload.thinking_effort || null;
+      state.modelVerification = preserveSelection
+        ? { status: 'observed', verified: false, preserved_selection: true, observed_model: state.observedPayloadModel || null, observed_thinking_effort: state.observedPayloadThinkingEffort || null }
+        : verifyChatGptObservedModel(modelConfig, state.observedPayloadModel, state.observedPayloadThinkingEffort);
+    } catch {
+      state.modelVerification = { status: 'unavailable', verified: false };
+    }
+  }
+
+  function consume(base64) {
+    if (!base64 || !decoder) return;
+    update(applySseEvents(decoder.push(base64), state));
+    state.incrementalBytes = (state.incrementalBytes || 0) + Buffer.from(base64, 'base64').length;
+  }
 
   await client.send('Network.enable');
-  await client.send('Fetch.enable', {
-    patterns: [{ urlPattern: '*://chatgpt.com/backend-api/f/conversation*', requestStage: 'Request' }],
-  });
-
-  const onPaused = async (event) => {
-    if (disposed) return;
+  const onRequest = event => {
+    const request = event.request || {};
+    if (request.method !== 'POST' || !isChatGptUrl(request.url)) return;
+    if (new URL(request.url).pathname !== CHATGPT_CONVERSATION_ENDPOINT) return;
+    finalRequestId = event.requestId;
+    state.requestId = event.requestId;
+    recordObservedPayload(request.postData);
+  };
+  const onResponse = async event => {
+    if (disposed || event.requestId !== finalRequestId) return;
+    if (state.error) return;
+    const response = event.response || {};
+    let responsePath = '';
+    try { responsePath = new URL(response.url || CHATGPT_ORIGIN).pathname; } catch {}
+    state.responseStatuses.push({ url: responsePath, status: response.status, mimeType: response.mimeType || null });
+    state.acceptedResponse = response.status >= 200 && response.status < 300 && /event-stream/i.test(response.mimeType || '');
     try {
-      const url = event.request?.url || '';
-      if (event.request?.method === 'POST' && isChatGptConversationSubmitEndpointUrl(url) && event.request?.postData) {
-        const payload = JSON.parse(event.request.postData);
-        const originalPayloadModel = payload.model || null;
-        const originalPayloadThinkingEffort = payload.thinking_effort || null;
-        const applied = applyChatGptModelToPayload(payload, modelConfig);
-        state.originalPayloadModel = state.originalPayloadModel || originalPayloadModel;
-        state.originalPayloadThinkingEffort = state.originalPayloadThinkingEffort || originalPayloadThinkingEffort;
-        state.appliedPayloadModel = applied.payload.model || null;
-        state.appliedPayloadThinkingEffort = applied.payload.thinking_effort || null;
-        if (applied.changed) state.requestModified = true;
-        state.interceptedRequests += 1;
-        const postData = Buffer.from(JSON.stringify(applied.payload), 'utf-8').toString('base64');
-        await client.send('Fetch.continueRequest', { requestId: event.requestId, postData });
-        return;
-      }
+      emitTrackerChanges({ ...state, acceptedResponse: false }, state, onStreamEvent, emitted);
     } catch (error) {
-      state.error = `[chatgpt] Failed to rewrite request payload: ${error.message}`;
-      await client.send('Fetch.failRequest', { requestId: event.requestId, errorReason: 'Aborted' }).catch(() => {});
+      recordFatalProgressError(error);
       return;
     }
-    await client.send('Fetch.continueRequest', { requestId: event.requestId }).catch(() => {});
-  };
-
-  const onRequest = (event) => {
-    const url = event.request?.url || '';
-    if (!isChatGptConversationEndpointUrl(url)) return;
-    requestUrls.set(event.requestId, url);
-    if (event.request?.postData && isChatGptConversationSubmitEndpointUrl(url)) {
+    if (!state.acceptedResponse) return;
+    decoder = createChatGptSseDecoder();
+    streamSetup = (async () => {
       try {
-        const payload = JSON.parse(event.request.postData);
-        state.requestedPayloadModel = payload.model || state.requestedPayloadModel;
-        state.requestedPayloadThinkingEffort = payload.thinking_effort || null;
-      } catch {}
-    }
+        const result = await client.send('Network.streamResourceContent', { requestId: event.requestId });
+        streamed.add(event.requestId);
+        consume(result.bufferedData);
+      } catch (error) {
+        state.incrementalUnsupported = error.message;
+      }
+    })();
+    await streamSetup;
   };
-
-  const onResponse = (event) => {
-    const url = event.response?.url || '';
-    if (!isChatGptConversationEndpointUrl(url)) return;
-    state.responseStatuses.push({ url, status: event.response.status, mimeType: event.response.mimeType || null });
+  const onData = event => {
+    if (event.requestId === finalRequestId && streamed.has(event.requestId)) consume(event.data);
   };
-
-  const onFinished = async (event) => {
-    const url = requestUrls.get(event.requestId);
-    if (!url) return;
-    let body = null;
+  const onFinished = async event => {
+    if (event.requestId !== finalRequestId) return;
+    // Loading can finish before CDP finishes enabling incremental content.
+    // Wait for setup before deciding whether the full-body fallback is needed.
+    if (streamSetup) await streamSetup;
+    if (decoder) update(applySseEvents(decoder.flush(), state));
+    if (streamed.has(event.requestId) && state.incrementalBytes) return;
     try {
-      const responseBody = await client.send('Network.getResponseBody', { requestId: event.requestId });
-      body = responseBody.body || '';
+      const body = await client.send('Network.getResponseBody', { requestId: event.requestId });
+      if (!body.body) state.networkResponseEmpty = true;
+      else update(extractChatGptStreamStateFromEncodedItem(body.base64Encoded ? Buffer.from(body.body, 'base64').toString('utf8') : body.body, state));
     } catch (error) {
       state.responseBodyError = error.message;
-      return;
-    }
-    if (!body) {
-      state.networkResponseEmpty = true;
-      state.emptyNetworkResponses = (state.emptyNetworkResponses || 0) + 1;
-      return;
-    }
-    state.rawResponseBody = body;
-    if (isChatGptConversationStreamEndpointUrl(url)) {
-      state = extractChatGptStreamStateFromEncodedItem(body, state);
     }
   };
-
-  const onWebSocketFrame = (event) => {
-    state = extractChatGptWebSocketPayload(event.response?.payloadData || '', state);
+  const onWebSocket = event => {
+    update(extractChatGptWebSocketPayload(event.response?.payloadData || '', state));
   };
 
-  client.on('Fetch.requestPaused', onPaused);
   client.on('Network.requestWillBeSent', onRequest);
   client.on('Network.responseReceived', onResponse);
+  client.on('Network.dataReceived', onData);
   client.on('Network.loadingFinished', onFinished);
-  client.on('Network.webSocketFrameReceived', onWebSocketFrame);
-
+  client.on('Network.webSocketFrameReceived', onWebSocket);
   return {
     modelConfig,
-    snapshot() {
-      return { ...state };
+    snapshot: () => ({ ...state }),
+    throwIfFatalProgressError,
+    async waitForSubmission(timeoutMs) {
+      const deadline = now() + timeoutMs;
+      while (now() <= deadline) {
+        throwIfFatalProgressError();
+        const snapshot = { ...state };
+        const rejected = snapshot.responseStatuses.find(item => item.status >= 400);
+        if (rejected) throw new Error(`[chatgpt] Submission failed with HTTP ${rejected.status}.`);
+        if (expectedConversationId && snapshot.requestConversationId && snapshot.requestConversationId !== expectedConversationId) {
+          throw new Error('[chatgpt] Submission request conversation id did not match the requested provider conversation id.');
+        }
+        if (expectedConversationId && snapshot.conversationId && snapshot.conversationId !== expectedConversationId) {
+          throw new Error('[chatgpt] Submission stream conversation id did not match the requested provider conversation id.');
+        }
+        if (snapshot.acceptedResponse && snapshot.conversationId) return snapshot;
+        await sleepFn(100);
+      }
+      throwIfFatalProgressError();
+      const rejected = state.responseStatuses.find(item => item.status >= 400);
+      if (rejected) throw new Error(`[chatgpt] Submission failed with HTTP ${rejected.status}.`);
+      if (state.acceptedResponse) throw new Error('[chatgpt] Submission may have occurred, but no provider conversation id was observed before timeout.');
+      throw new Error('[chatgpt] Submission was not accepted before timeout.');
     },
     reset() {
-      requestUrls.clear();
-      state = createInitialNetworkState(modelConfig);
+      state = initialState(modelConfig, preserveSelection);
+      finalRequestId = null;
+      decoder = null;
+      streamSetup = null;
+      fatalProgressError = null;
+      streamed.clear();
+      emitted.session = false;
+      emitted.statuses.clear();
+      emitted.deltas.clear();
     },
     async dispose() {
       disposed = true;
-      client.off('Fetch.requestPaused', onPaused);
       client.off('Network.requestWillBeSent', onRequest);
       client.off('Network.responseReceived', onResponse);
+      client.off('Network.dataReceived', onData);
       client.off('Network.loadingFinished', onFinished);
-      client.off('Network.webSocketFrameReceived', onWebSocketFrame);
-      await client.send('Fetch.disable').catch(() => {});
+      client.off('Network.webSocketFrameReceived', onWebSocket);
       await client.detach().catch(() => {});
     },
   };
 }
 
-async function visibleInputPosition(page) {
-  return page.evaluate(() => {
-    const selectors = [
-      '#prompt-textarea[contenteditable="true"]',
-      '#prompt-textarea',
-      '[contenteditable="true"][role="textbox"]',
-      'textarea[placeholder="Ask anything"]',
-      'textarea',
-    ];
-    const candidates = Array.from(document.querySelectorAll(selectors.join(','))).map(el => {
-      const rect = el.getBoundingClientRect();
-      return {
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-        visible: rect.width > 10 && rect.height > 10 && rect.x >= 0 && rect.y >= 0,
-      };
+export async function selectChatGptModelInUi(page, selectedModel) {
+  const model = resolveChatGptModel(selectedModel);
+  if (!model) throw new Error(`[chatgpt] Unknown model profile: ${selectedModel}`);
+  const label = model.uiLabel;
+  const labels = CHATGPT_MODEL_LEVELS.map(item => item.uiLabel);
+  const opened = await page.evaluate(knownLabels => {
+    const visible = element => {
+      const rect = element.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const firstLine = element => String(element.getAttribute('data-model-label') || element.getAttribute('aria-label') || element.textContent || '').split(/\r?\n/, 1)[0].trim();
+    const controls = [...document.querySelectorAll('button,[role="button"]')].filter(visible);
+    const opener = controls.find(element => /model/i.test(element.getAttribute('data-testid') || element.getAttribute('aria-label') || ''))
+      || controls.find(element => knownLabels.some(candidate => firstLine(element) === candidate));
+    if (!opener) return false;
+    opener.click();
+    return true;
+  }, labels);
+  if (!opened) throw new Error(`[chatgpt] Requested UI model ${label} is unavailable: model-picker-control-unavailable`);
+
+  const versionSubmenuReady = await page.waitForFunction(expected => {
+    const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
+    const firstLine = element => String(element.getAttribute('aria-label') || element.textContent || '').split(/\r?\n/, 1)[0].trim();
+    return [...document.querySelectorAll('[role="menuitem"][data-has-submenu]')]
+      .filter(visible)
+      .some(element => firstLine(element) === expected);
+  }, { timeout: UI_WAIT_TIMEOUT_MS }, 'GPT-5.6 Sol').then(() => true).catch(() => false);
+  if (!versionSubmenuReady) throw new Error(`[chatgpt] Requested UI model ${label} is unavailable: model-version-submenu-unavailable`);
+
+  const openedVersionSubmenu = await page.evaluate(expected => {
+    const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
+    const firstLine = element => String(element.getAttribute('aria-label') || element.textContent || '').split(/\r?\n/, 1)[0].trim();
+    const option = [...document.querySelectorAll('[role="menuitem"][data-has-submenu]')]
+      .filter(visible)
+      .find(element => firstLine(element) === expected);
+    if (!option) return false;
+    option.click();
+    return true;
+  }, 'GPT-5.6 Sol');
+  if (!openedVersionSubmenu) throw new Error(`[chatgpt] Requested UI model ${label} is unavailable: model-version-submenu-disappeared`);
+
+  const versionReady = await page.waitForFunction(expected => {
+    const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
+    const firstLine = element => String(element.getAttribute('aria-label') || element.textContent || '').split(/\r?\n/, 1)[0].trim();
+    return [...document.querySelectorAll('[role="menuitemradio"],[role="menuitem"]')]
+      .filter(visible)
+      .some(element => !element.hasAttribute('data-has-submenu') && firstLine(element) === expected);
+  }, { timeout: UI_WAIT_TIMEOUT_MS }, 'GPT-5.6 Sol').then(() => true).catch(() => false);
+  if (!versionReady) throw new Error(`[chatgpt] Requested UI model ${label} is unavailable: model-version-unavailable`);
+
+  const clickedVersion = await page.evaluate(expected => {
+    const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
+    const firstLine = element => String(element.getAttribute('aria-label') || element.textContent || '').split(/\r?\n/, 1)[0].trim();
+    const option = [...document.querySelectorAll('[role="menuitemradio"],[role="menuitem"]')]
+      .filter(visible)
+      .find(element => !element.hasAttribute('data-has-submenu') && firstLine(element) === expected);
+    if (!option) return false;
+    option.click();
+    return true;
+  }, 'GPT-5.6 Sol');
+  if (!clickedVersion) throw new Error(`[chatgpt] Requested UI model ${label} is unavailable: model-version-disappeared`);
+
+  const reopened = await page.evaluate(knownLabels => {
+    const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
+    const firstLine = element => String(element.getAttribute('data-model-label') || element.getAttribute('aria-label') || element.textContent || '').split(/\r?\n/, 1)[0].trim();
+    const opener = [...document.querySelectorAll('button,[role="button"]')].filter(visible)
+      .find(element => /model/i.test(element.getAttribute('data-testid') || element.getAttribute('aria-label') || ''))
+      || [...document.querySelectorAll('button,[role="button"]')].filter(visible).find(element => knownLabels.some(candidate => firstLine(element) === candidate));
+    if (!opener) return false;
+    opener.click();
+    return true;
+  }, labels);
+  if (!reopened) throw new Error(`[chatgpt] Requested UI model ${label} is unavailable: model-picker-control-unavailable-after-version`);
+
+  const currentVersionConfirmed = await page.waitForFunction(expected => {
+    const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
+    const firstLine = element => String(element.getAttribute('aria-label') || element.textContent || '').split(/\r?\n/, 1)[0].trim();
+    return [...document.querySelectorAll('[role="menuitem"][data-has-submenu]')]
+      .filter(visible)
+      .some(element => firstLine(element) === expected);
+  }, { timeout: UI_WAIT_TIMEOUT_MS }, 'GPT-5.6 Sol').then(() => true).catch(() => false);
+  if (!currentVersionConfirmed) throw new Error(`[chatgpt] Requested UI model ${label} is unavailable: model-version-not-confirmed`);
+
+  const optionReady = await page.waitForFunction(expected => {
+    const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
+    const firstLine = element => String(element.getAttribute('data-model-label') || element.getAttribute('aria-label') || element.textContent || '').split(/\r?\n/, 1)[0].trim();
+    return [...document.querySelectorAll('[role="menuitemradio"]')]
+      .filter(visible)
+      .some(element => firstLine(element) === expected);
+  }, { timeout: UI_WAIT_TIMEOUT_MS }, label).then(() => true).catch(() => false);
+  if (!optionReady) throw new Error(`[chatgpt] Requested UI model ${label} is unavailable: model-option-unavailable:${label}`);
+
+  const clicked = await page.evaluate(expected => {
+    const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
+    const firstLine = element => String(element.getAttribute('data-model-label') || element.getAttribute('aria-label') || element.textContent || '').split(/\r?\n/, 1)[0].trim();
+    const option = [...document.querySelectorAll('[role="menuitemradio"]')]
+      .filter(visible)
+      .find(element => firstLine(element) === expected);
+    if (!option) return false;
+    option.click();
+    return true;
+  }, label);
+  if (!clicked) throw new Error(`[chatgpt] Requested UI model ${label} is unavailable: model-option-disappeared:${label}`);
+
+  const selected = await page.waitForFunction(expected => {
+    const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
+    const firstLine = element => String(element.getAttribute('data-model-label') || element.getAttribute('aria-label') || element.textContent || '').split(/\r?\n/, 1)[0].trim();
+    const opener = [...document.querySelectorAll('button,[role="button"]')].filter(visible)
+      .find(element => ['Instant', 'Medium', 'High', 'Extra High', 'Pro'].includes(firstLine(element)));
+    const checkedOption = [...document.querySelectorAll('[role="menuitemradio"]')]
+      .some(element => firstLine(element) === expected && element.getAttribute('aria-checked') === 'true');
+    return firstLine(opener) === expected || (checkedOption && (!opener || firstLine(opener) === expected));
+  }, { timeout: UI_WAIT_TIMEOUT_MS }, label).then(() => true).catch(() => false);
+  if (!selected) throw new Error(`[chatgpt] Requested UI model ${label} is unavailable: model-selection-not-visible`);
+  return { ...model, verification: 'visible-ui-label' };
+}
+
+function redactString(value) {
+  const sensitiveKey = new RegExp(`((?:["']${SENSITIVE_STRING_KEY}["'])\\s*:\\s*["'])([^"']*)(["'])`, 'gi');
+  const assignment = new RegExp(`((?:${SENSITIVE_STRING_KEY})\\s*[=:]\\s*)([^\\s,;?&#}\\]]+)`, 'gi');
+  const query = new RegExp(`([?&]${SENSITIVE_STRING_KEY}=)[^&#\\s"']+`, 'gi');
+  return String(value)
+    .replace(/(Bearer\s+)[^\s,;]+/gi, '$1[redacted]')
+    .replace(sensitiveKey, '$1[redacted]$3')
+    .replace(assignment, '$1[redacted]')
+    .replace(query, '$1[redacted]');
+}
+
+function redact(value, key = '') {
+  if (PRIVATE_KEYS.test(key)) return '[redacted]';
+  if (Array.isArray(value)) return value.map(item => redact(item));
+  if (!value || typeof value !== 'object') return typeof value === 'string' ? redactString(value) : value;
+  return Object.fromEntries(Object.entries(value).map(([itemKey, item]) => [itemKey, redact(item, itemKey)]));
+}
+
+function safeStreamEvent(onStreamEvent, event, payload = {}) {
+  if (typeof onStreamEvent !== 'function') return;
+  onStreamEvent({ event, provider_conversation_id: payload.provider_conversation_id || null, source: payload.source || 'live-cdp', ...redact(payload) });
+}
+
+function emitTrackerChanges(previous, next, onStreamEvent, emitted) {
+  const id = next.conversationId || null;
+  if (id && !emitted.session) {
+    emitted.session = true;
+    safeStreamEvent(onStreamEvent, 'session', { provider_conversation_id: id, url: chatGptConversationUrl(id), source: 'live-cdp' });
+  }
+  const statuses = [];
+  if (next.acceptedResponse && !previous.acceptedResponse) statuses.push('submitted');
+  if (next.handedOff && !previous.handedOff) statuses.push('stream_handoff');
+  if (next.resumedStream && !previous.resumedStream) statuses.push('resumed');
+  if (next.messageStreamComplete && !previous.messageStreamComplete) statuses.push('message_stream_complete');
+  if (next.assistantTurnComplete && !previous.assistantTurnComplete) statuses.push('assistant_turn_complete');
+  if (next.endTurn && !previous.endTurn) statuses.push('end_turn');
+  for (const status of statuses) {
+    if (emitted.statuses.has(status)) continue;
+    emitted.statuses.add(status);
+    safeStreamEvent(onStreamEvent, 'status', { provider_conversation_id: id, status, source: 'live-cdp' });
+  }
+  const before = previous.text || '';
+  const after = next.text || '';
+  if (after.length > before.length && after.startsWith(before)) {
+    const delta = after.slice(before.length);
+    if (delta && !emitted.deltas.has(`${after.length}:${delta}`)) {
+      emitted.deltas.add(`${after.length}:${delta}`);
+      safeStreamEvent(onStreamEvent, 'delta', { provider_conversation_id: id, text: delta, source: 'live-cdp' });
+    }
+  }
+}
+
+function emitSnapshotMessages(onStreamEvent, id, detail, fingerprints, source) {
+  for (const message of selectChatGptCurrentBranch(detail).map(item => redact(item))) {
+    const messageId = message?.id || JSON.stringify(message);
+    const fingerprint = JSON.stringify(message);
+    const previous = fingerprints.get(messageId);
+    if (previous === fingerprint) continue;
+    fingerprints.set(messageId, fingerprint);
+    safeStreamEvent(onStreamEvent, 'message', {
+      provider_conversation_id: id,
+      message,
+      change: previous === undefined ? 'new' : 'changed',
+      source,
     });
-    const target = candidates.find(candidate => candidate.visible);
-    if (!target) return null;
-    return { x: target.x + target.width / 2, y: target.y + Math.min(target.height / 2, 20) };
+  }
+}
+
+export async function readChatGptConversation(page, conversationId) {
+  if (!conversationId) return null;
+  const outcome = await page.evaluate(async id => {
+    const sessionResponse = await fetch('/api/auth/session', { credentials: 'include' });
+    if (!sessionResponse.ok) return { error: { kind: 'auth', status: sessionResponse.status || 0 } };
+    const session = await sessionResponse.json();
+    const accessToken = session?.accessToken;
+    const accountId = session?.account?.id;
+    if (typeof accessToken !== 'string' || !accessToken || typeof accountId !== 'string' || !accountId) return { error: { kind: 'auth', status: 0 } };
+    const headers = { Authorization: `Bearer ${accessToken}`, 'ChatGPT-Account-ID': accountId };
+    const base = `/backend-api/conversation/${encodeURIComponent(id)}`;
+    const read = async (url, kind) => {
+      const response = await fetch(url, { credentials: 'include', headers });
+      if (!response.ok) return { error: { kind, status: response.status || 0 } };
+      return { value: await response.json() };
+    };
+    const [conversation, streamStatus] = await Promise.all([read(base, 'detail'), read(`${base}/stream_status`, 'status')]);
+    return { error: conversation.error || streamStatus.error || null, detail: conversation.error || streamStatus.error ? null : { conversation: conversation.value, streamStatus: streamStatus.value } };
+  }, conversationId);
+  if (outcome?.error?.kind === 'auth') {
+    throw new Error('[chatgpt] Authentication is unavailable or expired. Recovery: sign in to ChatGPT in the configured Chrome profile, then resync the AI Chat Browser Tools profile and retry.');
+  }
+  if (outcome?.error?.kind === 'detail' && outcome.error.status === 404) {
+    throw new Error('[chatgpt] Provider conversation id is invalid or unavailable (detail HTTP 404).');
+  }
+  if (outcome?.error) throw new Error(`[chatgpt] Conversation ${outcome.error.kind} read failed with HTTP ${outcome.error.status || 'unknown'}.`);
+  return redact(outcome?.detail || null);
+}
+
+export async function listChatGptConversations({ browser, limit = 20, now = () => new Date().toISOString() } = {}) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('[chatgpt] conversation limit must be between 1 and 100.');
+  const pages = await browser.pages();
+  const page = pages.find(candidate => isChatGptUrl(candidate.url())) || await browser.newPage({ background: true });
+  if (!isChatGptUrl(page.url())) await page.goto(CHATGPT_ORIGIN, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  const result = await page.evaluate(async requestedLimit => {
+    const sensitiveKey = '(?:[a-z0-9_-]*(?:auth(?:orization)?|session|cookie|token|secret|credential|password|signature)[a-z0-9_-]*|(?:[a-z0-9_-]*(?:api|access)[_-]?key[a-z0-9_-]*)|sig|(?:aws|google)[_-]?access[_-]?(?:key[_-]?)?id|x[-_]?(?:amz|goog)[-_]?(?:credential|security[-_]?token|signature))';
+    const clean = value => String(value ?? '')
+      .replace(/(Bearer\s+)[^\s,;]+/gi, '$1[redacted]')
+      .replace(new RegExp(`((?:["']${sensitiveKey}["'])\\s*:\\s*["'])([^"']*)(["'])`, 'gi'), '$1[redacted]$3')
+      .replace(new RegExp(`((?:${sensitiveKey})\\s*[=:]\\s*)([^\\s,;?&#}\\]]+)`, 'gi'), '$1[redacted]');
+    const allowedStatusValues = new Set([
+      'not_started', 'pending', 'queued', 'running', 'in_progress', 'complete', 'completed',
+      'finished', 'failed', 'error', 'cancelled', 'canceled', 'stopped', 'expired',
+    ]);
+    const statusToken = value => {
+      if (typeof value !== 'string') return null;
+      const token = clean(value);
+      const normalized = token.trim().toLowerCase().replace(/[\s-]+/g, '_');
+      return allowedStatusValues.has(normalized) ? token : null;
+    };
+    const safeStatus = value => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+      const status = {};
+      const state = statusToken(value.state);
+      const statusValue = statusToken(value.status);
+      if (state) status.state = state;
+      if (statusValue) status.status = statusValue;
+      if (typeof value.progress === 'number' && Number.isFinite(value.progress)) status.progress = value.progress;
+      if (typeof value.done === 'boolean') status.done = value.done;
+      return Object.keys(status).length > 0 ? status : null;
+    };
+    const sessionResponse = await fetch('/api/auth/session', { credentials: 'include' });
+    if (!sessionResponse.ok) return { error: { kind: 'auth', status: sessionResponse.status || 0 } };
+    const session = await sessionResponse.json();
+    const token = session?.accessToken;
+    const accountId = session?.account?.id;
+    if (!token || !accountId) return { error: { kind: 'auth', status: 0 } };
+    const response = await fetch(`/backend-api/conversations?offset=0&limit=${requestedLimit}&order=updated`, { method: 'GET', credentials: 'include', headers: { Authorization: `Bearer ${token}`, 'ChatGPT-Account-ID': accountId } });
+    if (!response.ok) return { error: { kind: 'list', status: response.status || 0 } };
+    const body = await response.json();
+    const items = Array.isArray(body?.items) ? body.items : [];
+    return { total: Number(body?.total) || items.length, items: items.map(item => ({
+      provider_conversation_id: typeof item?.id === 'string' ? item.id : null,
+      title: clean(item?.title || ''),
+      created_at: item?.create_time ?? null,
+      updated_at: item?.update_time ?? null,
+      current_node: item?.current_node ?? null,
+      async_status: safeStatus(item?.async_status),
+      is_temporary: !!item?.is_temporary_chat,
+      is_archived: !!item?.is_archived,
+      is_starred: !!item?.is_starred,
+    })).filter(item => item.provider_conversation_id), };
+  }, limit);
+  if (result?.error?.kind === 'auth') throw new Error('[chatgpt] Authentication is unavailable or expired. Recovery: sign in to ChatGPT in the configured Chrome profile, then retry.');
+  if (result?.error) throw new Error(`[chatgpt] Conversation listing read failed with HTTP ${result.error.status || 'unknown'}.`);
+  const conversations = result.items.flatMap(item => {
+      try { return [{ ...item, provider_conversation_id: normalizeChatGptConversationId(item.provider_conversation_id), conversation_url: chatGptConversationUrl(item.provider_conversation_id) }]; } catch { return []; }
+    });
+  return { provider: 'chatgpt', count: conversations.length, total: result.total, limit, offset: 0, captured_at: now(), conversations };
+}
+
+function isPublicMessage(message) {
+  const role = message?.author?.role;
+  const contentType = message?.content?.content_type;
+  return !!message
+    && role !== 'system'
+    && contentType !== 'model_editable_context'
+    && contentType !== 'user_editable_context'
+    && !message.is_visually_hidden_from_conversation
+    && !message.metadata?.is_visually_hidden_from_conversation;
+}
+
+export function selectChatGptCurrentBranch(detail) {
+  const conversation = detail?.conversation || detail || {};
+  const mapping = conversation.mapping || {};
+  let node = mapping[conversation.current_node];
+  if (!node) return [];
+  const reversed = [];
+  while (node) {
+    if (node.message) reversed.push(node.message);
+    node = node.parent ? mapping[node.parent] : null;
+  }
+  const path = reversed.reverse();
+  let latestUser = -1;
+  for (let index = 0; index < path.length; index++) {
+    if (path[index].author?.role === 'user' && path[index].content?.content_type !== 'user_editable_context') latestUser = index;
+  }
+  return latestUser < 0 ? [] : path.slice(latestUser).filter(isPublicMessage);
+}
+
+export function selectChatGptStructuredTurn(detail) {
+  const messages = selectChatGptCurrentBranch(detail);
+  const final = [...messages].reverse().find(message => message.author?.role === 'assistant'
+    && message.channel === 'final'
+    && message.status === 'finished_successfully'
+    && message.end_turn === true);
+  const text = redactString(final?.content?.parts?.filter(part => typeof part === 'string').join('\n') || '');
+  const metadata = final?.metadata || {};
+  const user = messages.find(message => message.author?.role === 'user') || null;
+  const startedAt = user?.create_time ?? final?.create_time ?? null;
+  const completedAt = final?.update_time ?? final?.create_time ?? null;
+  return {
+    messages: redact(messages),
+    final: redact(final),
+    text,
+    modelSlug: metadata.model_slug || metadata.default_model_slug || null,
+    thinkingEffort: metadata.thinking_effort || null,
+    citations: redact(metadata.citations || final?.content?.citations || []),
+    contentReferences: redact(metadata.content_references || final?.content?.content_references || []),
+    searchResultGroups: redact(metadata.search_result_groups || final?.content?.search_result_groups || []),
+    storyEvents: redact(metadata.story_events || final?.metadata?.story_events || []),
+    userMessageId: user?.id || null,
+    assistantMessageId: final?.id || null,
+    turnExchangeId: metadata.turn_exchange_id || final?.turn_exchange_id || null,
+    startedAt,
+    completedAt,
+  };
+}
+
+export function isChatGptTemporaryConversation(detailOrListing) {
+  // Detail responses use is_temporary_chat. Listings are intentionally accepted too,
+  // so callers cannot mistake a provider-supplied temporary record for persistence.
+  const detail = detailOrListing?.conversation || detailOrListing || {};
+  return detail?.is_temporary_chat === true || detail?.is_temporary === true;
+}
+
+function rejectChatGptTemporaryConversation(detailOrListing) {
+  if (isChatGptTemporaryConversation(detailOrListing)) {
+    throw new Error('[chatgpt] Temporary conversations cannot be continued, reattached, or read as detached output. Start a persistent conversation instead.');
+  }
+}
+
+export function hasChatGptTerminalQuorum(detail) {
+  const status = detail?.streamStatus?.status || detail?.stream_status?.status || detail?.conversation?.stream_status?.status;
+  return status === 'COMPLETE' && !!selectChatGptStructuredTurn(detail).final;
+}
+
+function isTransientChatGptDetailError(error) {
+  return /\[chatgpt\] Conversation (?:detail|status) read failed with HTTP (?:408|429|5\d\d)\./.test(String(error?.message || ''));
+}
+
+function buildProviderState(snapshot, detail, extra = {}) {
+  const structured = detail ? selectChatGptStructuredTurn(detail) : null;
+  const quorum = detail ? hasChatGptTerminalQuorum(detail) : false;
+  const timeout = !!extra.timeout;
+  const hasText = !!(structured?.text || snapshot.text || '').trim();
+  return redact({
+    transport: snapshot.transport,
+    requested_model_profile: snapshot.requestedModelProfile,
+    observed_payload_model: snapshot.observedPayloadModel || null,
+    observed_payload_thinking_effort: snapshot.observedPayloadThinkingEffort || null,
+    model_verification: snapshot.modelVerification || { status: 'pending', verified: false },
+    model_slug: structured?.modelSlug || snapshot.modelSlug || snapshot.observedPayloadModel || null,
+    thinking_effort: structured?.thinkingEffort || snapshot.thinkingEffort || snapshot.observedPayloadThinkingEffort || null,
+    conversation_id: snapshot.conversationId || null,
+    turn_exchange_id: snapshot.turnExchangeId || null,
+    response_statuses: snapshot.responseStatuses || [],
+    partial: !quorum && hasText,
+    timeout,
+    empty_response: !hasText,
+    stream_state: {
+      status: quorum ? 'completed' : (timeout ? (hasText ? 'timeout_partial' : 'timeout_empty') : (snapshot.handedOff ? 'stream_handoff' : 'pending')),
+      stream_closed: !!snapshot.streamClosed,
+      message_stream_complete: !!snapshot.messageStreamComplete,
+      assistant_turn_complete: !!snapshot.assistantTurnComplete,
+      end_turn: !!snapshot.endTurn,
+      handed_off: !!snapshot.handedOff,
+      resumed_stream: !!snapshot.resumedStream,
+      persistent_complete: detail?.streamStatus?.status === 'COMPLETE',
+      terminal_quorum: quorum,
+    },
+    structured_turn: structured ? {
+      messages: structured.messages,
+      user_message_id: structured.userMessageId,
+      assistant_message_id: structured.assistantMessageId,
+      turn_exchange_id: structured.turnExchangeId || snapshot.turnExchangeId || null,
+      citations: structured.citations,
+      content_references: structured.contentReferences,
+      search_result_groups: structured.searchResultGroups,
+      story_events: structured.storyEvents,
+      started_at: structured.startedAt,
+      completed_at: structured.completedAt,
+    } : null,
+    ...extra,
   });
-}
-
-async function chatGptComposerText(page) {
-  return page.evaluate(() => {
-    const selectors = '#prompt-textarea[contenteditable="true"], #prompt-textarea, [contenteditable="true"][role="textbox"], textarea[placeholder="Ask anything"], textarea';
-    const candidates = Array.from(document.querySelectorAll(selectors));
-    const el = candidates.find(candidate => {
-      const rect = candidate.getBoundingClientRect();
-      return rect.width > 10 && rect.height > 10;
-    }) || candidates[0];
-    if (!el) return '';
-    return (el.innerText || el.value || el.textContent || '').trim();
-  }).catch(() => '');
-}
-
-async function chatGptSendButtonReady(page) {
-  return page.evaluate(() => {
-    const buttons = Array.from(document.querySelectorAll('button')).map(el => {
-      const rect = el.getBoundingClientRect();
-      return {
-        aria: el.getAttribute('aria-label') || '',
-        testid: el.getAttribute('data-testid') || '',
-        disabled: el.disabled || el.getAttribute('aria-disabled') === 'true',
-        visible: rect.width > 0 && rect.height > 0,
-      };
-    });
-    return buttons.some(button => /send prompt|send message|send/i.test(button.aria) && !/dictation|voice/i.test(button.aria) && !button.disabled && button.visible)
-      || buttons.some(button => /send-button/i.test(button.testid) && !button.disabled && button.visible);
-  }).catch(() => false);
 }
 
 async function focusChatGptComposer(page) {
   return page.evaluate(() => {
-    const selectors = '#prompt-textarea[contenteditable="true"], #prompt-textarea, [contenteditable="true"][role="textbox"], textarea[placeholder="Ask anything"], textarea';
-    const candidates = Array.from(document.querySelectorAll(selectors));
-    const el = candidates.find(candidate => {
+    const selectors = '#prompt-textarea[contenteditable="true"],#prompt-textarea,[contenteditable="true"][role="textbox"],textarea[placeholder="Ask anything"],textarea';
+    const element = [...document.querySelectorAll(selectors)].find(candidate => {
       const rect = candidate.getBoundingClientRect();
       return rect.width > 10 && rect.height > 10;
-    }) || candidates[0];
-    if (!el) return false;
-    el.focus();
-    const rect = el.getBoundingClientRect();
-    return rect.width > 10 && rect.height > 10;
+    });
+    if (!element) return false;
+    element.focus();
+    return document.activeElement === element;
   }).catch(() => false);
+}
+
+async function chatGptComposerState(page) {
+  return page.evaluate(() => {
+    const selectors = '#prompt-textarea[contenteditable="true"],#prompt-textarea,[contenteditable="true"][role="textbox"],textarea[placeholder="Ask anything"],textarea';
+    const element = [...document.querySelectorAll(selectors)].find(candidate => {
+      const rect = candidate.getBoundingClientRect();
+      return rect.width > 10 && rect.height > 10;
+    });
+    const text = (element?.value || element?.textContent || '').trim();
+    const sendReady = [...document.querySelectorAll('button')].some(button => {
+      const rect = button.getBoundingClientRect();
+      const label = button.getAttribute('aria-label') || '';
+      const testId = button.getAttribute('data-testid') || '';
+      return rect.width > 0 && rect.height > 0 && !button.disabled
+        && (/send prompt|send message/i.test(label) || /send-button/i.test(testId));
+    });
+    return { focused: document.activeElement === element, text, sendReady };
+  }).catch(() => ({ focused: false, text: '', sendReady: false }));
 }
 
 async function withChatGptInputClient(page, callback) {
@@ -597,202 +895,36 @@ async function withChatGptInputClient(page, callback) {
 }
 
 async function dispatchChatGptKey(client, { key, code, windowsVirtualKeyCode, modifiers = 0 }) {
-  await client.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode, nativeVirtualKeyCode: windowsVirtualKeyCode, modifiers });
-  await client.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode, nativeVirtualKeyCode: windowsVirtualKeyCode, modifiers });
-}
-
-export async function clearChatGptPromptText(page) {
-  if (!await focusChatGptComposer(page)) return false;
-  await withChatGptInputClient(page, async (client) => {
-    await dispatchChatGptKey(client, { key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 4 });
-    await dispatchChatGptKey(client, { key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
-  });
-  await sleep(300);
-  return !await chatGptSendButtonReady(page);
-}
-
-export async function insertChatGptPromptText(page, prompt) {
-  if (!await focusChatGptComposer(page)) return false;
-  await withChatGptInputClient(page, async (client) => {
-    await client.send('Input.insertText', { text: prompt });
-  });
-  await sleep(500);
-  return chatGptSendButtonReady(page);
-}
-
-function isUsableChatGptAssistantMessageCount(value) {
-  return Number.isInteger(value) && value >= 0;
-}
-
-async function countChatGptAssistantMessages(page) {
-  return page.evaluate(() => document.querySelectorAll('[data-message-author-role="assistant"]').length)
-    .catch(() => null);
-}
-
-async function recoverChatGptDomResponse(page) {
-  if (!page?.evaluate) return { text: '', done: false, assistantMessageCount: null };
-  return page.evaluate(() => {
-    const messages = document.querySelectorAll('[data-message-author-role="assistant"]');
-    if (messages.length === 0) return { text: '', done: false, assistantMessageCount: 0 };
-    let text = messages[messages.length - 1].innerText || '';
-    text = text.replace(/^Thought for \d+[sm]?\s*\n?/i, '');
-    text = text.replace(/^ChatGPT said\s*\n?/i, '');
-    return { text: text.trim(), done: !!text.trim(), assistantMessageCount: messages.length };
-  }).catch(() => ({ text: '', done: false, assistantMessageCount: null }));
-}
-
-async function recoverCurrentChatGptDomResult({ page, snapshot, selectedModel, attemptContext, preSubmitAssistantMessageCount, reason }) {
-  const baselineAssistantMessageCount = isUsableChatGptAssistantMessageCount(preSubmitAssistantMessageCount)
-    ? preSubmitAssistantMessageCount
-    : attemptContext?.preSubmitAssistantMessageCount;
-  const fallback = await recoverChatGptDomResponse(page);
-  const fallbackIsCurrent = isUsableChatGptAssistantMessageCount(baselineAssistantMessageCount)
-    && isUsableChatGptAssistantMessageCount(fallback.assistantMessageCount)
-    && fallback.assistantMessageCount > baselineAssistantMessageCount;
-  const fallbackText = String(fallback.text || '').trim();
-
-  if (!fallbackIsCurrent || !fallbackText) return null;
-
-  const fallbackSnapshot = {
-    ...(snapshot || {}),
-    text: fallbackText,
-    done: fallback.done,
-    assistantTurnComplete: fallback.done,
-    transport: 'dom-fallback',
-    requestedModelProfile: resolveChatGptModel(selectedModel)?.id || selectedModel,
-  };
-  return {
-    text: fallbackText,
-    rawText: fallbackText,
-    done: fallback.done,
-    modelUsed: snapshot?.modelSlug || resolveChatGptModel(selectedModel)?.model || selectedModel,
-    finalUrl: page.url(),
-    providerState: buildChatGptProviderState(fallbackSnapshot, { dom_fallback: true, reason }),
-    searchResults: [],
-  };
-}
-
-function buildChatGptStreamMetadata(snapshot, extra = {}) {
-  const timeout = !!extra.timeout;
-  const domFallback = !!extra.dom_fallback || snapshot.transport === 'dom-fallback';
-  const hasText = !!String(snapshot.text || '').trim();
-  const emptyResponse = !domFallback && (!!extra.empty_response || !!snapshot.networkResponseEmpty || (!hasText && (timeout || (snapshot.responseStatuses || []).length > 0)));
-  const assistantTurnComplete = !!snapshot.assistantTurnComplete || (!!snapshot.done && !snapshot.awaitingResume);
-  const partial = !emptyResponse && !assistantTurnComplete && (hasText || !!extra.partial);
-  const handedOff = !!snapshot.handedOff;
-  const awaitingResume = !!snapshot.awaitingResume || (handedOff && !snapshot.resumedStream && !assistantTurnComplete);
-  const resumable = !!(snapshot.conversationId || snapshot.topicId || snapshot.turnExchangeId);
-
-  let status = 'pending';
-  if (domFallback) status = 'dom_fallback';
-  else if (assistantTurnComplete) status = 'completed';
-  else if (timeout && emptyResponse) status = 'timeout_empty';
-  else if (timeout && partial) status = 'timeout_partial';
-  else if (emptyResponse) status = 'empty';
-  else if (snapshot.resumedStream) status = 'resumed_stream';
-  else if (handedOff) status = 'stream_handoff';
-  else if (snapshot.streamClosed) status = 'stream_closed';
-  else if (partial) status = 'partial';
-
-  return {
-    status,
-    partial,
-    empty_response: emptyResponse,
-    timeout,
-    stream_closed: !!snapshot.streamClosed,
-    stream_closed_count: snapshot.streamClosedCount || 0,
-    assistant_turn_complete: assistantTurnComplete,
-    done_reason: snapshot.doneReason || null,
-    handed_off: handedOff,
-    awaiting_resume: awaitingResume,
-    resumed_stream: !!snapshot.resumedStream,
-    resume_transport: snapshot.resumeTransport || null,
-    websocket_catchup: !!snapshot.websocketCatchup,
-    websocket_frame: !!snapshot.websocketFrame,
-    websocket_done: !!snapshot.websocketDone,
-    message_stream_complete: !!snapshot.messageStreamComplete,
-    end_turn: !!snapshot.endTurn,
-    has_resume_token: !!snapshot.resumeToken,
-    resumable,
-    dom_fallback: domFallback,
-  };
-}
-
-function buildChatGptProviderState(snapshot, extra = {}) {
-  const { partial, timeout, empty_response: emptyResponse, dom_fallback: domFallback, ...restExtra } = extra;
-  const streamState = buildChatGptStreamMetadata(snapshot, {
-    partial,
-    timeout,
-    empty_response: emptyResponse,
-    dom_fallback: domFallback,
-  });
-  return {
-    transport: snapshot.transport,
-    requested_model_profile: snapshot.requestedModelProfile,
-    requested_payload_model: Object.hasOwn(snapshot, 'appliedPayloadModel') ? snapshot.appliedPayloadModel : (snapshot.requestedPayloadModel || null),
-    requested_payload_thinking_effort: Object.hasOwn(snapshot, 'appliedPayloadThinkingEffort') ? snapshot.appliedPayloadThinkingEffort : (snapshot.requestedPayloadThinkingEffort ?? null),
-    original_payload_model: snapshot.originalPayloadModel || snapshot.requestedPayloadModel || null,
-    original_payload_thinking_effort: snapshot.originalPayloadThinkingEffort ?? snapshot.requestedPayloadThinkingEffort ?? null,
-    model_slug: snapshot.modelSlug || null,
-    thinking_effort: snapshot.thinkingEffort || null,
-    conversation_id: snapshot.conversationId || null,
-    topic_id: snapshot.topicId || null,
-    turn_exchange_id: snapshot.turnExchangeId || null,
-    message_id: snapshot.finalMessageId || snapshot.messageId || null,
-    request_id: snapshot.requestId || null,
-    request_modified: !!snapshot.requestModified,
-    intercepted_requests: snapshot.interceptedRequests || 0,
-    response_statuses: snapshot.responseStatuses || [],
-    empty_network_responses: snapshot.emptyNetworkResponses || 0,
-    partial: streamState.partial,
-    timeout: streamState.timeout,
-    empty_response: streamState.empty_response,
-    stream_closed: streamState.stream_closed,
-    assistant_turn_complete: streamState.assistant_turn_complete,
-    handed_off: streamState.handed_off,
-    resumed_stream: streamState.resumed_stream,
-    dom_fallback: streamState.dom_fallback,
-    stream_state: streamState,
-    ...restExtra,
-  };
+  const details = { key, code, windowsVirtualKeyCode, nativeVirtualKeyCode: windowsVirtualKeyCode, modifiers };
+  await client.send('Input.dispatchKeyEvent', { type: 'keyDown', ...details });
+  await client.send('Input.dispatchKeyEvent', { type: 'keyUp', ...details });
 }
 
 export const chatgptProvider = {
   name: 'chatgpt',
   url: CHATGPT_ORIGIN,
   trustedConversationHostnames: CHATGPT_HOSTNAMES,
-  transport: 'network-observed-request',
+  transport: 'network-incremental-sse',
   defaultModel: 'extra-high',
-  taskModels: {
-    default: 'extra-high',
-    quick: 'instant',
-    reasoning: 'extra-high',
-    pro: 'pro-extended',
-  },
-  historyPolicy: {
-    default: 'provider-history',
-    transportField: 'conversation_mode.kind',
-  },
-  resolveConversationAttachment: resolveChatGptConversationAttachment,
-  conversationUrlFromState({ conversation } = {}) {
-    return resolveChatGptConversationUrl(conversation);
-  },
-
-  listModelsRequiresBrowser: false,
-
+  taskModels: { default: 'extra-high', quick: 'instant', reasoning: 'high', pro: 'pro' },
+  historyPolicy: { default: 'provider-history', transportField: 'conversation_mode.kind' },
+  capabilities: { localConversationState: false, cachePolicy: 'none', supportsSubmitOnly: true, supportsFinal: true, supportsConversationListing: true, streamFormat: 'ndjson', requiresPreSubmitTextRead: false },
   async listModels({ request } = {}) {
-    return {
-      model_source: 'chatgpt-webui-request-profiles',
-      account_specific: true,
-      verification: {
-        enabled: !!request?.verifyModels,
-        status: request?.verifyModels ? 'not-implemented-for-chatgpt-direct-validation' : 'static-request-profile-list',
-        note: 'Runtime uses request payload rewrite and network stream parsing, not the model picker UI.',
-      },
-      models: CHATGPT_MODEL_LEVELS.map(chatGptModelRecord),
-    };
+    return { model_source: 'chatgpt-ui-picker-profiles', account_specific: true, verification: { enabled: !!request?.verifyModels, status: 'ui-selection-required' }, models: CHATGPT_MODEL_LEVELS.map(chatGptModelRecord) };
   },
-
+  async listConversations({ browser, request }) {
+    return listChatGptConversations({ browser, limit: request?.conversationLimit || 20 });
+  },
+  resolveConversationAttachment({ target }) {
+    const value = String(target || '').trim();
+    if (!value) throw new Error('[chatgpt] Conversation attachment is empty');
+    const { providerId: id, url } = resolveChatGptConversationTarget(value);
+    return { type: /^https?:\/\//i.test(value) ? 'url' : 'provider_id', url, providerId: id, providerState: { conversation_id: id } };
+  },
+  conversationUrlFromState({ conversation } = {}) {
+    const state = conversation?.record?.provider_state || conversation?.providerState || {};
+    return chatGptConversationUrl(state.conversation_id || conversation?.provider_id) || conversation?.url || null;
+  },
   async findPage({ browser, continueChat, request }) {
     if (!continueChat && !request?.conversationTarget) {
       const page = await browser.newPage({ background: true });
@@ -800,365 +932,178 @@ export const chatgptProvider = {
       await sleep(3000);
       return page;
     }
-
+    const target = request?.conversationTarget ? resolveChatGptConversationTarget(request.conversationTarget) : null;
     const pages = await browser.pages();
-    let page = pages.find(candidate => isChatGptUrl(candidate.url()));
+    let page = target ? pages.find(candidate => candidate.url() === target.url) : pages.find(candidate => isChatGptUrl(candidate.url()));
     if (!page) page = await browser.newPage({ background: true });
-    if (continueChat && isChatGptConversationUrl(page.url())) {
-      await sleep(1000);
-    } else if (!continueChat && !request?.conversationTarget && isChatGptConversationUrl(page.url())) {
-      await page.goto(this.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await sleep(3000);
-    } else if (!isChatGptUrl(page.url())) {
-      await page.goto(this.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await sleep(3000);
-    } else if (request?.conversationTarget && /^https?:\/\//i.test(request.conversationTarget)) {
-      await page.goto(request.conversationTarget, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await sleep(2000);
+    if (!isChatGptUrl(page.url()) || target) {
+      await page.goto(target?.url || this.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     }
+    if (target && (() => { try { return chatGptConversationIdFromUrl(page.url()) !== target.providerId; } catch { return true; } })()) throw new Error('[chatgpt] Loaded page identity does not match the requested provider conversation id.');
     return page;
   },
-
-  async recheckConversation({ browser, request, selectedModel, conversation, networkTrackerFactory = createChatGptNetworkTracker }) {
-    const url = resolveChatGptConversationUrl(conversation);
-    if (!url || !chatGptConversationIdFromUrl(url)) {
-      throw new Error('[chatgpt] Cannot recheck a saved request without a ChatGPT conversation URL or conversation_id. Use --conversation with a saved ChatGPT session that contains provider_state.conversation_id.');
-    }
-
-    const pages = await browser.pages();
-    let page = pages.find(candidate => candidate.url() === url)
-      || pages.find(candidate => isChatGptUrl(candidate.url()));
-    if (!page) page = await browser.newPage({ background: true });
-
-    const networkTracker = await networkTrackerFactory({ page, selectedModel });
-    try {
-      if (page.url() !== url) {
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await sleep(2000);
-      } else {
-        await sleep(1000);
-      }
-      const result = await this.waitForResponse({
-        page,
-        timeoutMs: (request.timeoutSeconds || 60) * 1000,
-        networkTracker,
-        selectedModel,
-      });
-      return {
-        ...result,
-        finalUrl: result.finalUrl || url,
-        providerState: {
-          ...(result.providerState || {}),
-          recheck: true,
-          recheck_source: 'saved-conversation',
-          stream_state: {
-            ...(result.providerState?.stream_state || {}),
-            recheck: true,
-          },
-        },
-      };
-    } finally {
-      await networkTracker?.dispose?.();
-    }
+  async preflight({ page, request, conversation, readConversation = readChatGptConversation }) {
+    const expected = conversation?.providerId || (request?.conversationTarget ? resolveChatGptConversationTarget(request.conversationTarget).providerId : null);
+    if (!expected) return;
+    let loaded;
+    try { loaded = chatGptConversationIdFromUrl(page.url()); } catch { throw new Error('[chatgpt] Loaded page is not the requested trusted provider conversation URL.'); }
+    if (loaded !== expected) throw new Error('[chatgpt] Loaded page identity does not match the requested provider conversation id.');
+    const baseline = await readConversation(page, expected);
+    rejectChatGptTemporaryConversation(baseline);
+    const baselineNode = baseline?.conversation?.current_node || null;
+    if (!baselineNode) throw new Error('[chatgpt] Conversation detail or baseline current node is unavailable; refusing continuation before submission.');
+    return { expectedConversationId: expected, baselineCurrentNode: baselineNode };
   },
-
-  async createAttemptContext({ page, selectedModel }) {
-    return {
-      networkTracker: await createChatGptNetworkTracker({ page, selectedModel }),
-      preSubmitAssistantMessageCount: await countChatGptAssistantMessages(page),
-    };
+  async createAttemptContext({ page, selectedModel, onStreamEvent, request, conversation, preflightContext }) {
+    const expectedConversationId = preflightContext?.expectedConversationId || conversation?.providerId || null;
+    const preserveSelection = !!(expectedConversationId && !request?.modelExplicit && !request?.modelTask);
+    return { expectedConversationId, baselineCurrentNode: preflightContext?.baselineCurrentNode || null, preserveSelection, networkTracker: await createChatGptNetworkTracker({ page, selectedModel, expectedConversationId, preserveSelection, onStreamEvent }) };
   },
-
   async disposeAttemptContext({ attemptContext }) {
     await attemptContext?.networkTracker?.dispose?.();
   },
-
-  async beforeSubmit({ page, attemptContext }) {
-    if (!attemptContext) return;
-    attemptContext.preSubmitAssistantMessageCount = await countChatGptAssistantMessages(page);
-  },
-
-  async setModel({ model, selectedModel }) {
-    const modelConfig = resolveChatGptModel(selectedModel || model);
-    if (!modelConfig) throw new Error(`[chatgpt] Unknown model request profile: ${selectedModel || model}`);
-    console.error(`[chatgpt] Model request profile: ${modelConfig.id} -> ${modelConfig.model}${modelConfig.thinking_effort ? ` (${modelConfig.thinking_effort})` : ''}`);
-  },
-
-  async clearInput({ page }) {
-    const inputPos = await visibleInputPosition(page);
-    if (!inputPos) return;
-    if (await clearChatGptPromptText(page)) return;
-    await page.mouse.click(inputPos.x, inputPos.y);
-    await sleep(200);
-    await page.keyboard.down('Meta');
-    await page.keyboard.press('a');
-    await page.keyboard.up('Meta');
-    await page.keyboard.press('Backspace');
-    await sleep(200);
-  },
-
-  async typePrompt({ page, prompt }) {
-    const inputPos = await visibleInputPosition(page);
-    if (!inputPos) throw new Error('[chatgpt] Prompt input not found. Verify the Browser Tools profile is logged in to ChatGPT.');
-    if (await insertChatGptPromptText(page, prompt)) {
-      await sleep(800);
-      return;
-    }
-
-    await page.mouse.click(inputPos.x, inputPos.y);
-    await sleep(300);
-    const lines = prompt.split('\n');
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].length > 0) await page.keyboard.type(lines[i], { delay: 0 });
-      if (i < lines.length - 1) {
-        await page.keyboard.down('Shift');
-        await page.keyboard.press('Enter');
-        await page.keyboard.up('Shift');
+  async recheckConversation({ browser, selectedModel, conversation, request, onStreamEvent = null, readConversation = readChatGptConversation, sleepFn = sleep, now = Date.now }) {
+    const url = this.conversationUrlFromState({ conversation });
+    if (!url) throw new Error('[chatgpt] Cannot recheck without a ChatGPT conversation id.');
+    const pages = await browser.pages();
+    const page = pages.find(candidate => candidate.url() === url) || await browser.newPage({ background: true });
+    if (page.url() !== url) await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    const id = conversation?.providerId || chatGptConversationIdFromUrl(url);
+    const deadline = now() + ((request?.timeoutSeconds || 300) * 1000);
+    let detail = null;
+    let lastStatus = null;
+    const fingerprints = new Map();
+    do {
+      detail = await readConversation(page, id);
+      // This first authenticated detail read is the trust boundary. Do not emit a
+      // session or snapshot before rejecting a provider-marked temporary chat.
+      rejectChatGptTemporaryConversation(detail);
+      if (!lastStatus) safeStreamEvent(onStreamEvent, 'session', { provider_conversation_id: id, url, source: 'provider-snapshot' });
+      const status = detail?.streamStatus?.status || detail?.stream_status?.status || detail?.conversation?.stream_status?.status || 'UNKNOWN';
+      if (status !== lastStatus) {
+        lastStatus = status;
+        safeStreamEvent(onStreamEvent, 'status', { provider_conversation_id: id, status: status === 'COMPLETE' ? 'completion_evidence' : 'in_progress', source: 'provider-snapshot' });
       }
-    }
-    await sleep(800);
-    if (!await chatGptSendButtonReady(page)) {
-      const typed = await chatGptComposerText(page);
-      throw new Error(`[chatgpt] Failed to type prompt into the composer. The send button stayed unavailable after typing${typed ? ` (composer text: ${typed.slice(0, 80)})` : ''}.`);
+      emitSnapshotMessages(onStreamEvent, id, detail, fingerprints, 'provider-snapshot');
+      if (hasChatGptTerminalQuorum(detail)) break;
+      if (now() >= deadline) break;
+      await sleepFn(1000);
+    } while (true);
+    const snapshot = { ...initialState(resolveChatGptModel(selectedModel) || resolveChatGptModel()), conversationId: id };
+    const turn = selectChatGptStructuredTurn(detail);
+    const done = hasChatGptTerminalQuorum(detail);
+    return { text: turn.text.trim(), rawText: '', done, status: done ? 'complete' : 'in_progress', providerConversationId: id, modelUsed: turn.modelSlug || resolveChatGptModel(selectedModel)?.model, finalUrl: url, providerState: buildProviderState(snapshot, detail, { recheck: true, timeout: !done }), searchResults: turn.searchResultGroups };
+  },
+  async setModel({ page, model, selectedModel }) {
+    return selectChatGptModelInUi(page, selectedModel || model);
+  },
+  shouldSetModel({ request, conversation }) {
+    return !(conversation?.providerId && !request?.modelExplicit && !request?.modelTask);
+  },
+  preserveContinuationModel({ request, conversation }) {
+    return !!(conversation?.providerId && !request?.modelExplicit && !request?.modelTask);
+  },
+  async beforeSubmit() {},
+  async clearInput({ page }) {
+    if (!await focusChatGptComposer(page)) throw new Error('[chatgpt] Prompt input not found or could not be focused.');
+    await withChatGptInputClient(page, async client => {
+      await dispatchChatGptKey(client, { key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 4 });
+      await dispatchChatGptKey(client, { key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
+    });
+    const state = await chatGptComposerState(page);
+    if (!state.focused || state.text) throw new Error('[chatgpt] Failed to clear the prompt composer with browser-native input.');
+  },
+  async typePrompt({ page, prompt }) {
+    if (!await focusChatGptComposer(page)) throw new Error('[chatgpt] Prompt input not found or could not be focused.');
+    await withChatGptInputClient(page, async client => {
+      await client.send('Input.insertText', { text: prompt });
+    });
+    const state = await chatGptComposerState(page);
+    if (!state.focused || state.text !== String(prompt).trim() || !state.sendReady) {
+      throw new Error('[chatgpt] Browser-native input did not populate the composer or enable Send.');
     }
   },
-
   async submit({ page }) {
     const submitted = await page.evaluate(() => {
-      const buttons = Array.from(document.querySelectorAll('button')).map(el => {
-        const rect = el.getBoundingClientRect();
-        return {
-          el,
-          aria: el.getAttribute('aria-label') || '',
-          testid: el.getAttribute('data-testid') || '',
-          disabled: el.disabled || el.getAttribute('aria-disabled') === 'true',
-          visible: rect.width > 0 && rect.height > 0,
-        };
-      });
-      const target = buttons.find(button => /send prompt|send message|send/i.test(button.aria) && !/dictation|voice/i.test(button.aria) && !button.disabled && button.visible)
-        || buttons.find(button => /send-button/i.test(button.testid) && !button.disabled && button.visible);
-      if (!target) return false;
-      target.el.click();
+      const button = [...document.querySelectorAll('button')].find(element => !element.disabled && (/send prompt|send message/i.test(element.getAttribute('aria-label') || '') || /send-button/i.test(element.getAttribute('data-testid') || '')));
+      if (!button) return false;
+      button.click();
       return true;
     });
     if (!submitted) throw new Error('[chatgpt] Send button is unavailable. The prompt was not submitted.');
-    await sleep(1500);
   },
-
-  async waitForResponse({ page, timeoutMs, networkTracker, selectedModel, attemptContext, preSubmitAssistantMessageCount = null, prompt = null, request = null }) {
-    const pollMs = 1000;
-    const maxPolls = Math.ceil(timeoutMs / pollMs);
-    let lastTextLength = 0;
-    let stablePolls = 0;
-    let growthCount = 0;
-    let retriedNoRequestSubmit = false;
-    let retriedTerminalEmptyStream = false;
-
+  async waitForResponse({ page, timeoutMs, networkTracker, selectedModel, request, attemptContext = null, onStreamEvent = null, readConversation = readChatGptConversation, sleepFn = sleep }) {
+    networkTracker?.throwIfFatalProgressError?.();
+    if (request?.submitOnly) {
+      const snapshot = await networkTracker.waitForSubmission(chatGptSubmissionObservationTimeoutMs(timeoutMs));
+      networkTracker?.throwIfFatalProgressError?.();
+      const id = normalizeChatGptConversationId(snapshot.conversationId);
+      return { text: '', rawText: '', done: false, status: 'submitted', providerConversationId: id, modelUsed: snapshot.modelSlug || snapshot.observedPayloadModel || (selectedModel === 'default' ? null : resolveChatGptModel(selectedModel)?.model), finalUrl: chatGptConversationUrl(id), providerState: buildProviderState(snapshot, null, { submitted: true }) };
+    }
+    const maxPolls = Math.ceil(timeoutMs / 1000);
+    const expectedConversationId = attemptContext?.expectedConversationId || null;
+    const baselineCurrentNode = attemptContext?.baselineCurrentNode || null;
+    if (expectedConversationId && !baselineCurrentNode) throw new Error('[chatgpt] Continuation baseline current node is unavailable; refusing response reconciliation.');
+    let last = networkTracker?.snapshot?.() || initialState(resolveChatGptModel(selectedModel) || resolveChatGptModel());
+    let lastDetailError = null;
+    const fingerprints = new Map();
     for (let attempt = 0; attempt < maxPolls; attempt++) {
-      const snapshot = networkTracker?.snapshot?.() || null;
-      const text = snapshot?.text || '';
-      if (snapshot?.error) throw new Error(snapshot.error);
-
-      const responseStatuses = snapshot?.responseStatuses || [];
-      const rejectedStatus = responseStatuses.find(item => item.status === 422 && /\/backend-api\/f\/conversation/.test(item.url || ''));
-      const hasSuccessfulStream = responseStatuses.some(item => item.status === 200 && /event-stream/.test(item.mimeType || '') && /\/backend-api\/f\/conversation/.test(item.url || ''));
-      if (rejectedStatus && !hasSuccessfulStream && !text.trim() && attempt >= 2) {
-        throw new Error(`[chatgpt] ChatGPT rejected request profile ${snapshot.requestedModelProfile || selectedModel} with HTTP 422. The web backend did not accept the rewritten payload for ${snapshot.appliedPayloadModel || snapshot.requestedPayloadModel || selectedModel}${snapshot.appliedPayloadThinkingEffort ? ` (${snapshot.appliedPayloadThinkingEffort})` : ''}.`);
-      }
-
-      if (!retriedNoRequestSubmit
-        && attempt >= 12
-        && snapshot
-        && (snapshot.interceptedRequests || 0) === 0
-        && (snapshot.responseStatuses || []).length === 0
-        && typeof prompt === 'string'
-        && prompt.trim()) {
-        retriedNoRequestSubmit = true;
-        process.stderr.write('\n');
-        console.error('[chatgpt] No conversation request observed after submit; retrying composer submission once...');
-        if (!request?.conversationTarget && !request?.continueChat) {
-          await page.goto(CHATGPT_ORIGIN, { waitUntil: 'domcontentloaded', timeout: 30000 });
-          await sleep(3000);
+      networkTracker?.throwIfFatalProgressError?.();
+      last = networkTracker?.snapshot?.() || last;
+      if (last.error) throw new Error(last.error);
+      const rejectedStatus = rejectedChatGptSubmissionStatus(last);
+      if (rejectedStatus) throw new Error(`[chatgpt] Submission failed with HTTP ${rejectedStatus}.`);
+      if (expectedConversationId && last.requestConversationId && last.requestConversationId !== expectedConversationId) throw new Error('[chatgpt] Submission request conversation id did not match the requested provider conversation id.');
+      if (expectedConversationId && last.conversationId && last.conversationId !== expectedConversationId) throw new Error('[chatgpt] Submission stream conversation id did not match the requested provider conversation id.');
+      const detailId = last.conversationId || expectedConversationId || null;
+      let detail = null;
+      if (detailId) {
+        try {
+          detail = await readConversation(page, detailId);
+          networkTracker?.throwIfFatalProgressError?.();
+        } catch (error) {
+          networkTracker?.throwIfFatalProgressError?.();
+          if (!isTransientChatGptDetailError(error)) throw error;
+          lastDetailError = error;
         }
-        await chatgptProvider.clearInput({ page, request });
-        await chatgptProvider.typePrompt({ page, prompt, request });
-        await chatgptProvider.beforeSubmit?.({ page, attemptContext });
-        await chatgptProvider.submit({ page, request, selectedModel });
-        console.error('[chatgpt] Resubmitted. Waiting for response...');
-        continue;
       }
-
-      if (text.length > lastTextLength) growthCount += 1;
-      if (text.length === lastTextLength && text.length > 0) stablePolls += 1;
-      else stablePolls = 0;
-      lastTextLength = text.length;
-
-      if (snapshot?.done && text.trim()) {
-        process.stderr.write('\n');
-        return {
-          text: text.trim(),
-          rawText: (snapshot.rawItems || []).join('\n'),
-          done: true,
-          modelUsed: snapshot.modelSlug || resolveChatGptModel(selectedModel)?.model || selectedModel,
-          finalUrl: chatGptConversationUrl(snapshot.conversationId) || page.url(),
-          providerState: buildChatGptProviderState(snapshot),
-          searchResults: snapshot.searchResults || [],
-        };
+      const changedBranch = !baselineCurrentNode || detail?.conversation?.current_node !== baselineCurrentNode;
+      if (detail && changedBranch) emitSnapshotMessages(onStreamEvent, detailId, detail, fingerprints, 'live-cdp');
+      networkTracker?.throwIfFatalProgressError?.();
+      if (detail && changedBranch && hasChatGptTerminalQuorum(detail)) {
+        const turn = selectChatGptStructuredTurn(detail);
+        networkTracker?.throwIfFatalProgressError?.();
+        return { text: turn.text.trim(), rawText: turn.text.trim(), done: true, providerConversationId: expectedConversationId || last.conversationId, modelUsed: turn.modelSlug || last.modelSlug || last.observedPayloadModel || (expectedConversationId && selectedModel === 'default' ? null : resolveChatGptModel(selectedModel)?.model), finalUrl: chatGptConversationUrl(expectedConversationId || last.conversationId) || page.url(), providerState: buildProviderState(last, detail), searchResults: turn.searchResultGroups };
       }
-
-      if (snapshot?.done && !text.trim() && (snapshot.streamClosed || snapshot.assistantTurnComplete || snapshot.messageStreamComplete)) {
-        process.stderr.write('\n');
-        let recovered = null;
-        const maxDomRecoveryAttempts = page?.evaluate ? 4 : 1;
-        for (let recoveryAttempt = 0; recoveryAttempt < maxDomRecoveryAttempts && !recovered; recoveryAttempt++) {
-          if (recoveryAttempt > 0) await sleep(1000);
-          recovered = await recoverCurrentChatGptDomResult({
-            page,
-            snapshot,
-            selectedModel,
-            attemptContext,
-            preSubmitAssistantMessageCount,
-            reason: 'terminal-empty-stream-dom-recovery',
-          });
-        }
-        if (recovered) return recovered;
-
-        if (!retriedTerminalEmptyStream && typeof prompt === 'string' && prompt.trim()) {
-          retriedTerminalEmptyStream = true;
-          console.error('[chatgpt] Terminal stream was empty and no current DOM answer appeared; retrying prompt once...');
-          networkTracker?.reset?.();
-          lastTextLength = 0;
-          stablePolls = 0;
-          growthCount = 0;
-          if (!request?.conversationTarget && !request?.continueChat) {
-            await page.goto(CHATGPT_ORIGIN, { waitUntil: 'domcontentloaded', timeout: 30000 });
-            await sleep(3000);
-          }
-          await chatgptProvider.clearInput({ page, request });
-          await chatgptProvider.typePrompt({ page, prompt, request });
-          await chatgptProvider.beforeSubmit?.({ page, attemptContext });
-          await chatgptProvider.submit({ page, request, selectedModel });
-          console.error('[chatgpt] Resubmitted after empty stream. Waiting for response...');
-          continue;
-        }
-
-        return {
-          text: '',
-          rawText: (snapshot.rawItems || []).join('\n'),
-          done: false,
-          modelUsed: snapshot.modelSlug || resolveChatGptModel(selectedModel)?.model || selectedModel,
-          finalUrl: chatGptConversationUrl(snapshot.conversationId) || page.url(),
-          providerState: buildChatGptProviderState(snapshot, { empty_response: true, reason: 'terminal-empty-stream' }),
-          searchResults: snapshot.searchResults || [],
-        };
+      await sleepFn(1000);
+    }
+    networkTracker?.throwIfFatalProgressError?.();
+    const detailId = last.conversationId || expectedConversationId || null;
+    let detail = null;
+    if (detailId) {
+      try {
+        detail = await readConversation(page, detailId);
+        networkTracker?.throwIfFatalProgressError?.();
+      } catch (error) {
+        networkTracker?.throwIfFatalProgressError?.();
+        if (!isTransientChatGptDetailError(error)) throw error;
+        lastDetailError = error;
       }
-
-      // Stability fallback only fires once the answer stream has actually grown
-      // past the initial preamble (growthCount >= 2). Reasoning models can sit on
-      // the preamble for many seconds while thinking; the old 8s flat window
-      // there returned the preamble as if it were the whole answer.
-      if (text.trim() && growthCount >= 2 && stablePolls >= 12) {
-        process.stderr.write('\n');
-        return {
-          text: text.trim(),
-          rawText: (snapshot.rawItems || []).join('\n'),
-          done: false,
-          modelUsed: snapshot.modelSlug || resolveChatGptModel(selectedModel)?.model || selectedModel,
-          finalUrl: chatGptConversationUrl(snapshot.conversationId) || page.url(),
-          providerState: buildChatGptProviderState(snapshot, { partial: true }),
-          searchResults: snapshot.searchResults || [],
-        };
-      }
-
-      process.stderr.write(`  [chatgpt] network ${text.length} chars (poll ${attempt + 1}/${maxPolls})${snapshot?.done ? ' done' : ''}\r`);
-      await sleep(pollMs);
     }
-
-    const snapshot = networkTracker?.snapshot?.() || null;
-    if (snapshot?.done && snapshot?.text?.trim()) {
-      process.stderr.write('\n');
-      return {
-        text: snapshot.text.trim(),
-        rawText: (snapshot.rawItems || []).join('\n'),
-        done: true,
-        modelUsed: snapshot.modelSlug || resolveChatGptModel(selectedModel)?.model || selectedModel,
-        finalUrl: chatGptConversationUrl(snapshot.conversationId) || page.url(),
-        providerState: buildChatGptProviderState(snapshot),
-        searchResults: snapshot.searchResults || [],
-      };
-    }
-
-    if (snapshot?.text?.trim()) {
-      process.stderr.write('\n');
-      return {
-        text: snapshot.text.trim(),
-        rawText: (snapshot.rawItems || []).join('\n'),
-        done: false,
-        modelUsed: snapshot.modelSlug || resolveChatGptModel(selectedModel)?.model || selectedModel,
-        finalUrl: chatGptConversationUrl(snapshot.conversationId) || page.url(),
-        providerState: buildChatGptProviderState(snapshot, { partial: true, timeout: true }),
-        searchResults: snapshot.searchResults || [],
-      };
-    }
-
-    if (snapshot?.conversationId || snapshot?.topicId || snapshot?.responseStatuses?.length) {
-      process.stderr.write('\n');
-      return {
-        text: '',
-        rawText: (snapshot.rawItems || []).join('\n'),
-        done: false,
-        modelUsed: snapshot.modelSlug || resolveChatGptModel(selectedModel)?.model || selectedModel,
-        finalUrl: chatGptConversationUrl(snapshot.conversationId) || page.url(),
-        providerState: buildChatGptProviderState(snapshot, { timeout: true, empty_response: true }),
-        searchResults: snapshot.searchResults || [],
-      };
-    }
-
-    const baselineAssistantMessageCount = isUsableChatGptAssistantMessageCount(preSubmitAssistantMessageCount)
-      ? preSubmitAssistantMessageCount
-      : attemptContext?.preSubmitAssistantMessageCount;
-    const fallback = await recoverChatGptDomResponse(page);
-    const fallbackIsCurrent = isUsableChatGptAssistantMessageCount(baselineAssistantMessageCount)
-      && isUsableChatGptAssistantMessageCount(fallback.assistantMessageCount)
-      && fallback.assistantMessageCount > baselineAssistantMessageCount;
-    const fallbackText = String(fallback.text || '').trim();
-
-    if (!fallbackIsCurrent || !fallbackText) {
-      const emptySnapshot = {
-        ...(snapshot || {}),
-        text: '',
-        done: false,
-        assistantTurnComplete: false,
-        transport: snapshot?.transport || 'network-observed-request',
-        requestedModelProfile: snapshot?.requestedModelProfile || resolveChatGptModel(selectedModel)?.id || selectedModel,
-      };
-      return {
-        text: '',
-        rawText: '',
-        done: false,
-        modelUsed: emptySnapshot.modelSlug || resolveChatGptModel(selectedModel)?.model || selectedModel,
-        finalUrl: chatGptConversationUrl(emptySnapshot.conversationId) || page.url(),
-        providerState: buildChatGptProviderState(emptySnapshot, { timeout: true, empty_response: true, reason: 'dom-fallback-not-current' }),
-        searchResults: emptySnapshot.searchResults || [],
-      };
-    }
-
-    const fallbackSnapshot = {
-      ...(snapshot || {}),
-      text: fallbackText,
-      done: fallback.done,
-      assistantTurnComplete: fallback.done,
-      transport: 'dom-fallback',
-      requestedModelProfile: resolveChatGptModel(selectedModel)?.id || selectedModel,
-    };
-    return {
-      text: fallbackText,
-      rawText: fallbackText,
-      done: fallback.done,
-      modelUsed: resolveChatGptModel(selectedModel)?.model || selectedModel,
-      finalUrl: page.url(),
-      providerState: buildChatGptProviderState(fallbackSnapshot, { dom_fallback: true, reason: 'network-stream-empty' }),
-      searchResults: [],
-    };
+    networkTracker?.throwIfFatalProgressError?.();
+    const rejectedStatus = rejectedChatGptSubmissionStatus(last);
+    if (rejectedStatus) throw new Error(`[chatgpt] Submission failed with HTTP ${rejectedStatus}.`);
+    if (lastDetailError && !detail) throw lastDetailError;
+    const changedBranch = !baselineCurrentNode || detail?.conversation?.current_node !== baselineCurrentNode;
+    if (detail && changedBranch) emitSnapshotMessages(onStreamEvent, detailId, detail, fingerprints, 'live-cdp');
+    networkTracker?.throwIfFatalProgressError?.();
+    const turn = detail && changedBranch ? selectChatGptStructuredTurn(detail) : null;
+    // CDP/SSE text is progress evidence only. A continuation may expose text only
+    // after authenticated detail confirms that its current branch advanced.
+    const text = (turn?.text || '').trim();
+    const outputSnapshot = changedBranch ? last : { ...last, text: '', rawItems: [], searchResults: [] };
+    const outputDetail = changedBranch ? detail : null;
+    networkTracker?.throwIfFatalProgressError?.();
+    return { text, rawText: text, done: false, providerConversationId: expectedConversationId || last.conversationId || null, modelUsed: turn?.modelSlug || last.modelSlug || last.observedPayloadModel || (expectedConversationId && selectedModel === 'default' ? null : resolveChatGptModel(selectedModel)?.model), finalUrl: chatGptConversationUrl(expectedConversationId || last.conversationId) || page.url(), providerState: buildProviderState(outputSnapshot, outputDetail, { timeout: true }), searchResults: turn?.searchResultGroups || [] };
   },
 };

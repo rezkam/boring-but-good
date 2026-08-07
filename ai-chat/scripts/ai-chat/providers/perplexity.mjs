@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Blob } from 'node:buffer';
-import { readFileSync, statSync } from 'node:fs';
+import { closeSync, openSync, readSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -15,6 +14,9 @@ const MAX_PERPLEXITY_FILES = 30;
 const MAX_PERPLEXITY_FILE_SIZE = 50 * 1024 * 1024;
 const DEFAULT_PERPLEXITY_UPLOAD_TIMEOUT_MS = 300 * 1000;
 const SPACE_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Provider backend ids are UUIDs or opaque URL-safe ids used in /search/<id> links.
+const BACKEND_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const BACKEND_OPAQUE_ID_PATTERN = /^[A-Za-z0-9_-]{20,}$/;
 const DEFAULT_PERPLEXITY_MODEL = 'perplexity/best';
 export const DEFAULT_PERPLEXITY_DEEP_RESEARCH_TIMEOUT_SECONDS = 3600;
 const RAW_MODELS = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'perplexity-models.json'), 'utf-8'));
@@ -256,41 +258,46 @@ function selectedPerplexityModelName({ request = {}, selectedModel = 'default' }
   return DEFAULT_PERPLEXITY_MODEL;
 }
 
-function extractPerplexityBackendUuidFromUrl(value) {
-  try {
-    const parsed = new URL(value);
-    const explicit = parsed.searchParams.get('backend_uuid') || parsed.searchParams.get('uuid') || parsed.searchParams.get('conversation');
-    if (explicit) return explicit;
-    const pathMatch = parsed.pathname.match(/([0-9a-f]{8}-[0-9a-f-]{27,}|[A-Za-z0-9_-]{20,})\/?$/i);
-    return pathMatch?.[1] || null;
-  } catch {
-    return null;
+export function normalizePerplexityBackendId(value) {
+  const normalized = String(value || '').trim();
+  if (!normalized || (!BACKEND_UUID_PATTERN.test(normalized) && !BACKEND_OPAQUE_ID_PATTERN.test(normalized))) {
+    throw new Error('[perplexity] Invalid conversation backend id. Expected a UUID or a URL-safe opaque backend id with at least 20 characters.');
   }
+  return BACKEND_UUID_PATTERN.test(normalized) ? normalized.toLowerCase() : normalized;
+}
+
+function extractPerplexityBackendUuidFromUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error('[perplexity] Invalid conversation URL. Use https://www.perplexity.ai/search/<backend-id>.');
+  }
+  if (!PERPLEXITY_HOSTNAMES.includes(parsed.hostname.toLowerCase())) {
+    throw new Error('[perplexity] Untrusted conversation URL. Use https://www.perplexity.ai/search/<backend-id>.');
+  }
+  const match = parsed.pathname.match(/^\/search\/([^/]+)\/?$/);
+  if (!match) throw new Error('[perplexity] Conversation URL must contain a backend id at /search/<backend-id>.');
+  return normalizePerplexityBackendId(decodeURIComponent(match[1]));
 }
 
 export function perplexityConversationUrl(backendUuid) {
-  const value = String(backendUuid || '').trim();
-  if (!value) return null;
+  if (backendUuid === null || backendUuid === undefined || String(backendUuid).trim() === '') return null;
+  const value = normalizePerplexityBackendId(backendUuid);
   return `${API_BASE_URL}/search/${encodeURIComponent(value)}`;
 }
 
 export function resolvePerplexityConversationAttachment({ target }) {
   const value = String(target || '').trim();
   if (!value) throw new Error('[perplexity] Conversation attachment is empty');
-  if (/^https?:\/\//i.test(value)) {
-    const backendUuid = extractPerplexityBackendUuidFromUrl(value);
-    return {
-      type: 'url',
-      url: perplexityConversationUrl(backendUuid) || value,
-      providerId: backendUuid,
-      providerState: backendUuid ? { backend_uuid: backendUuid } : null,
-    };
-  }
+  const backendUuid = /^https?:\/\//i.test(value)
+    ? extractPerplexityBackendUuidFromUrl(value)
+    : normalizePerplexityBackendId(value);
   return {
-    type: 'provider_id',
-    url: perplexityConversationUrl(value),
-    providerId: value,
-    providerState: { backend_uuid: value },
+    type: /^https?:\/\//i.test(value) ? 'url' : 'provider_id',
+    url: perplexityConversationUrl(backendUuid),
+    providerId: backendUuid,
+    providerState: { backend_uuid: backendUuid },
   };
 }
 
@@ -303,7 +310,7 @@ export function resolvePerplexityRequestModel({ request = {}, selectedModel = 'd
   if (request.thinking && !model.thinking) {
     const thinkingModel = model.thinking_model_id ? MODEL_BY_ID.get(model.thinking_model_id) : null;
     if (!thinkingModel) {
-      throw new Error(`[perplexity] Model ${model.id} has no captured Thinking variant. Select an explicit *-thinking model from --list-models instead.`);
+      throw new Error(`[perplexity] Model ${model.id} has no supported Thinking variant. Select an explicit *-thinking model from --list-models instead.`);
     }
     model = thinkingModel;
   }
@@ -330,17 +337,19 @@ function annotatePerplexityModel(model) {
     thinking_level: thinkingLevel,
     account_specific: false,
     account_tier: { required: model.min_tier || null, verified: null },
-    source: model.contract_source || 'bundled-network-contract-registry',
     selected_by: uniqueStrings(['--model', ...perModelAliases(model)]),
   };
 }
 
 export function buildPerplexityPayload({ query, model, options = {}, conversation = null }) {
   const normalizedOptions = normalizePerplexityOptions(options);
+  const providerState = conversation?.record?.provider_state || conversation?.providerState || null;
+  if (normalizedOptions.incognito && providerState?.backend_uuid) {
+    throw new Error('[perplexity] --incognito cannot continue or attach an existing conversation. Start a new Incognito query without --conversation or --attach-conversation.');
+  }
   const uploadedAttachments = normalizeUploadedPerplexityAttachments(options.uploadedAttachments || []);
   const attachmentMetadata = uploadedAttachments.map(item => item.metadata);
   const sources = normalizedOptions.sourceFocus.map(source => SOURCE_MAP[source]);
-  const providerState = conversation?.record?.provider_state || conversation?.providerState || null;
 
   const params = {
     attachments: uploadedAttachments.map(item => item.url),
@@ -502,7 +511,7 @@ export function extractPerplexityState(data, state = { chunks: [], searchResults
   if (Object.prototype.hasOwnProperty.call(data, 'thread_access')) state.threadAccess = data.thread_access;
   const topLevelResults = normalizePerplexitySearchResults(data.web_results || data.search_results || data.sources);
   if (topLevelResults.length) state.searchResults = topLevelResults;
-  if (data.status === 'FAILED') throw new Error(`Perplexity query failed: ${data.text || 'unknown error'}`);
+  if (data.status === 'FAILED') throw new Error(`Perplexity query failed: ${redactPerplexitySecrets(String(data.text || 'unknown error'))}`);
   extractPerplexityBlockState(data, state, citationMode);
   if (!data.text) {
     if (data.status === 'COMPLETED' || data.final_sse_message === true) state.done = true;
@@ -581,7 +590,9 @@ export function buildPerplexityProviderStates({ backendUuid = null, readWriteTok
     ...(userSelectedModelIdentifier ? { user_selected_model_identifier: userSelectedModelIdentifier } : {}),
     ...(requestedModelIdentifier ? { model_selection_verified: observedModelIdentifier ? observedModelIdentifier === requestedModelIdentifier : null } : {}),
     backend_uuid,
-    ...(backend_uuid ? { thread_url: perplexityConversationUrl(backend_uuid) } : {}),
+    // Server-returned state is not user input. Preserve its provider URL without
+    // applying attachment-target validation to an already established thread.
+    ...(backend_uuid ? { thread_url: `${API_BASE_URL}/search/${encodeURIComponent(backend_uuid)}` } : {}),
     is_incognito: !!isIncognito,
     incognito_explicit: !!incognitoExplicit,
     privacy_state: privacyState || (isIncognito ? 'INCOGNITO' : 'PERSISTENT'),
@@ -623,15 +634,22 @@ function attachPrivateProviderState(result, privateProviderState) {
   return result;
 }
 
+const PERPLEXITY_SENSITIVE_KEY = '(?:[a-z0-9_-]*(?:auth(?:orization)?|session|cookie|token|secret|credential|password|signature)[a-z0-9_-]*|(?:[a-z0-9_-]*(?:api|access)[_-]?key[a-z0-9_-]*)|sig|(?:aws|google)[_-]?access[_-]?(?:key[_-]?)?id|x[-_]?(?:amz|goog)[-_]?(?:credential|security[-_]?token|signature))';
+
 export function redactPerplexitySecrets(value, secrets = []) {
   let text = String(value ?? '');
   for (const secret of secrets) {
     if (!secret || typeof secret !== 'string') continue;
     text = text.split(secret).join('[redacted]');
   }
-  text = text.replace(new RegExp(`${SESSION_COOKIE_NAME}=[^;\\s]+`, 'g'), `${SESSION_COOKIE_NAME}=[redacted]`);
-  text = text.replace(/(["']?(?:read_write_token|session_token|token)["']?\s*[:=]\s*["'])([^"']+)(["'])/gi, '$1[redacted]$3');
-  return text;
+  const structured = new RegExp(`((?:["']${PERPLEXITY_SENSITIVE_KEY}["'])\\s*:\\s*["'])([^"']*)(["'])`, 'gi');
+  const assignment = new RegExp(`((?:${PERPLEXITY_SENSITIVE_KEY})\\s*[=:]\\s*)([^\\s,;?&#}\\]]+)`, 'gi');
+  const query = new RegExp(`([?&]${PERPLEXITY_SENSITIVE_KEY}=)[^&#\\s"']+`, 'gi');
+  return text
+    .replace(/(Bearer\s+)[^\s,;]+/gi, '$1[redacted]')
+    .replace(structured, '$1[redacted]$3')
+    .replace(assignment, '$1[redacted]')
+    .replace(query, '$1[redacted]');
 }
 
 export function perplexityAuthFailureMessage({ source = AUTH_SOURCE_BROWSER_TOOLS, chromeError = null, detail = null, secrets = [] } = {}) {
@@ -678,12 +696,17 @@ function safePerplexityBrowserFetchHeaders(headers = {}) {
     'sec-fetch-mode',
     'sec-fetch-site',
     'user-agent',
+    'authorization',
+    'proxy-authorization',
+    'www-authenticate',
+    'proxy-authenticate',
   ]);
+  const credentialHeader = /(?:^|[-_])(?:api|access)[-_]?key(?:$|[-_])|(?:^|[-_])(?:auth(?:orization)?|token|secret|credential|signature|sig|password)(?:$|[-_])|^(?:x[-_])?(?:amz|goog)[-_].*(?:credential|token|signature|key)/i;
   const entries = headers instanceof Headers
     ? Array.from(headers.entries())
     : (Array.isArray(headers) ? headers : Object.entries(headers || {}));
   return Object.fromEntries(entries
-    .filter(([key, value]) => value !== undefined && value !== null && !forbidden.has(String(key).toLowerCase()))
+    .filter(([key, value]) => value !== undefined && value !== null && !forbidden.has(String(key).toLowerCase()) && !credentialHeader.test(String(key)))
     .map(([key, value]) => [key, String(value)]));
 }
 
@@ -751,10 +774,10 @@ function responseFromBrowserStream({ page, callbackName, url, options, signal })
     page.exposeFunction(callbackName, (event = {}) => {
       if (event.type === 'response') {
         settled = true;
+        // Provider response headers stay in the browser context and never cross into Node.
         resolve(new Response(body, {
           status: event.status,
           statusText: event.statusText || '',
-          headers: event.headers || [],
         }));
       } else if (event.type === 'chunk') {
         if (!finished) streamController?.enqueue(encoder.encode(String(event.chunk || '')));
@@ -784,7 +807,6 @@ function responseFromBrowserStream({ page, callbackName, url, options, signal })
             type: 'response',
             status: response.status,
             statusText: response.statusText,
-            headers: Array.from(response.headers.entries()),
           });
 
           if (!response.body?.getReader) {
@@ -842,22 +864,55 @@ async function responseText(response) {
   }
 }
 
-async function responseJson(response, context) {
-  try {
-    return await response.json();
-  } catch (error) {
-    throw new Error(`[perplexity] ${context} did not return JSON: ${error.message}`);
-  }
-}
+const PERPLEXITY_UPLOAD_CHUNK_BYTES = 256 * 1024;
 
-function formDataForAttachment(attachment, fields) {
-  if (typeof FormData !== 'function') {
-    throw new Error('[perplexity] File uploads require a runtime with FormData support. Use Node.js 20 or newer.');
+async function uploadPerplexityAttachmentInBrowser({ page, attachment, timeoutMs }) {
+  if (!page?.evaluate || !page?.exposeFunction) throw new Error('[perplexity] File uploads require the managed browser page context.');
+  const callbackName = `__aiChatPerplexityUploadChunk_${randomUUID().replace(/-/g, '')}`;
+  const fd = openSync(attachment.path, 'r');
+  try {
+    await page.exposeFunction(callbackName, (offset, requestedBytes) => {
+      const start = Number(offset); const length = Number(requestedBytes);
+      if (!Number.isInteger(start) || !Number.isInteger(length) || start < 0 || start >= attachment.sizeBytes || length < 1 || length > PERPLEXITY_UPLOAD_CHUNK_BYTES) throw new Error('invalid private upload chunk request');
+      const bytes = Math.min(length, attachment.sizeBytes - start);
+      const buffer = Buffer.allocUnsafe(bytes);
+      const read = readSync(fd, buffer, 0, bytes, start);
+      return buffer.subarray(0, read).toString('base64');
+    });
+    const browserUpload = page.evaluate(async ({ callbackName, attachment, endpoint, apiBase, chunkBytes, timeoutMs }) => {
+      const controller = new AbortController();
+      const abortTimer = setTimeout(() => controller.abort(), timeoutMs);
+      let phase = 'upload initialization';
+      try {
+      const init = await fetch(`${apiBase}${endpoint}`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, credentials: 'include', signal: controller.signal, body: JSON.stringify({ files: { [crypto.randomUUID()]: { filename: attachment.filename, content_type: attachment.mimeType, source: 'default', file_size: attachment.sizeBytes, force_image: attachment.isImage } } }) });
+      if (!init.ok) throw new Error(`initialization HTTP ${init.status}`);
+      const initData = await init.json(); const result = Object.values(initData?.results || {})[0] || {};
+      if (!result.s3_bucket_url || !result.s3_object_url || !result.fields || typeof result.fields !== 'object') throw new Error('initialization returned incomplete upload data');
+      const form = new FormData(); for (const [key, value] of Object.entries(result.fields)) form.append(key, String(value));
+      const chunks = []; for (let offset = 0; offset < attachment.sizeBytes; offset += chunkBytes) { const encoded = await globalThis[callbackName](offset, Math.min(chunkBytes, attachment.sizeBytes - offset)); const binary = atob(encoded); const bytes = new Uint8Array(binary.length); for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i); chunks.push(bytes); }
+      form.append('file', new Blob(chunks, { type: attachment.mimeType }), attachment.filename);
+      phase = 'S3 upload';
+      const uploaded = await fetch(result.s3_bucket_url, { method: 'POST', body: form, signal: controller.signal });
+      if (!uploaded.ok) throw new Error(`upload HTTP ${uploaded.status}`);
+      // Do not return signed fields, bucket URL, response headers, or credentials.
+      return { objectUrl: result.s3_object_url };
+      } catch (error) {
+        if (controller.signal.aborted || error?.name === 'AbortError') throw new Error(`__AI_CHAT_UPLOAD_TIMEOUT__:${phase}`);
+        throw error;
+      } finally { clearTimeout(abortTimer); }
+    }, { callbackName, attachment: { filename: attachment.filename, mimeType: attachment.mimeType, sizeBytes: attachment.sizeBytes, isImage: attachment.isImage }, endpoint: ENDPOINT_UPLOAD, apiBase: API_BASE_URL, chunkBytes: PERPLEXITY_UPLOAD_CHUNK_BYTES, timeoutMs });
+    const safe = await browserUpload;
+    if (!safe?.objectUrl || typeof safe.objectUrl !== 'string') throw new Error('[perplexity] File upload failed: browser did not return uploaded object metadata.');
+    return { ...attachment, url: safe.objectUrl, status: 'uploaded', metadata: safePerplexityAttachmentMetadata({ ...attachment, url: safe.objectUrl }, 'uploaded') };
+  } catch (error) {
+    if (error?.code === 'PERPLEXITY_UPLOAD_TIMEOUT') throw error;
+    const phase = String(error?.message || '').match(/__AI_CHAT_UPLOAD_TIMEOUT__:(upload initialization|S3 upload)/)?.[1];
+    if (phase) throw perplexityUploadTimeoutError({ attachment, phase, timeoutMs, cause: error });
+    throw new Error(`[perplexity] File upload failed for ${attachment.filename}: ${redactPerplexitySecrets(error.message)}`);
+  } finally {
+    closeSync(fd);
+    if (typeof page.removeExposedFunction === 'function') await page.removeExposedFunction(callbackName).catch(() => {});
   }
-  const form = new FormData();
-  for (const [key, value] of Object.entries(fields || {})) form.append(key, String(value));
-  form.append('file', new Blob([readFileSync(attachment.path)], { type: attachment.mimeType }), attachment.filename);
-  return form;
 }
 
 function resolvePerplexityUploadTimeoutMs(timeoutMs) {
@@ -879,119 +934,14 @@ function perplexityUploadTimeoutError({ attachment, phase, timeoutMs, cause }) {
   return error;
 }
 
-async function fetchPerplexityUpload({ fetchImpl, url, options, attachment, phase, signal, timeoutMs }) {
-  let removeAbortListener = () => {};
-  const abortPromise = new Promise((_, reject) => {
-    if (!signal) return;
-    const rejectTimeout = () => reject(perplexityUploadTimeoutError({ attachment, phase, timeoutMs }));
-    if (signal.aborted) {
-      rejectTimeout();
-      return;
-    }
-    signal.addEventListener('abort', rejectTimeout, { once: true });
-    removeAbortListener = () => signal.removeEventListener('abort', rejectTimeout);
-  });
-
-  try {
-    return await Promise.race([
-      fetchImpl(url, { ...options, signal }),
-      abortPromise,
-    ]);
-  } catch (error) {
-    if (error?.code === 'PERPLEXITY_UPLOAD_TIMEOUT') throw error;
-    if (signal?.aborted || error?.name === 'AbortError') {
-      throw perplexityUploadTimeoutError({ attachment, phase, timeoutMs, cause: error });
-    }
-    throw error;
-  } finally {
-    removeAbortListener();
-  }
-}
-
-async function uploadSinglePerplexityAttachment({ attachment, fetchImpl, signal, timeoutMs }) {
-  const fileUuid = randomUUID();
-  const requestBody = {
-    files: {
-      [fileUuid]: {
-        filename: attachment.filename,
-        content_type: attachment.mimeType,
-        source: 'default',
-        file_size: attachment.sizeBytes,
-        force_image: attachment.isImage,
-      },
-    },
-  };
-
-  const initResponse = await fetchPerplexityUpload({
-    fetchImpl,
-    url: `${API_BASE_URL}${ENDPOINT_UPLOAD}`,
-    attachment,
-    phase: 'upload initialization',
-    signal,
-    timeoutMs,
-    options: {
-      method: 'POST',
-      headers: buildPerplexityHeaders({ Accept: 'application/json' }),
-      body: JSON.stringify(requestBody),
-    },
-  });
-  if (!initResponse.ok) {
-    const detail = `upload URL HTTP ${initResponse.status}: ${await responseText(initResponse)}`;
-    if (isAuthenticationStatus(initResponse.status)) throw perplexityAuthError({ detail });
-    throw new Error(`[perplexity] File upload initialization failed for ${attachment.filename}: ${redactPerplexitySecrets(detail)}`);
-  }
-
-  const data = await responseJson(initResponse, 'file upload initialization');
-  const result = data?.results?.[fileUuid] || {};
-  const s3BucketUrl = result.s3_bucket_url;
-  const s3ObjectUrl = result.s3_object_url;
-  const fields = result.fields || {};
-  if (!s3ObjectUrl) throw new Error(`[perplexity] File upload initialization failed for ${attachment.filename}: no uploaded object URL returned`);
-  if (!s3BucketUrl || !fields || typeof fields !== 'object') {
-    throw new Error(`[perplexity] File upload initialization failed for ${attachment.filename}: missing S3 upload credentials`);
-  }
-
-  const uploadResponse = await fetchPerplexityUpload({
-    fetchImpl,
-    url: s3BucketUrl,
-    attachment,
-    phase: 'S3 upload',
-    signal,
-    timeoutMs,
-    options: {
-      method: 'POST',
-      body: formDataForAttachment(attachment, fields),
-    },
-  });
-  if (!uploadResponse.ok) {
-    const body = await responseText(uploadResponse);
-    throw new Error(`[perplexity] File upload failed for ${attachment.filename}: S3 HTTP ${uploadResponse.status}: ${body}`);
-  }
-
-  return {
-    ...attachment,
-    url: s3ObjectUrl,
-    status: 'uploaded',
-    metadata: safePerplexityAttachmentMetadata({ ...attachment, url: s3ObjectUrl }, 'uploaded'),
-  };
-}
-
-export async function uploadPerplexityAttachments({ files = [], attachments = null, fetchImpl, timeoutMs = DEFAULT_PERPLEXITY_UPLOAD_TIMEOUT_MS } = {}) {
+export async function uploadPerplexityAttachments({ files = [], attachments = null, page, timeoutMs = DEFAULT_PERPLEXITY_UPLOAD_TIMEOUT_MS } = {}) {
   const normalized = attachments || normalizePerplexityFileAttachments(files);
   if (!normalized.length) return [];
-  if (typeof fetchImpl !== 'function') throw new Error('[perplexity] File uploads require the managed browser network transport.');
+  if (!page?.evaluate || !page?.exposeFunction) throw new Error('[perplexity] File uploads require the managed browser page context.');
   const uploadTimeoutMs = resolvePerplexityUploadTimeoutMs(timeoutMs);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), uploadTimeoutMs);
   const uploaded = [];
-  try {
-    for (const attachment of normalized) {
-      uploaded.push(await uploadSinglePerplexityAttachment({ attachment, fetchImpl, signal: controller.signal, timeoutMs: uploadTimeoutMs }));
-    }
-    return uploaded;
-  } finally {
-    clearTimeout(timeout);
-  }
+  for (const attachment of normalized) uploaded.push(await uploadPerplexityAttachmentInBrowser({ page, attachment, timeoutMs: uploadTimeoutMs }));
+  return uploaded;
 }
 
 export async function validatePerplexitySession({ fetchImpl } = {}) {
@@ -1149,8 +1099,10 @@ function normalizePerplexityProviderRequestOptions(providerOptions = {}) {
   };
 }
 
-async function preparePerplexityProviderRequestOptions({ request, normalized, fetchImpl, timeoutMs = DEFAULT_PERPLEXITY_UPLOAD_TIMEOUT_MS }) {
-  const uploadedAttachments = await uploadPerplexityAttachments({ attachments: normalized.attachments, fetchImpl, timeoutMs });
+async function preparePerplexityProviderRequestOptions({ request, normalized, fetchImpl, page, timeoutMs = DEFAULT_PERPLEXITY_UPLOAD_TIMEOUT_MS }) {
+  const uploadedAttachments = normalized.attachments.length
+    ? await uploadPerplexityAttachments({ attachments: normalized.attachments, page, timeoutMs })
+    : [];
   return {
     ...(request.providerOptions || {}),
     spaceUuid: normalized.spaceUuid,
@@ -1295,11 +1247,14 @@ export const perplexityProvider = {
   async run({ browser, request, selectedModel, conversation }) {
     const model = resolvePerplexityRequestModel({ request, selectedModel });
     const normalizedOptions = normalizePerplexityProviderRequestOptions(request.providerOptions || {});
+    if (normalizePerplexityOptions(request.providerOptions || {}).incognito && previousPerplexityContinuationState(conversation).backendUuid) {
+      throw new Error('[perplexity] --incognito cannot continue or attach an existing conversation. Start a new Incognito query without --conversation or --attach-conversation.');
+    }
     const page = await openPerplexityNetworkPage(browser);
     const fetchImpl = createPerplexityBrowserFetch(page);
     const authSession = await validatePerplexitySession({ fetchImpl });
     const requestTimeoutMs = resolvePerplexityTimeoutSeconds({ model, request }) * 1000;
-    const effectiveOptions = await preparePerplexityProviderRequestOptions({ request, normalized: normalizedOptions, fetchImpl, timeoutMs: requestTimeoutMs });
+    const effectiveOptions = await preparePerplexityProviderRequestOptions({ request, normalized: normalizedOptions, fetchImpl, page, timeoutMs: requestTimeoutMs });
     console.error(`[perplexity] Model resolved: ${model.id}`);
     const payload = buildPerplexityPayload({
       query: request.prompt,

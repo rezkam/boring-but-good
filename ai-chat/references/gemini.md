@@ -48,7 +48,7 @@ Before claiming a Gemini behavior works:
 
 1. Run `npm test`.
 2. Ensure the Browser Tools task profile `ai-chat` points at a Gemini-capable Chrome profile. If current cookies matter and auth looks stale, cleanly stop the AI Chat owned browser and rerun so the profile copy is refreshed.
-3. Run the command with `--json` and save output under `/tmp/ai-chat-verify/gemini/<case>/`.
+3. Run the command with `--json` and save output to a private local verification directory, one folder per case.
 4. Verify non-empty response text and useful `provider_state`.
 5. For continuation, verify a second prompt using the same saved conversation id.
 6. Record whether native continuation was accepted or whether the local transcript fallback was used.
