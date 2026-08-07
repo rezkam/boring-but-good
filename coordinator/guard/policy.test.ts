@@ -125,6 +125,17 @@ test("CG001: once the coordinator skill is loaded, a launch without a registered
 	assert.match(reason, /coordinator_campaign/);
 });
 
+test("a closed campaign returns the guard to inert, and re-arming asks for a new campaign", () => {
+	const closed = campaign({ status: "closed" });
+	const launch = { agent: "worker", task: "do a thing" };
+	allow(request({ armed: false, campaign: closed, input: launch }));
+	allow(request({ armed: false, campaign: closed, tool: "bash", input: { command: "git stash" } }));
+
+	const { code, reason } = deny(request({ armed: true, campaign: closed, input: launch }));
+	assert.equal(code, "CG001");
+	assert.match(reason, /coordinator_campaign/);
+});
+
 test("CG002: a launch with no model, or a model without an effort suffix, fails", () => {
 	assert.equal(deny(request({ input: { agent: "worker", task: implementTask(GOOD_ROUTE) } })).code, "CG002");
 	assert.equal(

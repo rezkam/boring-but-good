@@ -28,9 +28,29 @@ the symlink path rather than the real path, so a single-file link fails with
 error for every session. For the same reason, never point the link at a git worktree that
 may be removed.
 
-The guard stays inert until it arms, which happens when the coordinator skill is read
-(`SKILL.md`, `dispatch.md`, `harness.md`) or the user says "use the coordinator". Once
-armed, dispatches fail until a campaign is registered.
+## Enabling: three states, not a global switch
+
+The guard is loaded in every session and enforces nothing until a coordinator campaign is
+actually running. Ordinary sessions are unaffected.
+
+| State | What is enforced | How you get there |
+| --- | --- | --- |
+| inert | nothing | the default in every session |
+| armed | dispatches fail until a campaign is registered (CG001), and the destructive-git and bypass rules apply | the agent reads `SKILL.md`, `dispatch.md`, or `harness.md`; the user types `/skill:coordinator` or "use the coordinator"; or `/campaign arm` |
+| campaign | every rule | `coordinator_campaign` action `start` |
+
+Arming is automatic, so nothing needs to be remembered at campaign start. The footer shows
+the live state (`Guard armed, no campaign`, or `Campaign <slug> 2/7, 1 open`).
+
+Commands:
+
+- `/campaign` shows the current contract and state
+- `/campaign arm` and `/campaign disarm` force it on or off
+- `/campaign close` ends the campaign and disarms, returning to inert
+- `/campaign resume` re-activates a paused or closed campaign
+
+Closing is the way out: a closed campaign is treated as no campaign, so ordinary dispatches
+work again immediately.
 
 ## What fails, and why
 

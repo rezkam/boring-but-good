@@ -297,6 +297,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 				case "close": {
 					if (!campaign) throw new Error("no campaign is registered");
 					campaign.status = "closed";
+					armed = false;
 					break;
 				}
 				case "show":
@@ -355,11 +356,13 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 					break;
 				case "close":
 					if (campaign) campaign.status = "closed";
+					armed = false;
 					persist();
-					show("Campaign closed. Dispatch enforcement is off until the next start.");
+					show("Campaign closed and guard disarmed. Enforcement is off until the next campaign.");
 					break;
 				case "resume":
 					if (campaign) campaign.status = "active";
+					armed = true;
 					persist();
 					show("Campaign active.");
 					break;
