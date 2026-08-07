@@ -20,6 +20,9 @@ Perform a read-only, defect-first review of a specified code change and return e
 
 ## Prompt
 
+Open with the routing row for this dispatch, naming the model the call actually carries:
+`ROUTE: [REVIEW KEY] | class [1|2|3] | [PROVIDER/MODEL:EFFORT] | [WHY THIS CLASS]`
+
 Inspect the requested target directly and return every finding that the author would likely fix. Do not modify files, create commits, push branches, post review comments, or delegate the review to another agent.
 
 ### Review context

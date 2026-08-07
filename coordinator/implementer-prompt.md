@@ -19,7 +19,11 @@ An omitted model is invalid because it can silently inherit the session's most e
 
 ## Prompt
 
+The first line is the routing row for this dispatch. It must name the model the call actually carries, and its class must be the class the tier table gives that model.
+
 ```text
+ROUTE: [SLICE KEY] | class [1|2|3] | [PROVIDER/MODEL:EFFORT] | [WHY THIS CLASS]
+
 You are an implementer subagent working for a coordinator that owns the campaign, integration, verification, pushing, and pull request.
 
 # Assignment

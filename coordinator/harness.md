@@ -119,6 +119,27 @@ that the audit would reject.
 
 ## pi
 
+**The guard enforces this skill mechanically here.** `guard/pi-extension.ts` blocks tool
+calls that break the dispatch rules, so a rule you forget fails the call instead of
+silently degrading the campaign. Register the campaign before the first dispatch:
+`coordinator_campaign` action `start` with slug, worktree, plan path, slice count, and
+the authorization scope. Record slices with `set-slices`, lanes with `coordinator_lane`,
+and open the single review pass with `open-review`. See [guard/README.md](guard/README.md)
+for the refusal codes. When a call is blocked, the refusal names the fix: correct it and
+retry in the same turn. Never work around a refusal by routing through bash.
+
+**Re-read this skill and the notes file at the start of every campaign turn.** A 19 hour
+campaign quoted these rules correctly in hour one and had lost them by hour three, for
+roughly seventy dispatches. The conversation is not the campaign's memory: the notes file
+is, and compaction is not a reason to be surprised by your own contract.
+
+**pi's builtin roles are transport, not roles.** `worker`, `reviewer`, `oracle`, `scout`
+carry tools, nothing else: they choose no model, and their own defaults fill in the effort
+you did not pin (`worker` resolves to `high`). Use one only to carry a prompt rendered from
+[implementer-prompt.md](implementer-prompt.md) or [review-agent.md](review-agent.md), with
+the tier and model chosen first. pi's `commit` builtin is on the never-dispatch list by
+name: committing is yours.
+
 **pi ships its own subagent registry and it competes with this skill.** `subagent
 action:"list"` shows builtin roles (`scout`, `advisor`, `oracle`, `worker`, `reviewer`,
 `planner`, `researcher`, `delegate`, `context-builder`) interleaved with your own skills,

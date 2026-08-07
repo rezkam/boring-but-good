@@ -14,6 +14,12 @@ below exist because each one has already cost a full session.
 Read [harness.md](harness.md) once at campaign start. It resolves the places where the
 host agent's own rules pull against a running campaign, and it differs per harness.
 
+On a harness where [guard/README.md](guard/README.md) is installed, the mechanical half of
+this skill is enforced at the tool boundary: an unpinned dispatch, a premature reviewer, a
+delegated commit, or a launch behind a stale status block fails rather than proceeding.
+Register the campaign before the first dispatch so those rules can apply. A refusal names
+the fix; correct it and retry in the same turn.
+
 ## 1. Do not stall
 
 Record the authorization scope in the notes file at campaign start and restate it in every
@@ -80,9 +86,18 @@ findings, while the survivor was forced into an answer it labelled partial. Boun
 with elapsed time and a generous margin instead. Work that will not fit one context becomes
 serial milestones, not a shorter leash.
 
-**Routing is planned before and proved after.** Name the stage, model, and effort in one
-line each before the first dispatch. If you have not, you have not decided the routing and
-you are about to default into doing everything yourself.
+**Routing is planned before and proved after.** Every dispatch opens with its own routing
+row, so the table cannot drift from the calls:
+
+```
+ROUTE: <key> | class <1|2|3> | <provider/model:effort> | <why this class>
+```
+
+The declared model must be the model the call carries, and the declared class must be the
+class the tier table gives that model. Class 3 implementation carries a written reason for
+what makes the slice cross-layer or long-horizon, not the word "hard". If you have not
+written the row, you have not decided the routing and you are about to default into doing
+everything yourself.
 
 Then, once agents return, put the proof in the status block instead of the plan:
 
@@ -95,7 +110,10 @@ written. `ROUTING_INDISTINGUISHABLE` means the pin equalled the session default 
 nothing, and effort on Claude Code is always request-only. Neither is a pinned dispatch.
 
 A campaign once printed `claude-fable` in its table while all eight agents ran
-`claude-opus`, and nothing caught it, because nothing ever compared the two.
+`claude-opus`, and nothing caught it, because nothing ever compared the two. Another pinned
+correctly for three dispatches, then sent roughly seventy with no model key at all, each
+inheriting the session's most expensive model at its highest effort, for work as mechanical
+as a one-file repair. Pinning discipline decays with session length; assume yours has.
 
 See [dispatch.md](dispatch.md) for tier selection and what every dispatch must carry.
 
@@ -139,6 +157,17 @@ a subagent write access to your branch to save one tool call is a bad trade ever
 
 If a slice is implemented and no subagent was involved, say so in the status block and
 give the reason. Silent non-dispatch is how a campaign drifts into doing everything alone.
+
+**At most three writer lanes are open at once, and a lane that returned is still open
+until it is integrated.** Parallel lanes that never land are integration debt, not
+progress: one campaign launched five writers in a single instant, then spent four hours
+reviewing and repairing them while the PR received nothing and the plan stayed at seven of
+twenty-nine slices. Integrate a lane, run its gates yourself, then start the next.
+
+**Steering is not coordinating.** A run you have corrected twice is not converging: stop
+it, split the remaining work into serial milestones, and re-dispatch. One campaign
+chaperoned a single worker past sixty turns while its own status blocks reported the turn
+count climbing.
 
 ## 4. Report status without being asked
 
@@ -214,7 +243,12 @@ Three failed fix rounds on one slice means it is not converging. Stop and report
 ## Review, once, at the end
 
 One review pass after all slices are done, not per slice. The user has asked for this
-directly and repeatedly.
+directly and repeatedly. The count of reviewer dispatches before that pass is zero, and it
+is zero however the prompt is labelled: an "acceptance check" or a "verification" of a
+returned lane is a review. One campaign ran twenty-three of them during implementation,
+each rejection spawning a repair and each repair a re-review, and progress froze for five
+hours while the PR received nothing. Slice acceptance is your own gate run against the
+acceptance criteria.
 
 - Run the full suite yourself first. Full-suite runs inside agents stall the loop.
 - Dispatch one fresh read-only reviewer with no implementation history, on a pinned head,
@@ -234,7 +268,12 @@ After approval, only these interrupt the loop:
 
 - a slice fails its third fix round, or confirmed problems remain after the third review
 - the correct change would reshape the plan: new user-visible behavior nobody planned, an
-  architectural fork with no conservative option, or a contradiction with a ratified ADR
+  architectural fork with no conservative option, or a contradiction with a ratified ADR.
+  A mid-campaign instruction from the user that changes the base, the dependencies, or the
+  scope is an instance of this. Amend the plan with the new slice mapping, print the delta
+  in the next status block, then work it. One campaign answered a single line, "there is a
+  0.84.1, use that too", by inventing an eight-track parallel migration across fifteen
+  worktrees that was in no plan, and the user had to ask why nothing was progressing
 - the next step is destructive and outside the recorded authorization
 - a rebase conflict whose correct resolution is genuinely ambiguous
 
