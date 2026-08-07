@@ -227,14 +227,33 @@ export function parseModelPin(model: unknown): { id: string; effort: ThinkingLev
 	return { id: model.slice(0, colon), effort: effort as ThinkingLevel };
 }
 
-export function modelClass(modelId: string, effort: ThinkingLevel): ImplementationClass | null {
+/**
+ * The tier table as pairs, because the table lists a model AND the effort to run it at:
+ * a class is a model at an effort, not a model. sol and fable also carry the review tier
+ * at high, which is why they list two efforts.
+ */
+const TIERS: Array<{ family: RegExp; efforts: Partial<Record<ThinkingLevel, ImplementationClass>> }> = [
+	{ family: /luna/, efforts: { high: 1 } },
+	{ family: /sonnet/, efforts: { medium: 1 } },
+	{ family: /terra/, efforts: { medium: 2 } },
+	{ family: /opus/, efforts: { low: 2, medium: 3 } },
+	{ family: /sol/, efforts: { medium: 3, high: 3 } },
+	{ family: /fable/, efforts: { high: 3 } },
+];
+
+function tierFor(modelId: string) {
 	const id = modelId.toLowerCase();
-	if (id.includes("luna") || id.includes("sonnet")) return 1;
-	if (id.includes("terra")) return 2;
-	// The tier table splits opus by effort: low is class 2, medium and above is class 3.
-	if (id.includes("opus")) return effort === "off" || effort === "minimal" || effort === "low" ? 2 : 3;
-	if (id.includes("sol") || id.includes("fable")) return 3;
-	return null;
+	return TIERS.find((tier) => tier.family.test(id));
+}
+
+export function modelClass(modelId: string, effort: ThinkingLevel): ImplementationClass | null {
+	return tierFor(modelId)?.efforts[effort] ?? null;
+}
+
+/** The efforts the table lists for a model, for the refusal to quote back. */
+export function listedEfforts(modelId: string): ThinkingLevel[] {
+	const tier = tierFor(modelId);
+	return tier ? (Object.keys(tier.efforts) as ThinkingLevel[]) : [];
 }
 
 export function parseRouteHeader(text: string): RouteHeader | null {
@@ -270,6 +289,7 @@ export function readStatusBlock(text: string): { ok: boolean; missing: string[] 
 export function laneKindFor(agent: string | undefined, task: string): LaneKind {
 	const known = agent ? KIND_BY_AGENT[agent.toLowerCase()] : undefined;
 	if (known === "review") return "review";
+	const writes = /(implementer subagent|\b(implement|fix|repair|refactor|migrate|extract|compose)\b)/i.test(task);
 
 	// A review reads and reports; it never owns the tree. Detect that assignment directly,
 	// because a reviewer prompt is full of remediation words ("findings the author would fix")
@@ -282,15 +302,14 @@ export function laneKindFor(agent: string | undefined, task: string): LaneKind {
 		);
 	if (reviewKey || reviewPhrase) return "review";
 
+	// Agent names are transport, so the assignment decides. A read-only agent name carrying an
+	// implementation prompt is still a writer: it has write-capable tools and it escapes the
+	// lane cap, the HEAD check, and the class-3 justification if it is read as an investigation.
+	if (writes) return "implement";
 	if (known) return known;
 
-	// Unknown agent names are transport, so the assignment decides. Read-only work has to say
-	// so; anything else is treated as a writer, because a writer mistaken for an investigation
-	// escapes the lane cap, the HEAD check, and the class-3 justification.
 	const readOnly = /(read-only|reconnaissance|inventory of|do not modify|make no changes)/i.test(task);
-	const writes = /(implementer subagent|\b(implement|fix|repair|refactor|migrate|extract|compose)\b)/i.test(task);
-	if (readOnly && !writes) return "investigate";
-	return "implement";
+	return readOnly ? "investigate" : "implement";
 }
 
 function text(value: unknown): string {
@@ -368,6 +387,11 @@ function collectScriptModels(script: string): { agents: number; models: string[]
 	return { agents, models };
 }
 
+/** Every routing header in a text, in order, one per child. */
+export function parseRouteHeaders(text: string): RouteHeader[] {
+	return scriptRoutes(text);
+}
+
 /** Every routing header in a script, in order, one per child. */
 function scriptRoutes(script: string): RouteHeader[] {
 	return script
@@ -395,6 +419,13 @@ function checkRoute(route: RouteHeader, config: GuardConfig, kind: LaneKind): Gu
 	if (!pin) return deny("CG004", `The routing header model ${route.model} is not pinned as provider/model:effort.`);
 	const actualClass = modelClass(pin.id, pin.effort);
 	if (actualClass === null) {
+		const listed = listedEfforts(pin.id);
+		if (listed.length > 0) {
+			return deny(
+				"CG004",
+				`The tier table lists ${pin.id} at ${listed.join(" or ")} effort, not ${pin.effort}. A class is a model at an effort, so running a listed model at an unlisted effort is not the tier you declared.`,
+			);
+		}
 		return deny(
 			"CG004",
 			`${pin.id} is not in the tier table, so its class cannot be checked. Add it to the table or route to a listed model.`,
@@ -496,6 +527,16 @@ export function evaluate(request: GuardRequest): GuardDecision {
 			const verdict = checkRoute(route, config, laneKindFor(undefined, route.reason));
 			if (!verdict.allow) return verdict;
 		}
+		// Each child's header has to describe that child's own launch, so the declared models and
+		// the launched models must be the same multiset.
+		const declared = routes.map((route) => route.model).sort();
+		const launched = [...models].sort();
+		if (declared.length === launched.length && declared.some((model, index) => model !== launched[index])) {
+			return deny(
+				"CG004",
+				`The routing headers in this script declared ${declared.join(", ")} but the children launch with ${launched.join(", ")}. Each child's header must name the model that child actually carries.`,
+			);
+		}
 		const children = scriptChildKinds(script);
 		if (children.includes("implement")) {
 			return deny(
@@ -534,10 +575,18 @@ export function evaluate(request: GuardRequest): GuardDecision {
 			"The assignment line of this prompt begins with a git action. If a dispatch prompt you are writing begins with \"commit\", stop and run git yourself.",
 		);
 	}
-	if (/\bgit push\b|\bgh pr (create|edit|merge|comment)\b/i.test(task) && !/\b(never|do not|don't|no)\s+(push|run gh)/i.test(task)) {
+	// Checked apart from each other: every compliant prompt says "never push", and that promise
+	// must not read as permission for the gh commands sitting beside it.
+	if (/\bgit push\b/i.test(task) && !/\b(never|do not|don't|no)\s+push/i.test(task)) {
 		return deny(
 			"CG007",
-			"This prompt tells a subagent to push or to change PR state. Pushing and PR state belong to the coordinator alone. Remove it, and state that the agent commits locally and never pushes.",
+			"This prompt tells a subagent to push. Pushing belongs to the coordinator alone. Remove it, and state that the agent commits locally and never pushes.",
+		);
+	}
+	if (/\bgh\s+(pr|release|api)\b/i.test(task) && !/\b(never|do not|don't|no)\s+(run\s+)?gh\b/i.test(task)) {
+		return deny(
+			"CG007",
+			"This prompt tells a subagent to change PR or release state through gh. That belongs to the coordinator alone, and a promise not to push does not cover it. Remove the gh instruction and state that the agent never runs gh.",
 		);
 	}
 
@@ -618,13 +667,25 @@ export function evaluate(request: GuardRequest): GuardDecision {
 }
 
 function lintPrompt(task: string, kind: LaneKind, campaign: Campaign): GuardDecision {
-	const placeholder = /\b(undefined|null|NaN)\b|\[[A-Z][A-Z _-]{3,}\]|\$\{[^}]*\}/;
-	const found = placeholder.exec(task);
-	if (found) {
-		return deny(
-			"CG009",
-			`The rendered prompt still contains "${found[0]}". One unset interpolation once shipped "cd undefined/<pkg>" to every agent in a fan-out under a header telling them the path was verified. Render every placeholder before launching.`,
-		);
+	// An unset interpolation lands in a value position or inside a path ("cd undefined/<pkg>",
+	// "worktree: undefined"), which is what to catch. The same words in prose ("fix null
+	// handling") are ordinary domain terms and must not fail a dispatch.
+	const placeholders = [
+		/\$\{[^}]*\}/,
+		/\{\{[^}]*\}\}/,
+		/\[[A-Z][A-Z _-]{3,}\]/,
+		/(^|[\s"'`(])(undefined|null|NaN)\//,
+		/\/(undefined|null|NaN)([\s/,.)"'`]|$)/,
+		/[:=]\s*(undefined|null|NaN)([\s,.)"'`]|$)/,
+	];
+	for (const pattern of placeholders) {
+		const found = pattern.exec(task);
+		if (found) {
+			return deny(
+				"CG009",
+				`The rendered prompt still contains "${found[0].trim()}". One unset interpolation once shipped "cd undefined/<pkg>" to every agent in a fan-out under a header telling them the path was verified. Render every placeholder before launching.`,
+			);
+		}
 	}
 
 	const paths = task.match(/(^|\s)(\/[\w./-]+)/g)?.map((match) => match.trim()) ?? [];
