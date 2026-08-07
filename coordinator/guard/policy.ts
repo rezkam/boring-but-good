@@ -90,8 +90,10 @@ const MANAGEMENT_ACTIONS = new Set([
 	"view",
 	"fleet",
 	"cancel",
-	"delete",
 ]);
+
+/** Actions that hand a run another instruction, and so count as corrections of it. */
+const CORRECTION_ACTIONS = new Set(["steer", "resume"]);
 
 const KIND_BY_AGENT: Record<string, LaneKind> = {
 	worker: "implement",
@@ -288,7 +290,6 @@ export function readStatusBlock(text: string): { ok: boolean; missing: string[] 
 
 export function laneKindFor(agent: string | undefined, task: string): LaneKind {
 	const known = agent ? KIND_BY_AGENT[agent.toLowerCase()] : undefined;
-	if (known === "review") return "review";
 	// Writing a report is not mutating a repository, so "write your findings" stays read-only
 	// while "write the migration" does not.
 	// Classify the assignment, not the header's key and model: a slice named "port-map" is not
@@ -338,8 +339,6 @@ function firstInstruction(task: string): string {
 export function isManagementAction(input: Record<string, unknown>): boolean {
 	const action = text(input.action);
 	if (!action) return false;
-	// An action that carries work is a launch however it is named.
-	if (text(input.task) || text(input.workflowScript)) return false;
 	return MANAGEMENT_ACTIONS.has(action);
 }
 
@@ -381,7 +380,7 @@ function checkBash(command: string): GuardDecision {
 		// git's own force syntax: a refspec whose source is prefixed with +, destination optional.
 		[new RegExp(`${git}push\\s+(\\S+\\s+)*\\+\\S+`, "i"), "A refspec beginning with + is a force push, and this one", rewritesHistory],
 		[
-			new RegExp(`${git}worktree\\s+remove\\s+.*--force`, "i"),
+			new RegExp(`${git}worktree\\s+remove\\s+(.*\\s)?(--force|-f)(\\s|$)`, "i"),
 			"git worktree remove --force",
 			"deletes a worktree and any uncommitted work inside it. Ask the user first, naming the exact worktree.",
 		],
@@ -532,27 +531,37 @@ export function evaluate(request: GuardRequest): GuardDecision {
 	if (request.tool !== "subagent") return { allow: true };
 
 	const action = text(input.action);
-	if (action && !isManagementAction(input) && !text(input.task) && !text(input.workflowScript) && (campaign || request.armed)) {
-		// An unrecognised action may start or extend a run, and the guard cannot tell from here.
-		// Refusing is the honest answer: a read-only one belongs in the management list.
-		return deny(
-			"CG016",
-			`The guard cannot classify the action "${action}", so it cannot tell whether it starts work. If it launches or extends a run, dispatch it as a normal launch with a pinned model and a routing header. If it only inspects existing runs, add it to the guard's management list.`,
-		);
-	}
-
 	if (isManagementAction(input)) {
-		if (input.action === "steer" && campaign) {
+		if (CORRECTION_ACTIONS.has(action) && campaign) {
 			const runId = runIdOf(input);
 			const used = campaign.steers[runId] ?? 0;
 			if (runId && used >= config.steerCap) {
 				return deny(
 					"CG011",
-					`Run ${runId} has already been steered ${used} times. Steering past the cap is chaperoning, not coordinating: stop the run, split the remaining work into serial milestones, and re-dispatch with a fresh route. A run that needs a third correction is not converging.`,
+					`Run ${runId} has already been corrected ${used} times, by steer or resume. Correcting past the cap is chaperoning, not coordinating: stop the run, split the remaining work into serial milestones, and re-dispatch with a fresh route. A run that needs a third correction is not converging.`,
 				);
 			}
 		}
 		return { allow: true };
+	}
+
+	if (action && (campaign || request.armed)) {
+		// A schedule fires later, with no tool call to check, so nothing about that launch can
+		// be enforced: not its status freshness, not the lane cap, not the review phase.
+		if (/schedule/i.test(action) && campaign) {
+			return deny(
+				"CG016",
+				`"${action}" defers work to a scheduler, and a run that starts without a tool call passes no check: not the status gate, not the lane cap, not the review phase. Dispatch the work directly when the campaign is ready for it.`,
+			);
+		}
+		if (!isLaunch(input)) {
+			// An unrecognised action may start or extend a run, and the guard cannot tell from
+			// here. Refusing is the honest answer: a read-only one belongs in the management list.
+			return deny(
+				"CG016",
+				`The guard cannot classify the action "${action}", so it cannot tell whether it starts work. If it launches or extends a run, dispatch it as a normal launch with a pinned model and a routing header. If it only inspects existing runs, add it to the guard's management list.`,
+			);
+		}
 	}
 
 	if (!isLaunch(input)) return { allow: true };
@@ -570,6 +579,7 @@ export function evaluate(request: GuardRequest): GuardDecision {
 	if (!budgets.allow) return budgets;
 
 	if (script) {
+		const seenKeys = new Set<string>();
 		const { children, agentKeys } = parseScriptChildren(script);
 		if (children.length === 0 || children.length !== agentKeys) {
 			return deny(
@@ -596,6 +606,14 @@ export function evaluate(request: GuardRequest): GuardDecision {
 					"CG004",
 					`Child "${child.agent}" declares ${route.model} in its routing header but launches with ${child.model}. Each child's header must describe that child's own launch.`,
 				);
+			}
+			if (seenKeys.has(route.key)) {
+				return deny("CG010", `Two children of this script share the route key ${route.key}. Each lane needs its own key, or its result cannot be recorded against the right one.`);
+			}
+			seenKeys.add(route.key);
+			const openLane = campaign.lanes.find((lane) => lane.key === route.key && lane.state !== "integrated");
+			if (openLane) {
+				return deny("CG010", `Lane ${route.key} is already open (${openLane.state}), so this child would collide with it. Close it with coordinator_lane first, or give this child its own key.`);
 			}
 			const kind = laneKindFor(child.agent, child.task);
 			if (kind === "implement") {
@@ -727,6 +745,13 @@ export function evaluate(request: GuardRequest): GuardDecision {
 		// Script children were each linted against their own prompt above.
 		const lint = lintPrompt(task, kind, campaign);
 		if (!lint.allow) return lint;
+	}
+
+	if (input.async === undefined) {
+		return deny(
+			"CG017",
+			"State async explicitly on the launch. Whether a dispatch runs in the foreground depends on configuration and per-agent defaults, and a lane whose mode is guessed is either closed while its agent is still working or left open forever. Use async: true for a background lane you will close with coordinator_lane, or async: false to wait for it here.",
+		);
 	}
 
 	const reused = campaign.lanes.find((lane) => lane.key === route.key && lane.state !== "integrated");

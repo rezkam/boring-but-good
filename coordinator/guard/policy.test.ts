@@ -44,7 +44,7 @@ function implementTask(routeLine: string): string {
 }
 
 function request(overrides: Partial<GuardRequest> = {}): GuardRequest {
-	return {
+	const base: GuardRequest = {
 		tool: "subagent",
 		input: {},
 		now: 1_000,
@@ -53,6 +53,12 @@ function request(overrides: Partial<GuardRequest> = {}): GuardRequest {
 		config: DEFAULT_CONFIG,
 		...overrides,
 	};
+	// Launches must declare their execution mode; these fixtures are about the other rules.
+	const isLaunch = base.input.agent !== undefined || base.input.workflowScript !== undefined;
+	if (isLaunch && base.input.async === undefined && base.input.action === undefined) {
+		base.input = { ...base.input, async: true };
+	}
+	return base;
 }
 
 function deny(req: GuardRequest): { code: string; reason: string } {
@@ -175,12 +181,38 @@ test("CG009: the prompt must name the campaign's worktree or one beside it", () 
 	);
 });
 
-test("an action that schedules new work is judged as a launch, not as management", () => {
-	const { code } = deny(request({ input: { action: "schedule.create", agent: "worker", task: "implement slice 4", every: "1h" } }));
-	assert.equal(code, "CG002");
+test("CG016: work deferred to a scheduler is refused during a campaign", () => {
+	const { code, reason } = deny(
+		request({ input: { action: "schedule.create", agent: "worker", task: "implement slice 4", every: "1h" } }),
+	);
+	assert.equal(code, "CG016");
+	assert.match(reason, /scheduler/);
 
 	allow(request({ input: { action: "get", agent: "worker" } }));
 	allow(request({ input: { action: "list" } }));
+});
+
+test("CG011: a steer carrying its message in task still counts, and resume counts too", () => {
+	const steered = campaign({ steers: { run7: 2 } });
+	assert.equal(deny(request({ campaign: steered, input: { action: "steer", id: "run7", task: "again" } })).code, "CG011");
+	assert.equal(deny(request({ campaign: steered, input: { action: "resume", id: "run7" } })).code, "CG011");
+});
+
+test("CG006: an implementation prompt carried by the reviewer role is still writer work", () => {
+	const route = "ROUTE: s1 | class 1 | openai-codex/gpt-5.6-luna:high | mechanical change";
+	const reviewing = campaign({ status: "review", slicesDone: 4 });
+	const { code } = deny(
+		request({
+			campaign: reviewing,
+			input: {
+				agent: "reviewer",
+				model: "openai-codex/gpt-5.6-luna:high",
+				task: `${route}\nImplement the parser change in ${WORKTREE}. Never push.`,
+			},
+		}),
+	);
+	// Judged as a writer, so it fails the writer preflight rather than passing as a reviewer.
+	assert.equal(code, "CG009");
 });
 
 test("CG011: the steer cap reads the id field the subagent API prefers", () => {
@@ -295,6 +327,15 @@ test("CG012: class 3 implementation needs a written justification, not a label",
 	const justified =
 		"ROUTE: s1-parser | class 3 | openai-codex/gpt-5.6-sol:medium | cross-layer transport rewrite spanning six packages and the reducer contract";
 	allow(request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-sol:medium", task: implementTask(justified) } }));
+});
+
+test("CG017: a launch must say whether it runs in the foreground", () => {
+	const { code, reason } = deny({
+		...request(),
+		input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task: implementTask(GOOD_ROUTE) },
+	});
+	assert.equal(code, "CG017");
+	assert.match(reason, /async/);
 });
 
 test("CG005: hard turn and tool budgets are refused on every dispatch", () => {
