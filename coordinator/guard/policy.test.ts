@@ -593,6 +593,62 @@ test("a workflow child's declared model must be the model it launches with", () 
 	assert.match(reason, /declared/i);
 });
 
+test("CG015: a force refspec is a force push", () => {
+	assert.equal(deny(request({ tool: "bash", input: { command: "git push origin +HEAD:main" } })).code, "CG015");
+	allow(request({ tool: "bash", input: { command: "git push origin HEAD:main" } }));
+});
+
+test("CG010: a route key cannot be reused while its lane is still open", () => {
+	const busy = campaign({
+		lanes: [{ key: "s1-parser", kind: "implement", model: "m:high", startedAt: 1, state: "returned" }],
+	});
+	const { code, reason } = deny(
+		request({ campaign: busy, input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task: implementTask(GOOD_ROUTE) } }),
+	);
+	assert.equal(code, "CG010");
+	assert.match(reason, /already open/);
+});
+
+test("ordinary mutating assignments are writer work", () => {
+	for (const assignment of ["Add coverage for the parser", "Write the migration", "Update the reducer contract"]) {
+		const route = "ROUTE: s9 | class 1 | openai-codex/gpt-5.6-luna:high | mechanical change";
+		const { code } = deny(
+			request({
+				input: { agent: "scout", model: "openai-codex/gpt-5.6-luna:high", task: `${route}\n${assignment} in ${WORKTREE}. Never push.` },
+			}),
+		);
+		assert.equal(code, "CG009", `${assignment} should have been read as writer work`);
+	}
+});
+
+test("CG006: an audit-shaped prompt is a review whatever its route key says", () => {
+	const route = "ROUTE: correctness | class 1 | openai-codex/gpt-5.6-luna:high | independent look at the branch";
+	const task = `${route}\nAudit the diff for regressions in ${WORKTREE} at HEAD ${HEAD} and report bugs. Never push.`;
+	assert.equal(deny(request({ input: { agent: "scout", model: "openai-codex/gpt-5.6-luna:high", task } })).code, "CG006");
+});
+
+test("CG002: a workflow script whose child fields are not literals cannot be verified", () => {
+	const shorthand = `const agent = 'scout'; const model = otherModel; return runs.run('x', {agent, model, task})`;
+	const { code, reason } = deny(request({ input: { workflowScript: shorthand } }));
+	assert.equal(code, "CG002");
+	assert.match(reason, /literal/i);
+});
+
+test("CG016: an action the guard cannot classify is refused rather than waved through", () => {
+	const { code, reason } = deny(request({ input: { action: "schedule.run", scheduleName: "nightly" } }));
+	assert.equal(code, "CG016");
+	assert.match(reason, /schedule\.run/);
+});
+
+test("every child prompt in a workflow is linted on its own", () => {
+	const good = `ROUTE: a | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory. Read-only inventory in ${WORKTREE}. Never push.`;
+	const missingBoundary = `ROUTE: b | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory. Read-only inventory in ${WORKTREE}.`;
+	const script = `const r = await runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${good}\`}, {key:'b', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${missingBoundary}\`}]); return r`;
+	const { code, reason } = deny(request({ input: { workflowScript: script } }));
+	assert.equal(code, "CG009");
+	assert.match(reason, /never pushes/);
+});
+
 test("a read-only investigation is not mistaken for a review", () => {
 	const route = "ROUTE: port-map | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory of the transport call sites";
 	allow(

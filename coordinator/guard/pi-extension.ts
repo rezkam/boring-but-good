@@ -205,7 +205,6 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 				startedAt: Date.now(),
 				state: "running",
 			};
-			campaign.lanes = campaign.lanes.filter((existing) => existing.key !== route.key || existing.state === "integrated");
 			campaign.lanes.push(lane);
 			campaign.routes.push(route);
 		}
@@ -394,6 +393,11 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			const open = campaign.lanes.filter((candidate) => candidate.key === params.key && candidate.state !== "integrated");
 			const lane = open[open.length - 1];
 			if (!lane) throw new Error(`no open lane named ${params.key}; open lanes: ${laneSummary(campaign)}`);
+			if (params.action === "done" && lane.kind === "implement") {
+				throw new Error(
+					`lane ${params.key} is a writer, so "done" would free its capacity without recording an integration. Integrate its work into the campaign branch, run the gates yourself, then use "integrated".`,
+				);
+			}
 			if (params.action === "dead") {
 				campaign.lanes = campaign.lanes.filter((candidate) => candidate !== lane);
 			} else {
