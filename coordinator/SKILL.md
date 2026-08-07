@@ -271,9 +271,10 @@ After approval, only these interrupt the loop:
   architectural fork with no conservative option, or a contradiction with a ratified ADR.
   A mid-campaign instruction from the user that changes the base, the dependencies, or the
   scope is an instance of this. Amend the plan with the new slice mapping, print the delta
-  in the next status block, then work it. One campaign answered a single line, "there is a
-  0.84.1, use that too", by inventing an eight-track parallel migration across fifteen
-  worktrees that was in no plan, and the user had to ask why nothing was progressing
+  in the next status block, then work it. One campaign answered a one-line request to adopt
+  a newer dependency version by inventing an eight-track parallel migration across fifteen
+  worktrees that appeared in no plan, and the user had to ask twice why nothing was
+  progressing
 - the next step is destructive and outside the recorded authorization
 - a rebase conflict whose correct resolution is genuinely ambiguous
 

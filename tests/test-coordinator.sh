@@ -228,6 +228,32 @@ rm -rf "$T"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
+header "Coordinator guard: dispatch policy"
+# ═══════════════════════════════════════════════════════════════════════════════
+
+GUARD_TEST="${COORD_DIR}/guard/policy.test.ts"
+if [ ! -f "$GUARD_TEST" ]; then
+    fail "guard policy tests are present" "missing $GUARD_TEST"
+elif ! command -v node >/dev/null 2>&1; then
+    skip "guard policy tests (node not installed)"
+else
+    # Node strips TypeScript types natively from 22.18 on; older runtimes cannot run the suite.
+    NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
+    if [ "$NODE_MAJOR" -lt 22 ]; then
+        skip "guard policy tests (node $NODE_MAJOR is too old for type stripping)"
+    else
+        GUARD_OUT=$(cd "${COORD_DIR}/guard" && node --test policy.test.ts 2>&1)
+        GUARD_RC=$?
+        GUARD_PASS=$(printf '%s' "$GUARD_OUT" | grep -oE '^. pass [0-9]+' | grep -oE '[0-9]+' | tail -1)
+        if [ "$GUARD_RC" -eq 0 ]; then
+            pass "guard policy suite (${GUARD_PASS:-0} assertions)"
+        else
+            fail "guard policy suite" "$(printf '%s' "$GUARD_OUT" | grep -E '^. (fail|not ok)' | head -5)"
+        fi
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
 header "Results: Coordinator"
 # ═══════════════════════════════════════════════════════════════════════════════
 

@@ -76,13 +76,94 @@ test("parseModelPin requires a provider-qualified id and a known effort suffix",
 	assert.equal(parseModelPin(""), null);
 });
 
-test("modelClass maps the tier table, and is unknown for unlisted models", () => {
-	assert.equal(modelClass("openai-codex/gpt-5.6-luna"), 1);
-	assert.equal(modelClass("claude-bridge/claude-sonnet-5"), 1);
-	assert.equal(modelClass("openai-codex/gpt-5.6-terra"), 2);
-	assert.equal(modelClass("openai-codex/gpt-5.6-sol"), 3);
-	assert.equal(modelClass("claude-bridge/claude-fable-5"), 3);
-	assert.equal(modelClass("some/unknown-model"), null);
+test("modelClass maps the tier table, and reads effort where the table splits on it", () => {
+	assert.equal(modelClass("openai-codex/gpt-5.6-luna", "high"), 1);
+	assert.equal(modelClass("claude-bridge/claude-sonnet-5", "medium"), 1);
+	assert.equal(modelClass("openai-codex/gpt-5.6-terra", "medium"), 2);
+	assert.equal(modelClass("openai-codex/gpt-5.6-sol", "medium"), 3);
+	assert.equal(modelClass("claude-bridge/claude-fable-5", "high"), 3);
+	assert.equal(modelClass("some/unknown-model", "high"), null);
+
+	// dispatch.md splits opus by effort: low is class 2, medium and above is class 3.
+	assert.equal(modelClass("claude-bridge/claude-opus-5", "low"), 2);
+	assert.equal(modelClass("claude-bridge/claude-opus-5", "medium"), 3);
+});
+
+test("CG004: an opus route is judged at the effort it was pinned at", () => {
+	const asClass2 =
+		"ROUTE: s1-parser | class 2 | claude-bridge/claude-opus-5:low | prose-led integration work across two packages";
+	allow(request({ input: { agent: "worker", model: "claude-bridge/claude-opus-5:low", task: implementTask(asClass2) } }));
+
+	const mislabelled =
+		"ROUTE: s1-parser | class 2 | claude-bridge/claude-opus-5:medium | prose-led integration work across two packages";
+	assert.equal(
+		deny(request({ input: { agent: "worker", model: "claude-bridge/claude-opus-5:medium", task: implementTask(mislabelled) } })).code,
+		"CG004",
+	);
+});
+
+test("CG006: a review prompt is caught even when it mentions fixing, writing, or adding", () => {
+	const route = "ROUTE: r1 | class 3 | openai-codex/gpt-5.6-sol:high | final whole-branch review of the campaign diff";
+	const task = [
+		route,
+		`Conduct a read-only review of ${WORKTREE} at HEAD ${HEAD}.`,
+		"Return every finding that the author would likely fix. Do not modify files, and never push.",
+		"Write the findings as a list, and add a severity to each one.",
+	].join("\n");
+	assert.equal(deny(request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-sol:high", task } })).code, "CG006");
+});
+
+test("a workflow script may carry investigations, but never writers or reviewers", () => {
+	const investigation = (key: string) =>
+		`ROUTE: ${key} | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory\\nRead-only inventory in ${WORKTREE} at HEAD ${HEAD}. Never push.`;
+	const readOnly = `const r = await runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${investigation("a")}\`}, {key:'b', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${investigation("b")}\`}]); return r`;
+	allow(request({ input: { workflowScript: readOnly } }));
+
+	const writers = `const r = await runs.all([{key:'a', agent:'worker', model:'openai-codex/gpt-5.6-luna:high', task: \`${implementTask(GOOD_ROUTE)}\`}, {key:'b', agent:'worker', model:'openai-codex/gpt-5.6-luna:high', task: \`${implementTask(GOOD_ROUTE)}\`}]); return r`;
+	const { code, reason } = deny(request({ input: { workflowScript: writers } }));
+	assert.equal(code, "CG010");
+	assert.match(reason, /one dispatch at a time/);
+});
+
+test("CG009: the prompt must name the campaign's worktree or one beside it", () => {
+	const model = "openai-codex/gpt-5.6-luna:high";
+	const sibling = "/Users/dev/.agents/worktrees/demo-lane-a";
+	allow(
+		request({
+			input: { agent: "worker", model, task: `${GOOD_ROUTE}\nImplement slice S1 in ${sibling} at exact HEAD ${HEAD}. Never push.` },
+		}),
+	);
+
+	const elsewhere = "/Users/dev/some-other-checkout";
+	const { code, reason } = deny(
+		request({
+			input: { agent: "worker", model, task: `${GOOD_ROUTE}\nImplement slice S1 in ${elsewhere} at exact HEAD ${HEAD}. Never push.` },
+		}),
+	);
+	assert.equal(code, "CG009");
+	assert.match(reason, /demo-20260101/);
+
+	assert.equal(
+		deny(
+			request({
+				input: { agent: "worker", model, task: `${GOOD_ROUTE}\nImplement slice S1 with /usr/bin/env node at exact HEAD ${HEAD}. Never push.` },
+			}),
+		).code,
+		"CG009",
+	);
+});
+
+test("an action that schedules new work is judged as a launch, not as management", () => {
+	const { code } = deny(request({ input: { action: "schedule.create", agent: "worker", task: "implement slice 4", every: "1h" } }));
+	assert.equal(code, "CG002");
+
+	allow(request({ input: { action: "get", agent: "worker" } }));
+	allow(request({ input: { action: "list" } }));
+});
+
+test("CG011: the steer cap reads the id field the subagent API prefers", () => {
+	const steered = campaign({ steers: { run7: 2 } });
+	assert.equal(deny(request({ campaign: steered, input: { action: "steer", id: "run7", message: "again" } })).code, "CG011");
 });
 
 test("parseRouteHeader reads the four declared fields", () => {
@@ -112,7 +193,7 @@ test("readStatusBlock reports the fields a status block is missing", () => {
 	const partial = "CAMPAIGN demo\nSLICES 1 done / 4 total\nNEXT integrate";
 	const result = readStatusBlock(partial);
 	assert.equal(result.ok, false);
-	assert.deepEqual(result.missing, ["PR", "AGENTS", "DIRECT"]);
+	assert.deepEqual(result.missing, ["WORKTREE", "PR", "AGENTS", "DIRECT", "PARKED", "NEEDS YOU"]);
 });
 
 test("the guard is inert when no campaign is registered and the skill is not loaded", () => {
@@ -372,6 +453,11 @@ test("CG015: the destructive git commands the skill forbids are refused while a 
 	assert.equal(deny(request({ tool: "bash", input: { command: "git stash" } })).code, "CG015");
 	assert.equal(deny(request({ tool: "bash", input: { command: "git checkout -- src/app.ts" } })).code, "CG015");
 	assert.equal(deny(request({ tool: "bash", input: { command: "git push --force origin main" } })).code, "CG015");
+	assert.equal(deny(request({ tool: "bash", input: { command: "git push --force-with-lease origin main" } })).code, "CG015");
+	assert.equal(
+		deny(request({ tool: "bash", input: { command: "git push --force-with-lease=main:abc1234 origin main" } })).code,
+		"CG015",
+	);
 	allow(request({ tool: "bash", input: { command: "git push origin HEAD" } }));
 	allow(request({ tool: "bash", input: { command: "git switch -C feat/x abc1234" } }));
 });

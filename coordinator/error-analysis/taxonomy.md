@@ -57,7 +57,7 @@ transcripts, kept out of the repo by `.gitignore`).
    deviation gets an explicit verdict before the slice closes: ratified (a good call, logged with why) or remediated
    (reverted or fixed via a follow-up dispatch).
 
-## Long-session decay modes (from a 19 hour pi campaign, 2026-08-07)
+## Long-session decay modes (from one very long campaign)
 
 One session produced all five. They are grouped because they share a cause: every rule in this skill was prose, read
 once, and nothing compared the rules to the calls. They are now refused at the tool boundary by `../guard/`, whose
@@ -87,10 +87,11 @@ codes map onto this list.
     writer lanes, where a returned lane stays open until the coordinator integrates it and runs its gates (CG010), and
     steering the same run a third time is refused in favour of stopping and splitting it (CG011).
 
-14. **scope-change-becomes-shadow-campaign.** A one-line user addition ("there is a 0.84.1, use that too") was executed
-    as an improvised eight-track parallel migration that appeared in no plan, and the user had to ask twice why nothing
-    was progressing and once to say "follow the plan that we have". Fix: a mid-campaign instruction that changes the
-    base, dependencies, or scope is a plan-reshaping stop condition: amend the plan, print the delta, then work it.
+14. **scope-change-becomes-shadow-campaign.** A one-line user request to adopt a newer dependency version was executed
+    as an improvised eight-track parallel migration that appeared in no plan, and the user had to ask repeatedly why
+    nothing was progressing and to say the existing plan should be followed. Fix: a mid-campaign instruction that
+    changes the base, dependencies, or scope is a plan-reshaping stop condition: amend the plan, print the delta, then
+    work it.
 
 ## Coordinator-side modes (from the same review, not per-record)
 
