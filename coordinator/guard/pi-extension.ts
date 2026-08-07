@@ -180,7 +180,9 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 	});
 
 	function recordLaunch(toolCallId: string, input: Record<string, unknown>, ctx: ExtensionContext): void {
-		if (!campaign) return;
+		// A closed campaign enforces nothing, so it must not accumulate lanes a later resume
+		// would treat as its own.
+		if (!campaign || campaign.status === "closed") return;
 		// A scheduling action creates a run, so it becomes a lane like any other launch. Only a
 		// genuine management action returns here.
 		if (isManagementAction(input)) {
@@ -221,7 +223,8 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		// foreground run finishes when its tool result arrives. Background lanes are closed by
 		// the coordinator through coordinator_lane, which is what the continuation asks for. Both
 		// are tracked, because a launch that errors immediately must not leave a phantom lane.
-		// clarify keeps a run in the foreground even when async is omitted.
+		// The launch had to declare its mode, so the lane is tracked from that declaration rather
+		// than from a default the guard cannot see. clarify keeps a run in the foreground too.
 		const foreground = input.async === false || input.clarify === true;
 		laneByToolCall.set(toolCallId, { keys: routes.map((lane) => lane.key), foreground });
 		recordProgress();
@@ -373,6 +376,17 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 				}
 				case "close": {
 					if (!campaign) throw new Error("no campaign is registered");
+					// Closing turns every rule off, so it is not a way out of an unfinished campaign.
+					// The user's /campaign close stays available as the deliberate override.
+					const openLanes = campaign.lanes.filter((lane) => lane.state !== "integrated");
+					if (openLanes.length > 0) {
+						throw new Error(`these lanes are still open: ${laneSummary(campaign)}. Close them with coordinator_lane before closing the campaign.`);
+					}
+					if (campaign.slicesDone < campaign.slicesTotal) {
+						throw new Error(
+							`${campaign.slicesDone} of ${campaign.slicesTotal} slices are done, so the campaign is not finished. Closing would turn every rule off. Keep working, or ask the user to end it with /campaign close.`,
+						);
+					}
 					campaign.status = "closed";
 					armed = false;
 					break;

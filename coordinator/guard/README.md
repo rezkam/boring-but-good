@@ -70,7 +70,8 @@ work again immediately.
 | CG012 | Class 3 implementation with a label instead of a justification | Class 3 became the default for mechanical repairs |
 | CG013 | An ephemeral `/tmp` or `$TMPDIR` worktree path | |
 | CG014 | Spawning an agent through bash (`codex exec`, `claude -p`, `pi -p`) | Otherwise the guard only guards the polite path |
-| CG016 | An action the guard cannot classify, since it may start or extend a run | A read-only one belongs in the guard's management list, named there rather than assumed |
+| CG016 | An action the guard cannot classify, and work deferred to a scheduler | A read-only action belongs in the guard's management list, named there rather than assumed; a scheduled run starts with no tool call, so no rule can see it |
+| CG017 | A launch that does not state `async` | Whether a run is foreground depends on configuration and per-agent defaults, so a guessed mode either closes a lane while its agent works or leaves it open forever |
 | CG015 | `git reset --hard`, `git stash`, `git restore`, `git checkout -- <path>`, force push | A campaign created a backup branch, ran `git reset --hard`, and destroyed a pending dependency override |
 
 Every refusal names the exact unblock action, so a blocked call is one corrected retry
