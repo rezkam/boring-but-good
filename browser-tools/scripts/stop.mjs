@@ -98,7 +98,8 @@ if (result.status === 'missing') {
 if (result.status === 'would-stop') {
   console.log(`✓ Dry run: would stop managed Chrome (PID ${result.pid}) on :${port}`);
 } else if (result.status === 'stopped') {
-  console.log(`✓ Stopped managed Chrome (PID ${result.pid}) on :${port}`);
+  const reclaimed = result.reclaimedUnowned ? ' (reclaimed: nothing owned it)' : '';
+  console.log(`✓ Stopped managed Chrome (PID ${result.pid}) on :${port}${reclaimed}`);
 } else if (result.status === 'killed') {
   console.log(`✓ Killed managed Chrome (PID ${result.pid}) on :${port} after SIGTERM did not exit`);
 } else if (result.status === 'already-gone') {

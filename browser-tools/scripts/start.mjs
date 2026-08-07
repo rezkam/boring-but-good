@@ -13,7 +13,7 @@
  *   BROWSER_TOOLS_OWNER_TOKEN="<owner token>" scripts/start.mjs
  */
 
-import { hasFlag, requiredOptionValue, parseOwnerId, parseOwnerToken, parsePort, startChrome } from './browser-control.mjs';
+import { CLI_OWNER_ID, hasFlag, requiredOptionValue, parseOwnerId, parseOwnerToken, parsePort, startChrome } from './browser-control.mjs';
 
 const args = process.argv.slice(2);
 const profileName = requiredOptionValue(args, '--profile', null);
@@ -24,7 +24,7 @@ const includeGoogle = hasFlag(args, '--include-google');
 const explicitPort = args.includes('--port');
 const port = parsePort(args);
 const ownerToken = parseOwnerToken(args);
-const ownerId = parseOwnerId(args);
+const ownerId = parseOwnerId(args) || CLI_OWNER_ID;
 
 try {
   const result = await startChrome({ port, profileName, taskName, forceProfileSync, autoAllocatePort: !explicitPort, ownerToken, ownerId, headless, includeGoogle });
