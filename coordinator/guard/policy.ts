@@ -291,9 +291,14 @@ export function laneKindFor(agent: string | undefined, task: string): LaneKind {
 	if (known === "review") return "review";
 	// Writing a report is not mutating a repository, so "write your findings" stays read-only
 	// while "write the migration" does not.
+	// Classify the assignment, not the header's key and model: a slice named "port-map" is not
+	// a port, and a prohibition is not an assignment ("do not modify files" is read-only work).
+	const assignment = task
+		.replace(/(?:^|[`'"])[ \t>*-]*ROUTE:\s*[^|]*\|\s*class\s*[123]\s*\|[^|]*\|/i, " ")
+		.replace(/\b(do not|don't|never|no)\s+(modify|edit|change|create|add|write|delete|remove|rename|update|implement|commit)\b/gi, " ");
 	const writes =
-		/(implementer subagent|\b(implement|fix|repair|refactor|migrate|extract|compose|introduce|rename|delete|remove|update)\b|\badd\b(?!\s+(a\s+)?(note|comment|finding|severity))|\bwrite\b(?!\s+(the\s+|your\s+)?(findings|report|notes|summary|result)))/i.test(
-			task,
+		/(implementer subagent|\b(implement|fix|repair|refactor|migrate|extract|compose|introduce|rename|delete|remove|update|create|edit|change|modify|wire|port)\b|\badd\b(?!\s+(a\s+)?(note|comment|finding|severity))|\bwrite\b(?!\s+(the\s+|your\s+)?(findings|report|notes|summary|result)))/i.test(
+			assignment,
 		);
 
 	// A review reads and reports; it never owns the tree. Detect that assignment directly,
@@ -344,7 +349,8 @@ function isLaunch(input: Record<string, unknown>): boolean {
 }
 
 function runIdOf(input: Record<string, unknown>): string {
-	return text(input.id) || text(input.runId);
+	// A steer can address its run by id or by directory; both have to count against the cap.
+	return text(input.id) || text(input.runId) || text(input.dir);
 }
 
 function deny(code: string, reason: string): GuardDecision {
@@ -362,23 +368,26 @@ function checkBash(command: string): GuardDecision {
 	// Global options sit between git and its subcommand, so `git -C <path> reset --hard` is the
 	// same command as `git reset --hard` and has to be matched the same way.
 	const git = String.raw`git(?:\s+(?:-[cC]\s+\S+|--\S+|-[^-\s]\S*))*\s+`;
-	const destructive: Array<[RegExp, string]> = [
-		[new RegExp(`${git}reset\\s+--hard`, "i"), "git reset --hard"],
-		[new RegExp(`${git}stash(\\s|$)`, "i"), "git stash"],
-		[new RegExp(`${git}restore(\\s|$)`, "i"), "git restore"],
-		[new RegExp(`${git}checkout\\s+--\\s`, "i"), "git checkout -- <path>"],
-		[new RegExp(`${git}push\\s+(.*\\s)?(--force(-with-lease)?(=\\S*)?|-f)(\\s|$)`, "i"), "a force push"],
-		// git's own force syntax: a refspec whose source is prefixed with +.
-		[new RegExp(`${git}push\\s+(\\S+\\s+)*\\+\\S+:`, "i"), "a force push by refspec"],
-		[new RegExp(`${git}worktree\\s+remove\\s+.*--force`, "i"), "git worktree remove --force"],
+	const discardsTree =
+		"discards uncommitted work with no prompt, and a backup branch does not save it because a branch only captures commits. To move a branch pointer use git switch -C <branch> <sha> or git update-ref, which refuse rather than discard. If you truly need a clean tree, commit or export first and say so in the status block.";
+	const rewritesHistory =
+		"rewrites published history, which is outside the recorded authorization and can destroy work that is not yours. Ask the user before any force push, naming the exact branch.";
+	const destructive: Array<[RegExp, string, string]> = [
+		[new RegExp(`${git}reset\\s+--hard`, "i"), "git reset --hard", discardsTree],
+		[new RegExp(`${git}stash(\\s|$)`, "i"), "git stash", discardsTree],
+		[new RegExp(`${git}restore(\\s|$)`, "i"), "git restore", discardsTree],
+		[new RegExp(`${git}checkout\\s+--\\s`, "i"), "git checkout -- <path>", discardsTree],
+		[new RegExp(`${git}push\\s+(.*\\s)?(--force(-with-lease)?(=\\S*)?|-f)(\\s|$)`, "i"), "This force push", rewritesHistory],
+		// git's own force syntax: a refspec whose source is prefixed with +, destination optional.
+		[new RegExp(`${git}push\\s+(\\S+\\s+)*\\+\\S+`, "i"), "A refspec beginning with + is a force push, and this one", rewritesHistory],
+		[
+			new RegExp(`${git}worktree\\s+remove\\s+.*--force`, "i"),
+			"git worktree remove --force",
+			"deletes a worktree and any uncommitted work inside it. Ask the user first, naming the exact worktree.",
+		],
 	];
-	for (const [pattern, label] of destructive) {
-		if (pattern.test(command)) {
-			return deny(
-				"CG015",
-				`${label} discards work with no prompt and a backup branch does not save uncommitted changes. To move a branch pointer use git switch -C <branch> <sha> or git update-ref. If you truly need a clean tree, commit or export first and say so in the status block.`,
-			);
-		}
+	for (const [pattern, label, reason] of destructive) {
+		if (pattern.test(command)) return deny("CG015", `${label} ${reason}`);
 	}
 	return { allow: true };
 }
@@ -386,43 +395,74 @@ function checkBash(command: string): GuardDecision {
 // Property keys appear bare or quoted depending on how the script was written, and a script
 // built with JSON.stringify quotes every one of them.
 const AGENT_KEY = /(?:\b|["'])agent["']?\s*:/g;
-const MODEL_VALUE = /(?:\b|["'])model["']?\s*:\s*['"`]([^'"`]+)['"`]/g;
 
-function collectScriptModels(script: string): { agents: number; models: string[] } {
-	const agents = script.match(AGENT_KEY)?.length ?? 0;
-	const models = [...script.matchAll(MODEL_VALUE)].map((match) => match[1]);
-	return { agents, models };
+export interface ScriptChild {
+	agent: string;
+	model: string;
+	task: string;
 }
 
-/** Every routing header in a text, in order, one per child. */
-export function parseRouteHeaders(text: string): RouteHeader[] {
-	return scriptRoutes(text);
-}
-
-/** Each child's own prompt text, taken from its routing header to the next one. */
-function splitRouteChunks(script: string): string[] {
-	return script.split(/(?=ROUTE:)/i).filter((chunk) => /^ROUTE:/i.test(chunk));
-}
-
-/** Every routing header in a script, in order, one per child. */
-function scriptRoutes(script: string): RouteHeader[] {
-	return script
-		.split(/(?=ROUTE:)/i)
-		.filter((chunk) => /^ROUTE:/i.test(chunk))
-		.map((chunk) => parseRouteHeader(chunk))
-		.filter((route): route is RouteHeader => route !== null);
-}
-
-/** One kind per child, read from the agent names and from each child's own routing header. */
-function scriptChildKinds(script: string): LaneKind[] {
-	const kinds: LaneKind[] = [];
-	for (const match of script.matchAll(/(?:\b|["'])agent["']?\s*:\s*['"`]([^'"`]+)['"`]/g)) {
-		const known = KIND_BY_AGENT[match[1].toLowerCase()];
-		if (known) kinds.push(known);
+/**
+ * Child specifications, kept associated rather than counted. Comparing bags of models across
+ * a whole script cannot tell that child A declared what child B launched, so each child's
+ * own object is read: its agent, its model, and its task with its routing header.
+ */
+export function parseScriptChildren(script: string): { children: ScriptChild[]; agentKeys: number } {
+	const agentKeys = script.match(AGENT_KEY)?.length ?? 0;
+	const children: ScriptChild[] = [];
+	for (let index = 0; index < script.length; index++) {
+		if (script[index] !== "{") continue;
+		const body = readObjectLiteral(script, index);
+		if (!body) continue;
+		const agent = readField(body, "agent");
+		if (agent === undefined) continue;
+		children.push({ agent, model: readField(body, "model") ?? "", task: readField(body, "task") ?? "" });
+		index += body.length;
 	}
-	const chunks = script.split(/(?=ROUTE:)/i).filter((chunk) => /^ROUTE:/i.test(chunk));
-	for (const chunk of chunks) kinds.push(laneKindFor(undefined, chunk));
-	return kinds;
+	return { children, agentKeys };
+}
+
+/** The text of the object literal starting at `start`, quote and nesting aware. */
+function readObjectLiteral(source: string, start: number): string | null {
+	let depth = 0;
+	let quote: string | null = null;
+	for (let index = start; index < source.length; index++) {
+		const char = source[index];
+		if (quote) {
+			if (char === "\\") index++;
+			else if (char === quote) quote = null;
+			continue;
+		}
+		if (char === "'" || char === '"' || char === "`") quote = char;
+		else if (char === "{") depth++;
+		else if (char === "}") {
+			depth--;
+			if (depth === 0) return source.slice(start, index + 1);
+		}
+	}
+	return null;
+}
+
+/** A field's literal string value, or undefined when it is absent or not a literal. */
+function readField(objectBody: string, field: string): string | undefined {
+	const key = new RegExp(`(?:^|[{,\\s])["']?${field}["']?\\s*:`, "i");
+	const found = key.exec(objectBody);
+	if (!found) return undefined;
+	const rest = objectBody.slice(found.index + found[0].length).trimStart();
+	const quote = rest[0];
+	if (quote !== "'" && quote !== '"' && quote !== "`") return "";
+	let value = "";
+	for (let index = 1; index < rest.length; index++) {
+		const char = rest[index];
+		if (char === "\\") {
+			value += rest[index + 1] === "n" ? "\n" : rest[index + 1];
+			index++;
+			continue;
+		}
+		if (char === quote) return value;
+		value += char;
+	}
+	return undefined;
 }
 
 /** Model pin and declared class, checked the same way for a lone dispatch and for a child. */
@@ -492,7 +532,7 @@ export function evaluate(request: GuardRequest): GuardDecision {
 	if (request.tool !== "subagent") return { allow: true };
 
 	const action = text(input.action);
-	if (action && !isManagementAction(input) && !text(input.task) && !text(input.workflowScript) && campaign) {
+	if (action && !isManagementAction(input) && !text(input.task) && !text(input.workflowScript) && (campaign || request.armed)) {
 		// An unrecognised action may start or extend a run, and the guard cannot tell from here.
 		// Refusing is the honest answer: a read-only one belongs in the management list.
 		return deny(
@@ -530,59 +570,50 @@ export function evaluate(request: GuardRequest): GuardDecision {
 	if (!budgets.allow) return budgets;
 
 	if (script) {
-		if (/[{,]\s*(agent|model|task)\s*[,}]/.test(script)) {
+		const { children, agentKeys } = parseScriptChildren(script);
+		if (children.length === 0 || children.length !== agentKeys) {
 			return deny(
 				"CG002",
-				"Write each child's agent, model, and task as literal fields in the script. Shorthand or variable references cannot be checked, and a child whose model cannot be read is a child whose model was never pinned.",
+				`Write each child's agent, model, and task as literal fields in the script. ${agentKeys} agent entries were found but ${children.length} could be read as literal objects, and a child whose fields cannot be read is a child whose model was never pinned.`,
 			);
 		}
-		const { agents, models } = collectScriptModels(script);
-		if (agents === 0) {
-			return deny(
-				"CG002",
-				"No child agent could be read from this script as a literal field, so nothing about it can be verified. Write the children out literally.",
-			);
-		}
-		const unpinned = models.filter((model) => parseModelPin(model) === null);
-		if (models.length < agents || unpinned.length > 0) {
-			return deny(
-				"CG002",
-				`Every agent in a workflow script needs its own model pinned as provider/model:effort. Found ${agents} agent entries and ${models.length} model values${unpinned.length > 0 ? `, and these carry no valid effort suffix: ${unpinned.join(", ")}` : ""}. An unpinned entry inherits the session model and effort silently.`,
-			);
-		}
-		const routes = scriptRoutes(script);
-		if (routes.length < agents) {
-			return deny(
-				"CG003",
-				`Every child of a workflow script carries its own routing header. Found ${agents} agent entries and ${routes.length} valid ROUTE headers. A child with no row is an undecided dispatch hidden inside a script.`,
-			);
-		}
-		for (const route of routes) {
-			const verdict = checkRoute(route, config, laneKindFor(undefined, route.reason));
-			if (!verdict.allow) return verdict;
-		}
-		// Each child's header has to describe that child's own launch, so the declared models and
-		// the launched models must be the same multiset.
-		const declared = routes.map((route) => route.model).sort();
-		const launched = [...models].sort();
-		if (declared.length === launched.length && declared.some((model, index) => model !== launched[index])) {
-			return deny(
-				"CG004",
-				`The routing headers in this script declared ${declared.join(", ")} but the children launch with ${launched.join(", ")}. Each child's header must name the model that child actually carries.`,
-			);
-		}
-		const children = scriptChildKinds(script);
-		if (children.includes("implement")) {
-			return deny(
-				"CG010",
-				"A workflow script carries writers. Writers go out one dispatch at a time so each becomes a tracked lane you integrate before the next: a script hides them behind a single call, which is how five of them once opened in one instant and none landed for hours. Scripts are for independent read-only investigations.",
-			);
-		}
-		if (children.includes("review")) {
-			return deny(
-				"CG006",
-				"A workflow script carries a reviewer. Review is one dispatch, once, at the end, so it is never a child of a script.",
-			);
+		for (const child of children) {
+			if (parseModelPin(child.model) === null) {
+				return deny(
+					"CG002",
+					`Child "${child.agent}" carries ${child.model ? `model ${child.model}` : "no literal model"}. Every child pins provider/model:effort, because an unpinned child inherits the session model and effort silently.`,
+				);
+			}
+			const route = parseRouteHeader(child.task);
+			if (!route) {
+				return deny(
+					"CG003",
+					`Child "${child.agent}" has no ROUTE header. Every child of a workflow script carries its own routing row, or it is an undecided dispatch hidden inside a script.`,
+				);
+			}
+			if (route.model !== child.model) {
+				return deny(
+					"CG004",
+					`Child "${child.agent}" declares ${route.model} in its routing header but launches with ${child.model}. Each child's header must describe that child's own launch.`,
+				);
+			}
+			const kind = laneKindFor(child.agent, child.task);
+			if (kind === "implement") {
+				return deny(
+					"CG010",
+					"A workflow script carries writers. Writers go out one dispatch at a time so each becomes a tracked lane you integrate before the next: a script hides them behind a single call, which is how five of them once opened in one instant and none landed for hours. Scripts are for independent read-only investigations.",
+				);
+			}
+			if (kind === "review") {
+				return deny(
+					"CG006",
+					"A workflow script carries a reviewer. Review is one dispatch, once, at the end, so it is never a child of a script.",
+				);
+			}
+			const routeVerdict = checkRoute(route, config, kind);
+			if (!routeVerdict.allow) return routeVerdict;
+			const childLint = lintPrompt(child.task, kind, campaign);
+			if (!childLint.allow) return childLint;
 		}
 	}
 
@@ -619,6 +650,15 @@ export function evaluate(request: GuardRequest): GuardDecision {
 		return deny(
 			"CG007",
 			"This prompt tells a subagent to push. Pushing belongs to the coordinator alone. Remove it, and state that the agent commits locally and never pushes.",
+		);
+	}
+	// Rebasing and cherry-picking move the branch, so they are the coordinator's whatever else
+	// the prompt asks for. The local commit is the one git step an implementer owns.
+	const integration = /\b(rebase|rebasing|cherry-pick|cherry-picking)\b/i.exec(withoutBoundaries.replace(/\b(never|do not|don't|no)\s+(rebase|cherry-pick)\w*\b/gi, " "));
+	if (integration) {
+		return deny(
+			"CG007",
+			`This prompt asks a subagent to ${integration[0]}. Rebasing, cherry-picking, and every other move of the branch belong to the coordinator, even alongside real implementation work. Let the agent commit locally and do the integration yourself.`,
 		);
 	}
 	if (/\bgh\s+(pr|release|api)\b/i.test(task) && !/\b(never|do not|don't|no)\s+(run\s+)?gh\b/i.test(task)) {
@@ -683,14 +723,8 @@ export function evaluate(request: GuardRequest): GuardDecision {
 		);
 	}
 
-	// Each child of a script receives its own prompt, so each one is linted on its own: a
-	// sibling supplying the worktree and the push boundary does not supply them to the others.
-	if (script) {
-		for (const chunk of splitRouteChunks(script)) {
-			const chunkLint = lintPrompt(chunk, laneKindFor(undefined, chunk), campaign);
-			if (!chunkLint.allow) return chunkLint;
-		}
-	} else {
+	if (!script) {
+		// Script children were each linted against their own prompt above.
 		const lint = lintPrompt(task, kind, campaign);
 		if (!lint.allow) return lint;
 	}
@@ -763,11 +797,22 @@ function lintPrompt(task: string, kind: LaneKind, campaign: Campaign): GuardDeci
 		);
 	}
 
-	if (kind !== "investigate" && !/\b(?=[0-9a-f]{7,40}\b)[0-9a-f]*[a-f][0-9a-f]*\b/i.test(task)) {
-		return deny(
-			"CG009",
-			"State the exact expected HEAD sha and tell the agent to stop and report if it differs. Without it, a returned diff cannot be attributed.",
-		);
+	if (kind !== "investigate") {
+		// The sha has to be presented as the expected HEAD, not merely appear somewhere: a digest
+		// quoted in passing is not a preflight.
+		const declaresHead = /\bHEAD\b[^\n]{0,40}?\b(?=[0-9a-f]{7,40}\b)[0-9a-f]*[a-f][0-9a-f]*\b/i.test(task);
+		if (!declaresHead) {
+			return deny(
+				"CG009",
+				"Name the exact expected HEAD sha, as \"at exact HEAD <sha>\". Without it, a returned diff cannot be attributed to this dispatch.",
+			);
+		}
+		if (kind === "implement" && !/\bstop\b/i.test(task)) {
+			return deny(
+				"CG009",
+				"Tell the agent to stop and report if HEAD differs from the expected sha. A preflight with no instruction for the mismatch case is a sha the agent is free to ignore.",
+			);
+		}
 	}
 
 	if (!/\b(never|do not|don't|no)\s+push\b/i.test(task)) {

@@ -20,7 +20,8 @@ import {
 	laneSummary,
 	newCampaign,
 	openReview,
-	parseRouteHeaders,
+	parseRouteHeader,
+	parseScriptChildren,
 	readStatusBlock,
 	type Campaign,
 	type Lane,
@@ -192,27 +193,37 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			}
 			return;
 		}
-		const task = typeof input.task === "string" ? input.task : typeof input.workflowScript === "string" ? input.workflowScript : "";
-		// A script launches one child per routing header, and every one of them is a lane.
-		const routes = parseRouteHeaders(task);
-		if (routes.length === 0) return;
+		const script = typeof input.workflowScript === "string" ? input.workflowScript : "";
+		const task = typeof input.task === "string" ? input.task : script;
 		const agent = typeof input.agent === "string" ? input.agent : undefined;
-		for (const route of routes) {
-			const lane: Lane = {
+		// Each child is classified from its own prompt and its own agent, the same pair admission
+		// judged, so a lane is never recorded as a kind the guard did not actually allow.
+		const launches = script
+			? parseScriptChildren(script).children.map((child) => ({ prompt: child.task, agent: child.agent }))
+			: [{ prompt: task, agent }];
+		const lanes: Lane[] = [];
+		for (const launch of launches) {
+			const route = parseRouteHeader(launch.prompt);
+			if (!route) continue;
+			lanes.push({
 				key: route.key,
-				kind: laneKindFor(agent, routes.length === 1 ? task : route.reason),
+				kind: laneKindFor(launch.agent, launch.prompt),
 				model: route.model,
 				startedAt: Date.now(),
 				state: "running",
-			};
-			campaign.lanes.push(lane);
+			});
 			campaign.routes.push(route);
 		}
+		if (lanes.length === 0) return;
+		const routes = lanes;
+		campaign.lanes.push(...lanes);
 		// Dispatches run in the background unless async is explicitly false, so only a declared
 		// foreground run finishes when its tool result arrives. Background lanes are closed by
 		// the coordinator through coordinator_lane, which is what the continuation asks for. Both
 		// are tracked, because a launch that errors immediately must not leave a phantom lane.
-		laneByToolCall.set(toolCallId, { keys: routes.map((route) => route.key), foreground: input.async === false });
+		// clarify keeps a run in the foreground even when async is omitted.
+		const foreground = input.async === false || input.clarify === true;
+		laneByToolCall.set(toolCallId, { keys: routes.map((lane) => lane.key), foreground });
 		recordProgress();
 		persist();
 		updateStatusLine(ctx);
