@@ -113,6 +113,28 @@ test("CG006: a review prompt is caught even when it mentions fixing, writing, or
 	assert.equal(deny(request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-sol:high", task } })).code, "CG006");
 });
 
+test("a workflow script written as JSON is still checked", () => {
+	const script = `const spec = [{"key":"a","agent":"worker","task":"do it"}]; return runs.all(spec)`;
+	const { code } = deny(request({ input: { workflowScript: script } }));
+	assert.equal(code, "CG002");
+});
+
+test("every child of a workflow script needs its own routing header", () => {
+	const investigation = (key: string) =>
+		`ROUTE: ${key} | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory. Read-only inventory in ${WORKTREE} at HEAD ${HEAD}. Never push.`;
+	const oneHeader = `const r = await runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${investigation("a")}\`}, {key:'b', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: 'read-only inventory, never push'}]); return r`;
+	const { code, reason } = deny(request({ input: { workflowScript: oneHeader } }));
+	assert.equal(code, "CG003");
+	assert.match(reason, /2 agent/);
+});
+
+test("a workflow child's routing header is class-checked like any other", () => {
+	const bad = `ROUTE: b | class 1 | openai-codex/gpt-5.6-sol:high | read-only inventory. Read-only inventory in ${WORKTREE} at HEAD ${HEAD}. Never push.`;
+	const good = `ROUTE: a | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory. Read-only inventory in ${WORKTREE} at HEAD ${HEAD}. Never push.`;
+	const script = `const r = await runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${good}\`}, {key:'b', agent:'scout', model:'openai-codex/gpt-5.6-sol:high', task: \`${bad}\`}]); return r`;
+	assert.equal(deny(request({ input: { workflowScript: script } })).code, "CG004");
+});
+
 test("a workflow script may carry investigations, but never writers or reviewers", () => {
 	const investigation = (key: string) =>
 		`ROUTE: ${key} | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory\\nRead-only inventory in ${WORKTREE} at HEAD ${HEAD}. Never push.`;
@@ -448,6 +470,31 @@ test("CG014: spawning an agent through bash bypasses the guard and is refused", 
 	allow(request({ tool: "bash", input: { command: "npm test -- --run" } }));
 });
 
+test("CG015: a destructive git command is refused behind global options too", () => {
+	assert.equal(
+		deny(request({ tool: "bash", input: { command: `git -C ${WORKTREE} reset --hard origin/main` } })).code,
+		"CG015",
+	);
+	assert.equal(deny(request({ tool: "bash", input: { command: "git -c core.pager=cat stash" } })).code, "CG015");
+});
+
+test("readStatusBlock reads the block, not the prose around it", () => {
+	const chatty = [
+		"I checked the PR and the AGENTS file and the DIRECT dependencies.",
+		"",
+		"CAMPAIGN demo  WORKTREE /w",
+		"SLICES 1 done / 4 total",
+		"NEXT integrate lane s2",
+	].join("\n");
+	const result = readStatusBlock(chatty);
+	assert.equal(result.ok, false);
+	assert.ok(result.missing.includes("PR"), `expected PR to be missing, got ${result.missing.join(", ")}`);
+});
+
+test("a closed campaign injects no contract", () => {
+	assert.equal(contractPrompt(campaign({ status: "closed" }), false, 1_000), "");
+});
+
 test("CG015: the destructive git commands the skill forbids are refused while a campaign is active", () => {
 	assert.equal(deny(request({ tool: "bash", input: { command: "git reset --hard origin/main" } })).code, "CG015");
 	assert.equal(deny(request({ tool: "bash", input: { command: "git stash" } })).code, "CG015");
@@ -464,6 +511,32 @@ test("CG015: the destructive git commands the skill forbids are refused while a 
 
 test("a fully compliant implementation dispatch is allowed", () => {
 	allow(request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task: implementTask(GOOD_ROUTE) } }));
+});
+
+test("an implementer prompt is a writer even when its agent name is unknown", () => {
+	const task = [
+		GOOD_ROUTE,
+		"You are an implementer subagent working for a coordinator that owns the campaign.",
+		`Work only in: ${WORKTREE}`,
+		"Commit locally and never push.",
+	].join("\n");
+	// No HEAD sha, which only writers are required to carry: proves it was not read as an investigation.
+	const { code, reason } = deny(request({ input: { agent: "custom-impl", model: "openai-codex/gpt-5.6-luna:high", task } }));
+	assert.equal(code, "CG009");
+	assert.match(reason, /HEAD sha/);
+});
+
+test("a read-only investigation is not mistaken for a review", () => {
+	const route = "ROUTE: port-map | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory of the transport call sites";
+	allow(
+		request({
+			input: {
+				agent: "scout",
+				model: "openai-codex/gpt-5.6-luna:high",
+				task: `${route}\nRead-only inventory in ${WORKTREE}. Do not modify files, and never push.`,
+			},
+		}),
+	);
 });
 
 test("CG006: a review task cannot slip through by being dispatched as a worker", () => {

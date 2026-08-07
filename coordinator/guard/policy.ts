@@ -156,7 +156,13 @@ export function openReview(campaign: Campaign): { ok: true } | { ok: false; erro
 	return { ok: true };
 }
 
-export function contractPrompt(campaign: Campaign | null, armed: boolean, now: number, config: GuardConfig = DEFAULT_CONFIG): string {
+export function contractPrompt(
+	liveOrClosed: Campaign | null,
+	armed: boolean,
+	now: number,
+	config: GuardConfig = DEFAULT_CONFIG,
+): string {
+	const campaign = liveOrClosed && liveOrClosed.status !== "closed" ? liveOrClosed : null;
 	if (!campaign) {
 		if (!armed) return "";
 		return `Coordinator guard: armed, no campaign registered.
@@ -248,9 +254,16 @@ export function parseRouteHeader(text: string): RouteHeader | null {
 }
 
 export function readStatusBlock(text: string): { ok: boolean; missing: string[] } {
-	// Fields share lines in the block's real layout (CAMPAIGN sits beside WORKTREE), so this
-	// looks for each label rather than for a line that starts with it.
-	const missing = STATUS_FIELDS.filter((field) => !new RegExp(`\\b${field}\\b`, "i").test(text));
+	// Validate the block itself, not the prose around it: a message that happens to mention a
+	// PR elsewhere must not make an incomplete block look fresh. Fields share lines in the real
+	// layout (CAMPAIGN sits beside WORKTREE), so labels are matched within the block region.
+	const lines = text.split("\n");
+	const start = lines.findIndex((line) => /^[ \t>*-]*CAMPAIGN\b/i.test(line));
+	if (start === -1) return { ok: false, missing: [...STATUS_FIELDS] };
+	let end = lines.findIndex((line, index) => index >= start && /^[ \t>*-]*NEXT\b/i.test(line));
+	if (end === -1) end = Math.min(lines.length - 1, start + STATUS_FIELDS.length + 4);
+	const block = lines.slice(start, end + 1).join("\n");
+	const missing = STATUS_FIELDS.filter((field) => !new RegExp(`\\b${field}\\b`, "i").test(block));
 	return { ok: missing.length === 0, missing };
 }
 
@@ -264,16 +277,20 @@ export function laneKindFor(agent: string | undefined, task: string): LaneKind {
 	const route = parseRouteHeader(task);
 	const reviewKey = route ? /\b(review|accept|audit)/i.test(route.key) : false;
 	const reviewPhrase =
-		/\b(read-only review|independent review|acceptance review|whole-branch review|review of|re-?review|return every finding|do not modify files)\b/i.test(
+		/(read-only review|independent review|acceptance review|whole-branch review|review of the|review the (change|diff|branch|commit)|re-?review|return every finding)/i.test(
 			task,
 		);
 	if (reviewKey || reviewPhrase) return "review";
 
 	if (known) return known;
-	const assignment = firstInstruction(task);
-	return /\b(implement|fix|repair|add|write|refactor|migrate|port|extract|build|compose|commit)\b/i.test(assignment)
-		? "implement"
-		: "investigate";
+
+	// Unknown agent names are transport, so the assignment decides. Read-only work has to say
+	// so; anything else is treated as a writer, because a writer mistaken for an investigation
+	// escapes the lane cap, the HEAD check, and the class-3 justification.
+	const readOnly = /(read-only|reconnaissance|inventory of|do not modify|make no changes)/i.test(task);
+	const writes = /(implementer subagent|\b(implement|fix|repair|refactor|migrate|extract|compose)\b)/i.test(task);
+	if (readOnly && !writes) return "investigate";
+	return "implement";
 }
 
 function text(value: unknown): string {
@@ -289,7 +306,7 @@ function firstInstruction(task: string): string {
 	return "";
 }
 
-function isManagementAction(input: Record<string, unknown>): boolean {
+export function isManagementAction(input: Record<string, unknown>): boolean {
 	const action = text(input.action);
 	if (!action) return false;
 	// A scheduling action creates executions, so it is a launch however it is named.
@@ -318,13 +335,16 @@ function checkBash(command: string): GuardDecision {
 			"Spawning an agent through bash bypasses every dispatch rule. Use the subagent tool so the routing table, model pin, and lane accounting apply. If this genuinely is not a dispatch, rename the command.",
 		);
 	}
+	// Global options sit between git and its subcommand, so `git -C <path> reset --hard` is the
+	// same command as `git reset --hard` and has to be matched the same way.
+	const git = String.raw`git(?:\s+(?:-[cC]\s+\S+|--\S+|-[^-\s]\S*))*\s+`;
 	const destructive: Array<[RegExp, string]> = [
-		[/git\s+reset\s+--hard/i, "git reset --hard"],
-		[/git\s+stash(\s|$)/i, "git stash"],
-		[/git\s+restore(\s|$)/i, "git restore"],
-		[/git\s+checkout\s+--\s/i, "git checkout -- <path>"],
-		[/git\s+push\s+(.*\s)?(--force(-with-lease)?(=\S*)?|-f)(\s|$)/i, "a force push"],
-		[/git\s+worktree\s+remove\s+.*--force/i, "git worktree remove --force"],
+		[new RegExp(`${git}reset\\s+--hard`, "i"), "git reset --hard"],
+		[new RegExp(`${git}stash(\\s|$)`, "i"), "git stash"],
+		[new RegExp(`${git}restore(\\s|$)`, "i"), "git restore"],
+		[new RegExp(`${git}checkout\\s+--\\s`, "i"), "git checkout -- <path>"],
+		[new RegExp(`${git}push\\s+(.*\\s)?(--force(-with-lease)?(=\\S*)?|-f)(\\s|$)`, "i"), "a force push"],
+		[new RegExp(`${git}worktree\\s+remove\\s+.*--force`, "i"), "git worktree remove --force"],
 	];
 	for (const [pattern, label] of destructive) {
 		if (pattern.test(command)) {
@@ -337,22 +357,62 @@ function checkBash(command: string): GuardDecision {
 	return { allow: true };
 }
 
+// Property keys appear bare or quoted depending on how the script was written, and a script
+// built with JSON.stringify quotes every one of them.
+const AGENT_KEY = /(?:\b|["'])agent["']?\s*:/g;
+const MODEL_VALUE = /(?:\b|["'])model["']?\s*:\s*['"`]([^'"`]+)['"`]/g;
+
 function collectScriptModels(script: string): { agents: number; models: string[] } {
-	const agents = script.match(/\bagent\s*:/g)?.length ?? 0;
-	const models = [...script.matchAll(/\bmodel\s*:\s*['"`]([^'"`]+)['"`]/g)].map((match) => match[1]);
+	const agents = script.match(AGENT_KEY)?.length ?? 0;
+	const models = [...script.matchAll(MODEL_VALUE)].map((match) => match[1]);
 	return { agents, models };
+}
+
+/** Every routing header in a script, in order, one per child. */
+function scriptRoutes(script: string): RouteHeader[] {
+	return script
+		.split(/(?=ROUTE:)/i)
+		.filter((chunk) => /^ROUTE:/i.test(chunk))
+		.map((chunk) => parseRouteHeader(chunk))
+		.filter((route): route is RouteHeader => route !== null);
 }
 
 /** One kind per child, read from the agent names and from each child's own routing header. */
 function scriptChildKinds(script: string): LaneKind[] {
 	const kinds: LaneKind[] = [];
-	for (const match of script.matchAll(/\bagent\s*:\s*['"`]([^'"`]+)['"`]/g)) {
+	for (const match of script.matchAll(/(?:\b|["'])agent["']?\s*:\s*['"`]([^'"`]+)['"`]/g)) {
 		const known = KIND_BY_AGENT[match[1].toLowerCase()];
 		if (known) kinds.push(known);
 	}
 	const chunks = script.split(/(?=ROUTE:)/i).filter((chunk) => /^ROUTE:/i.test(chunk));
 	for (const chunk of chunks) kinds.push(laneKindFor(undefined, chunk));
 	return kinds;
+}
+
+/** Model pin and declared class, checked the same way for a lone dispatch and for a child. */
+function checkRoute(route: RouteHeader, config: GuardConfig, kind: LaneKind): GuardDecision {
+	const pin = parseModelPin(route.model);
+	if (!pin) return deny("CG004", `The routing header model ${route.model} is not pinned as provider/model:effort.`);
+	const actualClass = modelClass(pin.id, pin.effort);
+	if (actualClass === null) {
+		return deny(
+			"CG004",
+			`${pin.id} is not in the tier table, so its class cannot be checked. Add it to the table or route to a listed model.`,
+		);
+	}
+	if (actualClass !== route.cls) {
+		return deny(
+			"CG004",
+			`Route ${route.key} declares class ${route.cls} but ${pin.id} at ${pin.effort} is class ${actualClass} in the tier table. Fix whichever is wrong: choosing a class is choosing a model, not a label.`,
+		);
+	}
+	if (kind === "implement" && route.cls === 3 && route.reason.length < config.class3ReasonMinChars) {
+		return deny(
+			"CG012",
+			`Class 3 implementation needs a written justification of at least ${config.class3ReasonMinChars} characters saying what makes the slice cross-layer or long-horizon; "${route.reason}" is a label. Escalate exactly one class only when the task is complex or the lower class cannot make progress.`,
+		);
+	}
+	return { allow: true };
 }
 
 function checkBudgets(input: Record<string, unknown>, script: string): GuardDecision {
@@ -425,6 +485,17 @@ export function evaluate(request: GuardRequest): GuardDecision {
 				`Every agent in a workflow script needs its own model pinned as provider/model:effort. Found ${agents} agent entries and ${models.length} model values${unpinned.length > 0 ? `, and these carry no valid effort suffix: ${unpinned.join(", ")}` : ""}. An unpinned entry inherits the session model and effort silently.`,
 			);
 		}
+		const routes = scriptRoutes(script);
+		if (routes.length < agents) {
+			return deny(
+				"CG003",
+				`Every child of a workflow script carries its own routing header. Found ${agents} agent entries and ${routes.length} valid ROUTE headers. A child with no row is an undecided dispatch hidden inside a script.`,
+			);
+		}
+		for (const route of routes) {
+			const verdict = checkRoute(route, config, laneKindFor(undefined, route.reason));
+			if (!verdict.allow) return verdict;
+		}
 		const children = scriptChildKinds(script);
 		if (children.includes("implement")) {
 			return deny(
@@ -450,7 +521,7 @@ export function evaluate(request: GuardRequest): GuardDecision {
 		);
 	}
 	const gitWrite = /\b(commit|commits|committing|stage|staged|staging|rebase|cherry-pick|push)\b/i;
-	const realWork = /\b(implement|implementation|fix|repair|add|write|refactor|migrate|port|extract|design|review|audit|investigate|inventory|analy[sz]e|research|reconnaissance|compose)\b/i;
+	const realWork = /\b(implement\w*|fix|repair|add|write|refactor|migrate|port|extract|design|review|audit|investigate|inventory|analy[sz]e|research|reconnaissance|compose)\b/i;
 	if (gitWrite.test(task) && !realWork.test(task)) {
 		return deny(
 			"CG007",
@@ -497,32 +568,9 @@ export function evaluate(request: GuardRequest): GuardDecision {
 		);
 	}
 
-	const pin = parseModelPin(route.model);
-	if (!pin) {
-		return deny("CG004", `The routing header model ${route.model} is not pinned as provider/model:effort.`);
-	}
-	const actualClass = modelClass(pin.id, pin.effort);
-	if (actualClass === null) {
-		return deny(
-			"CG004",
-			`${pin.id} is not in the tier table, so its class cannot be checked. Add it to the table or route to a listed model.`,
-		);
-	}
-	if (actualClass !== route.cls) {
-		return deny(
-			"CG004",
-			`The header declares class ${route.cls} but ${pin.id} is class ${actualClass} in the tier table. Fix whichever is wrong: choosing a class is choosing a model, not a label.`,
-		);
-	}
-
 	const kind = laneKindFor(agent, task);
-
-	if (kind === "implement" && route.cls === 3 && route.reason.length < config.class3ReasonMinChars) {
-		return deny(
-			"CG012",
-			`Class 3 implementation needs a written justification of at least ${config.class3ReasonMinChars} characters saying what makes the slice cross-layer or long-horizon; "${route.reason}" is a label. Escalate exactly one class only when the task is complex or the lower class cannot make progress.`,
-		);
-	}
+	const routeVerdict = checkRoute(route, config, kind);
+	if (!routeVerdict.allow) return routeVerdict;
 
 	if (kind === "review") {
 		if (campaign.status !== "review") {
