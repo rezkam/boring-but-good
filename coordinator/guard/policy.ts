@@ -101,6 +101,8 @@ const MANAGEMENT_ACTIONS = new Set([
 	"view",
 	"fleet",
 	"cancel",
+	"watchdog.recommend-model",
+	"watchdog.status",
 ]);
 
 /** Actions that hand a run another instruction, and so count as corrections of it. */
@@ -297,7 +299,14 @@ export function isManagementAction(input: Record<string, unknown>): boolean {
 
 function isLaunch(input: Record<string, unknown>): boolean {
 	if (isManagementAction(input)) return false;
-	return typeof input.agent === "string" || text(input.workflowScript).length > 0;
+	// tasks and chain are the removed batch forms. The installed subagent rejects them itself,
+	// but a guard that depends on another package's version check is not a guard.
+	return (
+		typeof input.agent === "string" ||
+		text(input.workflowScript).length > 0 ||
+		input.tasks !== undefined ||
+		input.chain !== undefined
+	);
 }
 
 function runIdOf(input: Record<string, unknown>): string {
@@ -360,7 +369,7 @@ export interface ScriptChild {
  * own object is read: its agent, its model, and its task with its routing header.
  */
 export function parseScriptChildren(script: string): { children: ScriptChild[]; agentKeys: number } {
-	const agentKeys = script.match(AGENT_KEY)?.length ?? 0;
+	const agentKeys = countAgentKeys(script);
 	const children: ScriptChild[] = [];
 	for (let index = 0; index < script.length; index++) {
 		if (script[index] !== "{") continue;
@@ -372,6 +381,43 @@ export function parseScriptChildren(script: string): { children: ScriptChild[]; 
 		index += body.length;
 	}
 	return { children, agentKeys };
+}
+
+/**
+ * Agent keys that are actually properties, bare or quoted. A prompt is free to contain the
+ * words "assigned agent: scout", and counting those would refuse a valid script.
+ */
+function countAgentKeys(script: string): number {
+	let count = 0;
+	for (let index = 0; index < script.length; index++) {
+		const char = script[index];
+		if (char === "'" || char === '"' || char === "`") {
+			// A quoted token is a key only when a colon follows its closing quote.
+			let content = "";
+			let cursor = index + 1;
+			for (; cursor < script.length; cursor++) {
+				if (script[cursor] === "\\") {
+					cursor++;
+					continue;
+				}
+				if (script[cursor] === char) break;
+				content += script[cursor];
+			}
+			let after = cursor + 1;
+			while (after < script.length && /\s/.test(script[after])) after++;
+			if (script[after] === ":" && content.trim().toLowerCase() === "agent") count++;
+			index = cursor;
+			continue;
+		}
+		if (/[A-Za-z_$]/.test(char)) {
+			const word = /^[A-Za-z_$][\w$]*/.exec(script.slice(index))?.[0] ?? "";
+			let after = index + word.length;
+			while (after < script.length && /\s/.test(script[after])) after++;
+			if (word.toLowerCase() === "agent" && script[after] === ":") count++;
+			index += word.length - 1;
+		}
+	}
+	return count;
 }
 
 /** The text of the object literal starting at `start`, quote and nesting aware. */
