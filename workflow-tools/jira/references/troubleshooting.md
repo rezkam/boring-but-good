@@ -2,6 +2,7 @@
 
 ## Table of Contents
 - Authentication errors (401/403)
+- macOS SSH / `ERROR EOF`
 - Rate limiting (429)
 - Description format (ADF vs plain text)
 - Transition not found
@@ -13,6 +14,24 @@
 - **Server/DC**: Use Basic auth with `username:password` or Bearer (PAT).
 - Verify token hasn't expired.
 - Check project-level permissions.
+
+## macOS SSH / `ERROR EOF`
+
+Older go-jira releases invoke `security find-generic-password` without naming a keychain. In SSH or other non-GUI sessions, macOS may search only `System.keychain` even though the token is present in `~/Library/Keychains/login.keychain-db`. The Jira skill scripts detect this and query the login keychain explicitly.
+
+If the item exists but cannot be read, unlock the keychain interactively and retry the same skill command:
+
+```bash
+security unlock-keychain "$HOME/Library/Keychains/login.keychain-db"
+```
+
+To use another keychain:
+
+```bash
+export JIRA_KEYCHAIN_PATH=/path/to/custom.keychain-db
+```
+
+The scripts recognize the canonical go-jira item (`service=go-jira`, `account=api-token:<email>`) and the common endpoint-style item (`service=<Jira URL>`, `account=<email>`). They do not scan arbitrary files or print token values.
 
 ## Rate Limiting (429)
 

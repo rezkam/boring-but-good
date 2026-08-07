@@ -840,17 +840,35 @@ configure_jira() {
     fi
 
     # Store token in keychain/keyring (go-jira expects this)
-    if has_cmd security; then
-        # macOS Keychain
-        security add-generic-password \
+    if [ "$(uname -s)" = "Darwin" ] && has_cmd security; then
+        # Name the login keychain explicitly. go-jira's legacy keyring lookup
+        # can otherwise target only System.keychain in SSH/non-GUI sessions.
+        local login_keychain
+        login_keychain="$(security login-keychain -d user 2>/dev/null | \
+            sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//' | head -1)"
+        [ -n "$login_keychain" ] || login_keychain="$HOME/Library/Keychains/login.keychain-db"
+
+        if security add-generic-password \
             -a "api-token:${identity}" -s "go-jira" \
-            -w "$token" -U 2>/dev/null || true
-        success "Token stored in macOS Keychain (service: go-jira)"
+            -w "$token" -U "$login_keychain" 2>/dev/null; then
+            success "Token stored in macOS login Keychain (service: go-jira)"
+        else
+            err "Could not store the Jira token in ${login_keychain}."
+            info "Unlock it with: security unlock-keychain \"${login_keychain}\""
+            warn "Token not stored. Unlock the keychain and re-run setup."
+            install_skill "jira"
+            return
+        fi
     elif has_cmd secret-tool; then
         # Linux Secret Service (GNOME Keyring, KWallet, etc.)
-        echo -n "$token" | secret-tool store --label="go-jira token" \
-            service go-jira account "api-token:${identity}" 2>/dev/null || true
-        success "Token stored in system keyring (service: go-jira)"
+        if echo -n "$token" | secret-tool store --label="go-jira token" \
+            service go-jira account "api-token:${identity}" 2>/dev/null; then
+            success "Token stored in system keyring (service: go-jira)"
+        else
+            warn "Token could not be stored in the system keyring."
+            install_skill "jira"
+            return
+        fi
     else
         cat >&2 << 'EOF'
 WARNING: No keyring tool found (security or secret-tool).
@@ -1131,10 +1149,12 @@ test_connectivity() {
 
     if [ "$INSTALL_JIRA" = "true" ]; then
         printf "  jira ................ "
-        if has_cmd jira && jira session >/dev/null 2>&1; then
+        local s="${INSTALL_DIR}/jira/scripts"
+        if [ -x "${s}/jira-api.sh" ] && \
+            "${s}/jira-api.sh" GET "/rest/api/3/myself" >/dev/null 2>&1; then
             printf "%b\n" "${GREEN}✓ connected${RESET}"
         else
-            printf "%b %b\n" "${RED}✗ failed${RESET}" "${DIM}(check URL, credentials, go-jira config)${RESET}"
+            printf "%b %b\n" "${RED}✗ failed${RESET}" "${DIM}(check URL, credentials, go-jira config, and login-keychain state)${RESET}"
         fi
     fi
 

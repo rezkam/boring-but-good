@@ -43,4 +43,4 @@ Or install manually, run `./setup.sh` from the repo root or see [SKILL.md](SKILL
 
 ## Setup
 
-Uses [go-jira](https://github.com/go-jira/jira) CLI with OS keychain for credentials.
+Uses [go-jira](https://github.com/go-jira/jira) CLI with OS keychain credentials. The wrapper scripts also support macOS SSH/non-GUI sessions by resolving the user login keychain explicitly; a locked keychain produces an actionable unlock command instead of an interactive `ERROR EOF`.

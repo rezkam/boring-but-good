@@ -6,7 +6,7 @@ description: Manage Jira issues — create, view, update, transition, comment, l
 # Jira
 
 Manage Jira issues using wrapper scripts around the `go-jira` CLI.
-Credentials are handled by go-jira (`~/.jira.d/config.yml` + OS keychain). Scripts never touch secrets directly.
+Credentials come from `JIRA_API_TOKEN` or go-jira (`~/.jira.d/config.yml` + OS keychain). On macOS SSH/non-GUI sessions, the wrappers explicitly resolve known Jira entries from the user login keychain because go-jira's legacy keyring lookup may search only `System.keychain`. Tokens are passed only to the Jira child process and are never printed.
 The ADF conversion helpers use the dependencies declared in `scripts/package.json`. Run `npm ci --prefix scripts` after a manual install. `node_modules/` is local-only and is never committed.
 
 ## Configuration
@@ -26,8 +26,9 @@ password-source: keyring
 EOF
 chmod 600 ~/.jira.d/config.yml
 
-# 3. Store token in keychain
-security add-generic-password -a "api-token:you@example.com" -s "go-jira" -w "YOUR_TOKEN"
+# 3. Store token in the login keychain (prompts without echoing the token)
+security add-generic-password -a "api-token:you@example.com" -s "go-jira" -U \
+  "$HOME/Library/Keychains/login.keychain-db" -w
 
 # 4. Optional: set defaults
 cat > ~/.boring/jira/defaults << 'EOF'
@@ -41,6 +42,16 @@ echo "label1 label2 label3" > ~/.boring/jira/default-labels
 
 **Cloud tokens:** https://id.atlassian.com/manage-profile/security/api-tokens
 **Server/DC PAT:** Profile → Personal Access Tokens
+
+### macOS SSH/non-GUI sessions
+
+Always use the skill scripts rather than invoking `jira` directly. They compensate for go-jira's implicit Keychain lookup by querying the configured login keychain explicitly. If that keychain is locked, the command stops with an actionable error instead of falling through to an interactive token prompt and `ERROR EOF`:
+
+```bash
+security unlock-keychain "$HOME/Library/Keychains/login.keychain-db"
+```
+
+Then rerun the same skill command. `JIRA_KEYCHAIN_PATH` can override the keychain path when a non-default keychain is used.
 
 ## Scripts
 
