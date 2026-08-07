@@ -526,6 +526,73 @@ test("an implementer prompt is a writer even when its agent name is unknown", ()
 	assert.match(reason, /HEAD sha/);
 });
 
+test("an implementation prompt is a writer even when carried by a read-only agent name", () => {
+	const route = "ROUTE: s1 | class 1 | openai-codex/gpt-5.6-luna:high | mechanical one-file change";
+	const { code, reason } = deny(
+		request({
+			input: {
+				agent: "scout",
+				model: "openai-codex/gpt-5.6-luna:high",
+				task: `${route}\nImplement the parser change in ${WORKTREE}. Never push.`,
+			},
+		}),
+	);
+	assert.equal(code, "CG009");
+	assert.match(reason, /HEAD sha/);
+});
+
+test("CG007: a never-push promise does not license gh pr commands", () => {
+	const task = [
+		GOOD_ROUTE,
+		`Implement slice S1 in ${WORKTREE} at exact HEAD ${HEAD}.`,
+		"Commit locally and never push. Then run gh pr create to open the PR.",
+	].join("\n");
+	assert.equal(deny(request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task } })).code, "CG007");
+});
+
+test("CG009: prose about null or undefined values is not a placeholder", () => {
+	const task = [
+		GOOD_ROUTE,
+		`Implement slice S1 in ${WORKTREE} at exact HEAD ${HEAD}: fix null handling so an undefined id is rejected.`,
+		"Never push.",
+	].join("\n");
+	allow(request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task } }));
+
+	const unrendered = [
+		GOOD_ROUTE,
+		`Implement slice S1 in undefined/packages/app at exact HEAD ${HEAD}.`,
+		"Never push.",
+	].join("\n");
+	assert.equal(
+		deny(request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task: unrendered } })).code,
+		"CG009",
+	);
+
+	const emptyValue = [GOOD_ROUTE, `Implement slice S1 in ${WORKTREE} at exact HEAD: undefined.`, "Never push."].join("\n");
+	assert.equal(
+		deny(request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task: emptyValue } })).code,
+		"CG009",
+	);
+});
+
+test("CG004: the tier table's listed effort is enforced for writers", () => {
+	const lazy = "ROUTE: s1 | class 1 | openai-codex/gpt-5.6-luna:off | mechanical one-file change";
+	const { code, reason } = deny(
+		request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:off", task: implementTask(lazy) } }),
+	);
+	assert.equal(code, "CG004");
+	assert.match(reason, /high/);
+});
+
+test("a workflow child's declared model must be the model it launches with", () => {
+	const header = (key: string, model: string) =>
+		`ROUTE: ${key} | class 1 | ${model} | read-only inventory. Read-only inventory in ${WORKTREE}. Never push.`;
+	const script = `const r = await runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("a", "openai-codex/gpt-5.6-luna:high")}\`}, {key:'b', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("b", "claude-bridge/claude-sonnet-5:medium")}\`}]); return r`;
+	const { code, reason } = deny(request({ input: { workflowScript: script } }));
+	assert.equal(code, "CG004");
+	assert.match(reason, /declared/i);
+});
+
 test("a read-only investigation is not mistaken for a review", () => {
 	const route = "ROUTE: port-map | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory of the transport call sites";
 	allow(

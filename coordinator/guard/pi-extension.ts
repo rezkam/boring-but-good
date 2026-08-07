@@ -20,7 +20,7 @@ import {
 	laneSummary,
 	newCampaign,
 	openReview,
-	parseRouteHeader,
+	parseRouteHeaders,
 	readStatusBlock,
 	type Campaign,
 	type Lane,
@@ -70,10 +70,28 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 	let lastContinuationAt = 0;
 	let continuationQueued = false;
 	let continuationTimer: ReturnType<typeof setTimeout> | null = null;
-	const laneByToolCall = new Map<string, { key: string; foreground: boolean }>();
+	const laneByToolCall = new Map<string, { keys: string[]; foreground: boolean }>();
 
 	function recordProgress(): void {
 		noProgressContinuations = 0;
+	}
+
+	/** A background launch answers with its run id; keeping it makes status and stop unambiguous. */
+	function backgroundRunId(details: unknown): string | undefined {
+		if (!details || typeof details !== "object") return undefined;
+		const record = details as Record<string, unknown>;
+		for (const key of ["runId", "id"]) {
+			const value = record[key];
+			if (typeof value === "string" && value) return value;
+		}
+		const results = record.results;
+		if (Array.isArray(results)) {
+			for (const entry of results) {
+				const found = backgroundRunId(entry);
+				if (found) return found;
+			}
+		}
+		return undefined;
 	}
 
 	function persist(): void {
@@ -175,23 +193,27 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			return;
 		}
 		const task = typeof input.task === "string" ? input.task : typeof input.workflowScript === "string" ? input.workflowScript : "";
-		const route = parseRouteHeader(task);
-		if (!route) return;
-		const lane: Lane = {
-			key: route.key,
-			kind: laneKindFor(typeof input.agent === "string" ? input.agent : undefined, task),
-			model: route.model,
-			startedAt: Date.now(),
-			state: "running",
-		};
-		campaign.lanes = campaign.lanes.filter((existing) => existing.key !== route.key || existing.state === "integrated");
-		campaign.lanes.push(lane);
-		campaign.routes.push(route);
+		// A script launches one child per routing header, and every one of them is a lane.
+		const routes = parseRouteHeaders(task);
+		if (routes.length === 0) return;
+		const agent = typeof input.agent === "string" ? input.agent : undefined;
+		for (const route of routes) {
+			const lane: Lane = {
+				key: route.key,
+				kind: laneKindFor(agent, routes.length === 1 ? task : route.reason),
+				model: route.model,
+				startedAt: Date.now(),
+				state: "running",
+			};
+			campaign.lanes = campaign.lanes.filter((existing) => existing.key !== route.key || existing.state === "integrated");
+			campaign.lanes.push(lane);
+			campaign.routes.push(route);
+		}
 		// Dispatches run in the background unless async is explicitly false, so only a declared
 		// foreground run finishes when its tool result arrives. Background lanes are closed by
 		// the coordinator through coordinator_lane, which is what the continuation asks for. Both
 		// are tracked, because a launch that errors immediately must not leave a phantom lane.
-		laneByToolCall.set(toolCallId, { key: route.key, foreground: input.async === false });
+		laneByToolCall.set(toolCallId, { keys: routes.map((route) => route.key), foreground: input.async === false });
 		recordProgress();
 		persist();
 		updateStatusLine(ctx);
@@ -201,18 +223,29 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		const tracked = laneByToolCall.get(event.toolCallId);
 		if (!tracked || !campaign) return;
 		laneByToolCall.delete(event.toolCallId);
-		const lane = campaign.lanes.find((candidate) => candidate.key === tracked.key && candidate.state === "running");
-		if (!lane) return;
-		if (event.isError) {
-			// The run never started, so the lane must not hold capacity or drive continuations.
-			campaign.lanes = campaign.lanes.filter((candidate) => candidate !== lane);
-			notify(ctx, `coordinator-guard: lane ${tracked.key} failed to launch and was removed`, "warning");
-		} else if (tracked.foreground) {
-			// Only a writer lane has anything to integrate; a read-only lane is finished when it reports.
-			lane.state = lane.kind === "implement" ? "returned" : "integrated";
-		} else {
-			return;
+		const runId = backgroundRunId(event.details);
+		let changed = false;
+		for (const key of tracked.keys) {
+			const lane = campaign.lanes.find((candidate) => candidate.key === key && candidate.state === "running");
+			if (!lane) continue;
+			if (event.isError && !tracked.foreground) {
+				// A background launch reports before the child runs, so an error here means it never
+				// started: the lane must not hold capacity or drive continuations.
+				campaign.lanes = campaign.lanes.filter((candidate) => candidate !== lane);
+				notify(ctx, `coordinator-guard: lane ${key} failed to launch and was removed`, "warning");
+				changed = true;
+			} else if (tracked.foreground) {
+				// A foreground failure may still have written to the tree, so a writer lane stays
+				// open for adjudication instead of vanishing. Read-only lanes are done when they report.
+				lane.state = lane.kind === "implement" ? "returned" : "integrated";
+				if (event.isError) notify(ctx, `coordinator-guard: lane ${key} failed; its tree still needs adjudication`, "warning");
+				changed = true;
+			} else if (runId && !lane.runId) {
+				lane.runId = runId;
+				changed = true;
+			}
 		}
+		if (!changed) return;
 		recordProgress();
 		persist();
 		updateStatusLine(ctx);
@@ -317,6 +350,8 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 					if (done > total) throw new Error(`slices_done ${done} cannot exceed slices_total ${total}`);
 					campaign.slicesTotal = total;
 					campaign.slicesDone = done;
+					// Slices reopening means the review phase was opened too early; reviewers wait again.
+					if (campaign.status === "review" && done < total) campaign.status = "active";
 					break;
 				}
 				case "open-review": {
@@ -385,6 +420,10 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 					break;
 				case "arm":
 				case "disarm":
+					if (command === "disarm" && campaign && campaign.status !== "closed") {
+						show(`Campaign ${campaign.slug} is still ${campaign.status}, so disarming would not turn enforcement off. Use /campaign close to end it.`);
+						break;
+					}
 					armed = command === "arm";
 					persist();
 					show(`Coordinator guard ${armed ? "armed" : "disarmed"}.`);
