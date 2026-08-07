@@ -75,7 +75,7 @@ Once the task is clear:
 3. Run focused tests while iterating and the assigned slice gates before committing. The coordinator owns the full suite unless this dispatch explicitly assigns it.
 4. Keep the diff limited to this task and free of machine-specific data.
 5. Self-review the work against the brief and acceptance criteria.
-6. Commit locally with a conventional commit message. Do not push.
+6. Commit locally with a conventional commit message. Do not push, do not run `gh`, and do not open or modify a pull request.
 7. Write the durable report and return the concise completion status.
 
 If an unexpected edge case requires a conservative deviation that remains within the approved behavior, record it and continue. If it changes architecture, scope, or user-visible behavior, stop and escalate.

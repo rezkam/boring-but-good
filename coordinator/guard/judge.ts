@@ -68,7 +68,7 @@ Field meanings:
 - worktree: the absolute filesystem path the agent is told to do its work in, exactly as written, or null when the prompt names none. Ignore paths mentioned for other reasons, such as an interpreter or a file to read.
 - expectedHead: the commit sha the prompt says the repository should currently be at, or null. A sha mentioned for another purpose, such as a dependency digest or an example, is not an expected HEAD.
 - stopsOnHeadMismatch: true only when the prompt tells the agent to stop, halt, abort, or report back rather than continue when the repository is not at that commit.
-- forbidsPush: true only when the prompt tells the agent not to push, not to open or change a pull request, and not to run gh.
+- forbidsPush: true when the prompt tells the agent not to push and not to open or change a pull request. Wording such as "do not push, do not run gh, and do not open a pull request" satisfies it; a prompt that only says the coordinator owns pushing, without telling this agent not to, does not.
 - coordinatorGitWork: branch-moving git work the prompt asks this subagent to perform. Committing locally is the agent's own job and is "none". Report "rebase", "cherry-pick", "push", or "pr" when the prompt asks for it, even alongside genuine implementation work. A prohibition is not a request: "never push" is "none".
 - unrenderedPlaceholders: template placeholders that were never filled in, such as "\${slice}", "{{path}}", "[SLICE NAME]", or a path with a segment left as the literal word undefined or null. Ordinary prose about null or undefined values in code is not a placeholder. Return [] when there are none.
 - classJustification: how well the routing header's reason justifies the class it declared. "substantive" when it names something concrete about the work, such as the layers, packages, contracts, or files involved. "label" when it only asserts difficulty, such as "hard" or "complex". "absent" when there is no reason.
@@ -134,6 +134,9 @@ export function parseVerdict(raw: string): { ok: true; verdict: PromptVerdict } 
 		return { ok: false, error: "stopsOnHeadMismatch and forbidsPush must be booleans" };
 	}
 	if (!Array.isArray(value.unrenderedPlaceholders)) return { ok: false, error: "unrenderedPlaceholders must be an array" };
+	if (value.unrenderedPlaceholders.some((entry) => typeof entry !== "string" || entry.trim() === "")) {
+		return { ok: false, error: "every unrenderedPlaceholders entry must be a non-empty string" };
+	}
 	if (value.worktree !== null && typeof value.worktree !== "string") return { ok: false, error: "worktree must be a string or null" };
 	if (value.expectedHead !== null && typeof value.expectedHead !== "string") {
 		return { ok: false, error: "expectedHead must be a string or null" };
@@ -149,9 +152,7 @@ export function parseVerdict(raw: string): { ok: true; verdict: PromptVerdict } 
 			stopsOnHeadMismatch: value.stopsOnHeadMismatch,
 			forbidsPush: value.forbidsPush,
 			coordinatorGitWork: value.coordinatorGitWork as CoordinatorGitWork,
-			unrenderedPlaceholders: value.unrenderedPlaceholders.filter(
-				(entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
-			),
+			unrenderedPlaceholders: value.unrenderedPlaceholders as string[],
 			classJustification: value.classJustification as JustificationQuality,
 		},
 	};

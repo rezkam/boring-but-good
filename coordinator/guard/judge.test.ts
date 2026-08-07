@@ -109,3 +109,10 @@ test("judgeDispatch refuses when the model errors or is cut off", async () => {
 	if (truncated.ok) throw new Error("unreachable");
 	assert.match(truncated.error, /stopped with "length"/);
 });
+
+test("parseVerdict refuses a placeholder array with non-string entries", () => {
+	const parsed = parseVerdict(answer({ unrenderedPlaceholders: [1, "x"] }));
+	assert.equal(parsed.ok, false);
+	if (parsed.ok) throw new Error("unreachable");
+	assert.match(parsed.error, /non-empty string/);
+});

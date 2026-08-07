@@ -508,3 +508,16 @@ test("the automatic continuation names the lanes and orders liveness before new 
 	assert.match(text, /Returned, not yet integrated: s2/);
 	assert.match(text, /If you are waiting, you are wrong/);
 });
+
+test("agent keys inside prompt text are not counted as children", () => {
+	const task = "ROUTE: a | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory. The assigned agent: scout should read only. Never push.";
+	const script = `runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${task}\`}])`;
+	const { children, agentKeys } = parseScriptChildren(script);
+	assert.equal(agentKeys, 1);
+	assert.equal(children.length, 1);
+});
+
+test("batch and chain inputs are treated as launches rather than slipping past", () => {
+	assert.equal(structure(request({ input: { tasks: [{ agent: "worker", task: "x" }] } })).code, "CG017");
+	assert.equal(structure(request({ input: { chain: "legacy", async: true } })).code, "CG002");
+});

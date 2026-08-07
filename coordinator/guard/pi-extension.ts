@@ -8,8 +8,9 @@
  * while agents are in flight.
  */
 
-import { complete } from "@earendil-works/pi-ai/compat";
-import type { Model, UserMessage } from "@earendil-works/pi-ai";
+import { clampThinkingLevel } from "@earendil-works/pi-ai";
+import { complete, completeSimple } from "@earendil-works/pi-ai/compat";
+import type { Model, ThinkingLevel, UserMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -125,22 +126,6 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		ctx: ExtensionContext,
 		target: { prompt: string; agent?: string; declaredClass: 1 | 2 | 3 },
 	): Promise<{ ok: true; verdict: PromptVerdict } | { ok: false; error: string }> {
-		if (!judgeEnabled) {
-			return {
-				ok: true,
-				verdict: {
-					kind: "implement",
-					worktree: null,
-					expectedHead: null,
-					stopsOnHeadMismatch: true,
-					forbidsPush: true,
-					coordinatorGitWork: "none",
-					unrenderedPlaceholders: [],
-					classJustification: "substantive",
-				},
-			};
-		}
-
 		const request = { prompt: target.prompt, agent: target.agent, declaredClass: target.declaredClass };
 		const key = judgeCacheKey(request);
 		const cached = verdictCache.get(key);
@@ -155,17 +140,17 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 
 		const call: JudgeCall = async (systemPrompt, message) => {
 			const userMessage: UserMessage = { role: "user", content: [{ type: "text", text: message }], timestamp: Date.now() };
-			const response = await complete(
-				resolved.model,
-				{ systemPrompt, messages: [userMessage] },
-				{
-					apiKey: auth.apiKey,
-					headers: auth.headers,
-					signal: ctx.signal,
-					maxTokens: JUDGE_MAX_TOKENS,
-					...(resolved.effort ? { reasoning: resolved.effort } : {}),
-				} as Parameters<typeof complete>[2],
-			);
+			// Only the simple API maps a generic reasoning level; the raw one takes
+			// provider-specific fields, so a level passed there is silently dropped.
+			const options = {
+				apiKey: auth.apiKey,
+				headers: auth.headers,
+				signal: ctx.signal,
+				maxTokens: JUDGE_MAX_TOKENS,
+			};
+			const response = resolved.effort
+				? await completeSimple(resolved.model, { systemPrompt, messages: [userMessage] }, { ...options, reasoning: resolved.effort })
+				: await complete(resolved.model, { systemPrompt, messages: [userMessage] }, options);
 			const text = response.content
 				.filter((block): block is { type: "text"; text: string } => block.type === "text")
 				.map((block) => block.text)
@@ -180,7 +165,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 	}
 
 	/** `provider/model` with an optional `:effort` suffix, resolved against the live registry. */
-	function resolveJudgeModel(ctx: ExtensionContext): { model: Model<any>; effort?: string } | null {
+	function resolveJudgeModel(ctx: ExtensionContext): { model: Model<any>; effort?: ThinkingLevel } | null {
 		const colon = judgeModel.lastIndexOf(":");
 		const slash = judgeModel.indexOf("/");
 		if (slash <= 0) return null;
@@ -190,7 +175,10 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		const provider = spec.slice(0, spec.indexOf("/"));
 		const id = spec.slice(spec.indexOf("/") + 1);
 		const model = ctx.modelRegistry.find(provider, id);
-		return model ? { model, effort } : null;
+		if (!model) return null;
+		// Clamp to what this model actually supports rather than sending a level it will reject.
+		const clamped = effort ? (clampThinkingLevel(model, effort as ThinkingLevel) as ThinkingLevel) : undefined;
+		return { model, effort: clamped === "off" ? undefined : clamped };
 	}
 
 	function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "info"): void {
@@ -278,7 +266,20 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 				notify(ctx, `Guard ${structure.code}: refused`, "warning");
 				return { block: true, reason: `[coordinator-guard ${structure.code}] ${structure.reason}` };
 			}
-			if (structure.judge.length === 0) return;
+			if (structure.judge.length === 0) {
+				// Management actions end here, and the correction counter lives on this path.
+				if (event.toolName === "subagent") recordCorrection(event.input as Record<string, unknown>);
+				return;
+			}
+
+			// With the judge off, the prompt rules are not enforced at all: the user asked for
+			// that, and inventing a verdict would either refuse everything or fake a pass.
+			if (!judgeEnabled) {
+				if (event.toolName === "subagent") {
+					recordLaunchUnjudged(event.toolCallId, event.input as Record<string, unknown>, ctx, structure.judge);
+				}
+				return;
+			}
 
 			// Phase two reads the prompts. An unread prompt is an unchecked one, so a judge that
 			// cannot answer refuses the dispatch rather than waving it through.
@@ -309,6 +310,46 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		}
 	});
 
+	/** The correction cap is enforced in policy, so the count has to be kept even when the
+	 * call never reaches recordLaunch. */
+	function recordCorrection(input: Record<string, unknown>): void {
+		if (!campaign || campaign.status === "closed") return;
+		if (!isManagementAction(input) || !CORRECTION_ACTIONS.has(String(input.action))) return;
+		const runId =
+			typeof input.id === "string" ? input.id : typeof input.runId === "string" ? input.runId : typeof input.dir === "string" ? input.dir : "";
+		if (!runId) return;
+		campaign.steers[runId] = (campaign.steers[runId] ?? 0) + 1;
+		persist();
+	}
+
+	/** With the judge off nothing read the prompt, so a lane is recorded as a writer: the
+	 * conservative reading, because a writer is what the caps and the review gate exist for. */
+	function recordLaunchUnjudged(
+		toolCallId: string,
+		input: Record<string, unknown>,
+		ctx: ExtensionContext,
+		targets: JudgeTarget[],
+	): void {
+		recordLaunch(
+			toolCallId,
+			input,
+			ctx,
+			targets.map((target) => ({
+				target,
+				verdict: {
+					kind: "implement" as const,
+					worktree: null,
+					expectedHead: null,
+					stopsOnHeadMismatch: true,
+					forbidsPush: true,
+					coordinatorGitWork: "none" as const,
+					unrenderedPlaceholders: [],
+					classJustification: "substantive" as const,
+				},
+			})),
+		);
+	}
+
 	function recordLaunch(
 		toolCallId: string,
 		input: Record<string, unknown>,
@@ -318,17 +359,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		// A closed campaign enforces nothing, so it must not accumulate lanes a later resume
 		// would treat as its own.
 		if (!campaign || campaign.status === "closed") return;
-		if (isManagementAction(input)) {
-			if (CORRECTION_ACTIONS.has(String(input.action))) {
-				const runId =
-					typeof input.id === "string" ? input.id : typeof input.runId === "string" ? input.runId : typeof input.dir === "string" ? input.dir : "";
-				if (runId) {
-					campaign.steers[runId] = (campaign.steers[runId] ?? 0) + 1;
-					persist();
-				}
-			}
-			return;
-		}
+		if (isManagementAction(input)) return;
 		if (judgements.length === 0) return;
 
 		// The lane records the kind the guard actually admitted, so accounting and admission

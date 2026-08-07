@@ -15,6 +15,7 @@ Perform a read-only, defect-first review of a specified code change and return e
 - **Effort:** `[SCALE WITH RISK; HIGH FOR FINAL WHOLE-BRANCH REVIEW]`
 - **Working directory:** `[FULL REVIEW WORKTREE PATH]`
 - **Target:** `[UNCOMMITTED | BASE BRANCH | COMMIT | CUSTOM]`
+- **Expected HEAD:** `[EXACT SHA THE WORKTREE SHOULD BE AT]`
 - **Target reference:** `[REF OR NONE]`
 - **Custom instructions:** `[CUSTOM FOCUS OR NONE]`
 
@@ -23,7 +24,7 @@ Perform a read-only, defect-first review of a specified code change and return e
 Open with the routing row for this dispatch, naming the model the call actually carries:
 `ROUTE: [REVIEW KEY] | class [1|2|3] | [PROVIDER/MODEL:EFFORT] | [WHY THIS CLASS]`
 
-Inspect the requested target directly and return every finding that the author would likely fix. Do not modify files, create commits, push branches, post review comments, or delegate the review to another agent.
+Inspect the requested target directly and return every finding that the author would likely fix. Do not modify files, create commits, push branches, run `gh`, open or modify a pull request, post review comments, or delegate the review to another agent.
 
 ### Review context
 
