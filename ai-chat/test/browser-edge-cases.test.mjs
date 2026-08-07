@@ -45,14 +45,16 @@ function assertOutsideRepo(path) {
   assert.equal(resolved.startsWith(`${REPO_ROOT}/`), false, `${path} must stay outside the repo`);
 }
 
-test('browser edge harness reuses one AI Chat owned browser across provider switches', async () => {
+test('browser edge harness gives each provider command its own AI Chat owned browser', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ai-chat-browser-edge-reuse-'));
   try {
     const stateFile = join(dir, 'browser.json');
     const connectCalls = [];
     const runCalls = [];
+    const stopCalls = [];
     let startCount = 0;
     let disconnectCount = 0;
+    let livePort = null;
     const browser = {
       sessionId: 'managed-session-1',
       disconnect() { disconnectCount += 1; },
@@ -60,6 +62,7 @@ test('browser edge harness reuses one AI Chat owned browser across provider swit
     const commonDeps = {
       async startChrome() {
         startCount += 1;
+        livePort = 62101;
         return { status: 'started', port: 62101, ownerToken: 'reuse-token', profileName: 'Default', requestedProfileName: 'Default' };
       },
       managedBrowserSafetyForPort(port) {
@@ -74,10 +77,16 @@ test('browser edge harness reuses one AI Chat owned browser across provider swit
         assert.equal(ownerToken, 'reuse-token');
         return { ok: true, ownerId: 'ai-chat' };
       },
-      browserWSEndpoint: async port => `ws://localhost:${port}`,
+      // Reflects reality: a stopped browser no longer answers on its debug port.
+      browserWSEndpoint: async port => (port === livePort ? `ws://localhost:${port}` : null),
       async connectBrowser(port, options) {
         connectCalls.push({ port, ownerToken: options.ownerToken });
         return browser;
+      },
+      stopChrome(args) {
+        stopCalls.push(args);
+        livePort = null;
+        return { status: 'stopped', port: args.port };
       },
       cache: noCache(),
       io: { stdout: () => {}, writeFile: () => assert.fail('no file expected') },
@@ -99,8 +108,12 @@ test('browser edge harness reuses one AI Chat owned browser across provider swit
       });
     }
 
-    assert.equal(startCount, 1);
+    assert.equal(startCount, 2, 'each command must start its own browser once the previous one closed');
     assert.equal(disconnectCount, 2);
+    assert.deepEqual(stopCalls, [
+      { port: 62101, ownerToken: 'reuse-token', clean: false },
+      { port: 62101, ownerToken: 'reuse-token', clean: false },
+    ]);
     assert.deepEqual(connectCalls, [
       { port: 62101, ownerToken: 'reuse-token' },
       { port: 62101, ownerToken: 'reuse-token' },
