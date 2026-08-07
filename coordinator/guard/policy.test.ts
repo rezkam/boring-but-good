@@ -1,24 +1,29 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
+import type { PromptVerdict } from "./judge.ts";
 import {
-	continuationPrompt,
 	contractPrompt,
+	continuationPrompt,
 	DEFAULT_CONFIG,
-	evaluate,
+	evaluateStructure,
+	evaluateVerdicts,
 	laneSummary,
 	modelClass,
 	newCampaign,
 	openReview,
 	parseModelPin,
 	parseRouteHeader,
+	parseScriptChildren,
 	readStatusBlock,
 	type Campaign,
 	type GuardRequest,
+	type JudgeTarget,
 } from "./policy.ts";
 
 const WORKTREE = "/Users/dev/.agents/worktrees/demo-20260101";
 const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+const GOOD_ROUTE = "ROUTE: s1-parser | class 1 | openai-codex/gpt-5.6-luna:high | mechanical single-file transcription";
 
 function campaign(overrides: Partial<Campaign> = {}): Campaign {
 	return {
@@ -53,7 +58,6 @@ function request(overrides: Partial<GuardRequest> = {}): GuardRequest {
 		config: DEFAULT_CONFIG,
 		...overrides,
 	};
-	// Launches must declare their execution mode; these fixtures are about the other rules.
 	const isLaunch = base.input.agent !== undefined || base.input.workflowScript !== undefined;
 	if (isLaunch && base.input.async === undefined && base.input.action === undefined) {
 		base.input = { ...base.input, async: true };
@@ -61,19 +65,57 @@ function request(overrides: Partial<GuardRequest> = {}): GuardRequest {
 	return base;
 }
 
-function deny(req: GuardRequest): { code: string; reason: string } {
-	const decision = evaluate(req);
-	assert.equal(decision.allow, false, `expected a denial, got: ${JSON.stringify(decision)}`);
+/** A verdict for a compliant writer dispatch; tests override the field under test. */
+function verdict(overrides: Partial<PromptVerdict> = {}): PromptVerdict {
+	return {
+		kind: "implement",
+		worktree: WORKTREE,
+		expectedHead: HEAD,
+		stopsOnHeadMismatch: true,
+		forbidsPush: true,
+		coordinatorGitWork: "none",
+		unrenderedPlaceholders: [],
+		classJustification: "substantive",
+		...overrides,
+	};
+}
+
+function structure(req: GuardRequest): { code: string; reason: string } {
+	const decision = evaluateStructure(req);
+	assert.equal(decision.allow, false, `expected a structural denial, got: ${JSON.stringify(decision)}`);
 	if (decision.allow) throw new Error("unreachable");
 	return { code: decision.code, reason: decision.reason };
 }
 
-function allow(req: GuardRequest): void {
-	const decision = evaluate(req);
-	assert.equal(decision.allow, true, `expected allow, got: ${JSON.stringify(decision)}`);
+function targets(req: GuardRequest): JudgeTarget[] {
+	const decision = evaluateStructure(req);
+	assert.equal(decision.allow, true, `expected structure to pass, got: ${JSON.stringify(decision)}`);
+	if (!decision.allow) throw new Error("unreachable");
+	return decision.judge;
 }
 
-const GOOD_ROUTE = "ROUTE: s1-parser | class 1 | openai-codex/gpt-5.6-luna:high | mechanical single-file transcription";
+/** Run both phases with one verdict per judged prompt. */
+function judged(req: GuardRequest, verdicts: PromptVerdict[]): { allow: boolean; code?: string; reason?: string } {
+	const list = targets(req);
+	assert.equal(list.length, verdicts.length, "test supplied the wrong number of verdicts");
+	const decision = evaluateVerdicts(
+		req,
+		list.map((target, index) => ({ target, verdict: verdicts[index] })),
+	);
+	return decision.allow ? { allow: true } : { allow: false, code: decision.code, reason: decision.reason };
+}
+
+function denyJudged(req: GuardRequest, verdicts: PromptVerdict[]): { code: string; reason: string } {
+	const result = judged(req, verdicts);
+	assert.equal(result.allow, false, "expected a denial from the judged phase");
+	return { code: result.code!, reason: result.reason! };
+}
+
+function launch(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+	return { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task: implementTask(GOOD_ROUTE), ...overrides };
+}
+
+// ── structural rules, decided without a model call ──────────────────────────────
 
 test("parseModelPin requires a provider-qualified id and a known effort suffix", () => {
 	assert.deepEqual(parseModelPin("openai-codex/gpt-5.6-luna:high"), { id: "openai-codex/gpt-5.6-luna", effort: "high" });
@@ -82,147 +124,19 @@ test("parseModelPin requires a provider-qualified id and a known effort suffix",
 	assert.equal(parseModelPin(""), null);
 });
 
-test("modelClass maps the tier table, and reads effort where the table splits on it", () => {
+test("modelClass reads the tier table as model-and-effort pairs", () => {
 	assert.equal(modelClass("openai-codex/gpt-5.6-luna", "high"), 1);
 	assert.equal(modelClass("claude-bridge/claude-sonnet-5", "medium"), 1);
 	assert.equal(modelClass("openai-codex/gpt-5.6-terra", "medium"), 2);
 	assert.equal(modelClass("openai-codex/gpt-5.6-sol", "medium"), 3);
-	assert.equal(modelClass("claude-bridge/claude-fable-5", "high"), 3);
-	assert.equal(modelClass("some/unknown-model", "high"), null);
-
-	// dispatch.md splits opus by effort: low is class 2, medium and above is class 3.
 	assert.equal(modelClass("claude-bridge/claude-opus-5", "low"), 2);
 	assert.equal(modelClass("claude-bridge/claude-opus-5", "medium"), 3);
-});
-
-test("CG004: an opus route is judged at the effort it was pinned at", () => {
-	const asClass2 =
-		"ROUTE: s1-parser | class 2 | claude-bridge/claude-opus-5:low | prose-led integration work across two packages";
-	allow(request({ input: { agent: "worker", model: "claude-bridge/claude-opus-5:low", task: implementTask(asClass2) } }));
-
-	const mislabelled =
-		"ROUTE: s1-parser | class 2 | claude-bridge/claude-opus-5:medium | prose-led integration work across two packages";
-	assert.equal(
-		deny(request({ input: { agent: "worker", model: "claude-bridge/claude-opus-5:medium", task: implementTask(mislabelled) } })).code,
-		"CG004",
-	);
-});
-
-test("CG006: a review prompt is caught even when it mentions fixing, writing, or adding", () => {
-	const route = "ROUTE: r1 | class 3 | openai-codex/gpt-5.6-sol:high | final whole-branch review of the campaign diff";
-	const task = [
-		route,
-		`Conduct a read-only review of ${WORKTREE} at HEAD ${HEAD}.`,
-		"Return every finding that the author would likely fix. Do not modify files, and never push.",
-		"Write the findings as a list, and add a severity to each one.",
-	].join("\n");
-	assert.equal(deny(request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-sol:high", task } })).code, "CG006");
-});
-
-test("a workflow script written as JSON is still checked", () => {
-	const script = `const spec = [{"key":"a","agent":"worker","task":"do it"}]; return runs.all(spec)`;
-	const { code } = deny(request({ input: { workflowScript: script } }));
-	assert.equal(code, "CG002");
-});
-
-test("every child of a workflow script needs its own routing header", () => {
-	const investigation = (key: string) =>
-		`ROUTE: ${key} | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory. Read-only inventory in ${WORKTREE} at HEAD ${HEAD}. Never push.`;
-	const oneHeader = `const r = await runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${investigation("a")}\`}, {key:'b', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: 'read-only inventory, never push'}]); return r`;
-	const { code, reason } = deny(request({ input: { workflowScript: oneHeader } }));
-	assert.equal(code, "CG003");
-	assert.match(reason, /no ROUTE header/);
-});
-
-test("a workflow child's routing header is class-checked like any other", () => {
-	const bad = `ROUTE: b | class 1 | openai-codex/gpt-5.6-sol:high | read-only inventory. Read-only inventory in ${WORKTREE} at HEAD ${HEAD}. Never push.`;
-	const good = `ROUTE: a | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory. Read-only inventory in ${WORKTREE} at HEAD ${HEAD}. Never push.`;
-	const script = `const r = await runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${good}\`}, {key:'b', agent:'scout', model:'openai-codex/gpt-5.6-sol:high', task: \`${bad}\`}]); return r`;
-	assert.equal(deny(request({ input: { workflowScript: script } })).code, "CG004");
-});
-
-test("a workflow script may carry investigations, but never writers or reviewers", () => {
-	const investigation = (key: string) =>
-		`ROUTE: ${key} | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory\\nRead-only inventory in ${WORKTREE} at HEAD ${HEAD}. Never push.`;
-	const readOnly = `const r = await runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${investigation("a")}\`}, {key:'b', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${investigation("b")}\`}]); return r`;
-	allow(request({ input: { workflowScript: readOnly } }));
-
-	const writers = `const r = await runs.all([{key:'a', agent:'worker', model:'openai-codex/gpt-5.6-luna:high', task: \`${implementTask(GOOD_ROUTE)}\`}, {key:'b', agent:'worker', model:'openai-codex/gpt-5.6-luna:high', task: \`${implementTask(GOOD_ROUTE)}\`}]); return r`;
-	const { code, reason } = deny(request({ input: { workflowScript: writers } }));
-	assert.equal(code, "CG010");
-	assert.match(reason, /one dispatch at a time/);
-});
-
-test("CG009: the prompt must name the campaign's worktree or one beside it", () => {
-	const model = "openai-codex/gpt-5.6-luna:high";
-	const sibling = "/Users/dev/.agents/worktrees/demo-lane-a";
-	allow(
-		request({
-			input: { agent: "worker", model, task: `${GOOD_ROUTE}\nImplement slice S1 in ${sibling} at exact HEAD ${HEAD}. Stop and report if it differs. Never push.` },
-		}),
-	);
-
-	const elsewhere = "/Users/dev/some-other-checkout";
-	const { code, reason } = deny(
-		request({
-			input: { agent: "worker", model, task: `${GOOD_ROUTE}\nImplement slice S1 in ${elsewhere} at exact HEAD ${HEAD}. Stop and report if it differs. Never push.` },
-		}),
-	);
-	assert.equal(code, "CG009");
-	assert.match(reason, /demo-20260101/);
-
-	assert.equal(
-		deny(
-			request({
-				input: { agent: "worker", model, task: `${GOOD_ROUTE}\nImplement slice S1 with /usr/bin/env node at exact HEAD ${HEAD}. Never push.` },
-			}),
-		).code,
-		"CG009",
-	);
-});
-
-test("CG016: work deferred to a scheduler is refused during a campaign", () => {
-	const { code, reason } = deny(
-		request({ input: { action: "schedule.create", agent: "worker", task: "implement slice 4", every: "1h" } }),
-	);
-	assert.equal(code, "CG016");
-	assert.match(reason, /scheduler/);
-
-	allow(request({ input: { action: "get", agent: "worker" } }));
-	allow(request({ input: { action: "list" } }));
-});
-
-test("CG011: a steer carrying its message in task still counts, and resume counts too", () => {
-	const steered = campaign({ steers: { run7: 2 } });
-	assert.equal(deny(request({ campaign: steered, input: { action: "steer", id: "run7", task: "again" } })).code, "CG011");
-	assert.equal(deny(request({ campaign: steered, input: { action: "resume", id: "run7" } })).code, "CG011");
-});
-
-test("CG006: an implementation prompt carried by the reviewer role is still writer work", () => {
-	const route = "ROUTE: s1 | class 1 | openai-codex/gpt-5.6-luna:high | mechanical change";
-	const reviewing = campaign({ status: "review", slicesDone: 4 });
-	const { code } = deny(
-		request({
-			campaign: reviewing,
-			input: {
-				agent: "reviewer",
-				model: "openai-codex/gpt-5.6-luna:high",
-				task: `${route}\nImplement the parser change in ${WORKTREE}. Never push.`,
-			},
-		}),
-	);
-	// Judged as a writer, so it fails the writer preflight rather than passing as a reviewer.
-	assert.equal(code, "CG009");
-});
-
-test("CG011: the steer cap reads the id field the subagent API prefers", () => {
-	const steered = campaign({ steers: { run7: 2 } });
-	assert.equal(deny(request({ campaign: steered, input: { action: "steer", id: "run7", message: "again" } })).code, "CG011");
+	assert.equal(modelClass("openai-codex/gpt-5.6-luna", "off"), null);
+	assert.equal(modelClass("some/unknown-model", "high"), null);
 });
 
 test("parseRouteHeader reads the four declared fields", () => {
-	const parsed = parseRouteHeader(GOOD_ROUTE);
-	assert.deepEqual(parsed, {
+	assert.deepEqual(parseRouteHeader(GOOD_ROUTE), {
 		key: "s1-parser",
 		cls: 1,
 		model: "openai-codex/gpt-5.6-luna:high",
@@ -231,7 +145,7 @@ test("parseRouteHeader reads the four declared fields", () => {
 	assert.equal(parseRouteHeader("no header here"), null);
 });
 
-test("readStatusBlock reports the fields a status block is missing", () => {
+test("readStatusBlock reads the block, not the prose around it", () => {
 	const complete = [
 		"CAMPAIGN  demo          WORKTREE /w",
 		"SLICES    1 done / 4 total     NOW: S2 (running)",
@@ -244,503 +158,308 @@ test("readStatusBlock reports the fields a status block is missing", () => {
 	].join("\n");
 	assert.deepEqual(readStatusBlock(complete), { ok: true, missing: [] });
 
-	const partial = "CAMPAIGN demo\nSLICES 1 done / 4 total\nNEXT integrate";
-	const result = readStatusBlock(partial);
+	const chatty = ["I checked the PR and the AGENTS file and the DIRECT dependencies.", "", "CAMPAIGN demo", "NEXT integrate"].join("\n");
+	const result = readStatusBlock(chatty);
 	assert.equal(result.ok, false);
-	assert.deepEqual(result.missing, ["WORKTREE", "PR", "AGENTS", "DIRECT", "PARKED", "NEEDS YOU"]);
+	assert.ok(result.missing.includes("PR"));
 });
 
 test("the guard is inert when no campaign is registered and the skill is not loaded", () => {
-	allow(request({ armed: false, campaign: null, input: { agent: "worker", task: "do a thing" } }));
+	assert.deepEqual(evaluateStructure(request({ armed: false, campaign: null, input: launch() })), { allow: true, judge: [] });
 });
 
 test("CG001: once the coordinator skill is loaded, a launch without a registered campaign fails", () => {
-	const { code, reason } = deny(request({ campaign: null, input: { agent: "worker", task: "do a thing" } }));
+	const { code, reason } = structure(request({ campaign: null, input: launch() }));
 	assert.equal(code, "CG001");
 	assert.match(reason, /coordinator_campaign/);
 });
 
 test("a closed campaign returns the guard to inert, and re-arming asks for a new campaign", () => {
 	const closed = campaign({ status: "closed" });
-	const launch = { agent: "worker", task: "do a thing" };
-	allow(request({ armed: false, campaign: closed, input: launch }));
-	allow(request({ armed: false, campaign: closed, tool: "bash", input: { command: "git stash" } }));
-
-	const { code, reason } = deny(request({ armed: true, campaign: closed, input: launch }));
-	assert.equal(code, "CG001");
-	assert.match(reason, /coordinator_campaign/);
+	assert.deepEqual(evaluateStructure(request({ armed: false, campaign: closed, input: launch() })), { allow: true, judge: [] });
+	assert.equal(structure(request({ armed: true, campaign: closed, input: launch() })).code, "CG001");
 });
 
 test("CG002: a launch with no model, or a model without an effort suffix, fails", () => {
-	assert.equal(deny(request({ input: { agent: "worker", task: implementTask(GOOD_ROUTE) } })).code, "CG002");
-	assert.equal(
-		deny(request({ input: { agent: "worker", model: "gpt-5.6-sol", task: implementTask(GOOD_ROUTE) } })).code,
-		"CG002",
-	);
-});
-
-test("CG002: thinking is not a substitute for pinning effort in the model string", () => {
-	const { code } = deny(
-		request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-luna", thinking: "high", task: implementTask(GOOD_ROUTE) } }),
-	);
-	assert.equal(code, "CG002");
+	assert.equal(structure(request({ input: launch({ model: undefined }) })).code, "CG002");
+	assert.equal(structure(request({ input: launch({ model: "gpt-5.6-sol" }) })).code, "CG002");
+	assert.equal(structure(request({ input: launch({ model: "openai-codex/gpt-5.6-luna", thinking: "high" }) })).code, "CG002");
 });
 
 test("CG003: a pinned launch with no ROUTE header fails", () => {
-	const { code, reason } = deny(
-		request({
-			input: {
-				agent: "worker",
-				model: "openai-codex/gpt-5.6-luna:high",
-				task: `Implement slice S1 in ${WORKTREE} at exact HEAD ${HEAD}. Never push.`,
-			},
-		}),
-	);
+	const { code, reason } = structure(request({ input: launch({ task: `Implement slice S1 in ${WORKTREE}.` }) }));
 	assert.equal(code, "CG003");
 	assert.match(reason, /ROUTE:/);
 });
 
-test("CG004: the ROUTE header must name the model that is actually being launched", () => {
-	const header = "ROUTE: s1-parser | class 1 | openai-codex/gpt-5.6-luna:high | mechanical single-file transcription";
-	const { code, reason } = deny(
-		request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-sol:high", task: implementTask(header) } }),
-	);
-	assert.equal(code, "CG004");
-	assert.match(reason, /gpt-5\.6-sol:high/);
-});
+test("CG004: the header must name the launched model, and the class the tier table gives it", () => {
+	assert.equal(structure(request({ input: launch({ model: "openai-codex/gpt-5.6-sol:high" }) })).code, "CG004");
 
-test("CG004: the declared class must match the tier table entry for that model", () => {
-	const header = "ROUTE: s1-parser | class 1 | openai-codex/gpt-5.6-sol:medium | claims to be mechanical";
-	const { code } = deny(
-		request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-sol:medium", task: implementTask(header) } }),
-	);
-	assert.equal(code, "CG004");
-});
-
-test("CG012: class 3 implementation needs a written justification, not a label", () => {
-	const thin = "ROUTE: s1-parser | class 3 | openai-codex/gpt-5.6-sol:medium | hard";
+	const mislabelled = "ROUTE: s1 | class 1 | openai-codex/gpt-5.6-sol:medium | claims to be mechanical";
 	assert.equal(
-		deny(request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-sol:medium", task: implementTask(thin) } })).code,
-		"CG012",
+		structure(request({ input: launch({ model: "openai-codex/gpt-5.6-sol:medium", task: implementTask(mislabelled) }) })).code,
+		"CG004",
 	);
 
-	const justified =
-		"ROUTE: s1-parser | class 3 | openai-codex/gpt-5.6-sol:medium | cross-layer transport rewrite spanning six packages and the reducer contract";
-	allow(request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-sol:medium", task: implementTask(justified) } }));
-});
-
-test("CG017: a launch must say whether it runs in the foreground", () => {
-	const { code, reason } = deny({
-		...request(),
-		input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task: implementTask(GOOD_ROUTE) },
-	});
-	assert.equal(code, "CG017");
-	assert.match(reason, /async/);
-});
-
-test("CG005: hard turn and tool budgets are refused on every dispatch", () => {
-	const base = { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task: implementTask(GOOD_ROUTE) };
-	assert.equal(deny(request({ input: { ...base, turnBudget: { maxTurns: 40 } } })).code, "CG005");
-	assert.equal(deny(request({ input: { ...base, toolBudget: { soft: 60, hard: 90 } } })).code, "CG005");
-	allow(request({ input: { ...base, usageBudget: { tokens: { soft: 200_000 } } } }));
-});
-
-test("CG005: budgets hidden inside a workflow script are refused too", () => {
-	const script = `const r = await runs.run('s1', {agent:'worker', model:'openai-codex/gpt-5.6-luna:high', maxTurns: 30, task: \`${implementTask(GOOD_ROUTE)}\`}); return r.output`;
-	assert.equal(deny(request({ input: { workflowScript: script } })).code, "CG005");
-});
-
-test("CG002: every child of a workflow script needs its own pinned model", () => {
-	const header = (key: string) =>
-		`ROUTE: ${key} | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory. Read-only inventory in ${WORKTREE}. Never push.`;
-	const script = `const r = await runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("a")}\`}, {key:'b', agent:'scout', task: \`${header("b")}\`}]); return r`;
-	const { code, reason } = deny(request({ input: { workflowScript: script } }));
-	assert.equal(code, "CG002");
-	assert.match(reason, /no literal model/);
-});
-
-test("CG006: reviewers cannot be dispatched before the review phase is open", () => {
-	const reviewRoute =
-		"ROUTE: final-review | class 3 | openai-codex/gpt-5.6-sol:high | final whole-branch review of the campaign diff";
-	const input = {
-		agent: "reviewer",
-		model: "openai-codex/gpt-5.6-sol:high",
-		task: `${reviewRoute}\nReview ${WORKTREE} at HEAD ${HEAD}. Read only, never push.`,
-	};
-	const { code, reason } = deny(request({ input }));
-	assert.equal(code, "CG006");
-	assert.match(reason, /0 of 4/);
-
-	allow(request({ campaign: campaign({ status: "review", slicesDone: 4 }), input }));
-});
-
-test("CG006: only one reviewer runs at a time in the review phase", () => {
-	const reviewRoute =
-		"ROUTE: final-review-2 | class 3 | openai-codex/gpt-5.6-sol:high | second round after the first round fixes landed";
-	const busy = campaign({
-		status: "review",
-		slicesDone: 4,
-		lanes: [{ key: "final-review", kind: "review", model: "openai-codex/gpt-5.6-sol:high", startedAt: 900, state: "running" }],
-	});
-	const { code } = deny(
-		request({
-			campaign: busy,
-			input: {
-				agent: "reviewer",
-				model: "openai-codex/gpt-5.6-sol:high",
-				task: `${reviewRoute}\nReview ${WORKTREE} at HEAD ${HEAD}. Read only, never push.`,
-			},
-		}),
-	);
-	assert.equal(code, "CG006");
-});
-
-test("CG007: committing, pushing and PR work can never be dispatched", () => {
-	const route = "ROUTE: commit-s1 | class 1 | openai-codex/gpt-5.6-luna:high | mechanical staging of the finished slice";
-	assert.equal(
-		deny(request({ input: { agent: "commit", model: "openai-codex/gpt-5.6-luna:high", task: `${route}\nIn ${WORKTREE} at ${HEAD} stage and commit. Never push.` } })).code,
-		"CG007",
-	);
-	assert.equal(
-		deny(
-			request({
-				input: {
-					agent: "worker",
-					model: "openai-codex/gpt-5.6-luna:high",
-					task: `${route}\nCommit the finished work in ${WORKTREE} at ${HEAD} and open the PR. Never push.`,
-				},
-			}),
-		).code,
-		"CG007",
-	);
-});
-
-test("CG008: launches are refused while the status block is stale, management actions are not", () => {
-	const stale = { ...request(), now: 1_000 + 6 * 60_000 };
-	const { code, reason } = deny({
-		...stale,
-		input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task: implementTask(GOOD_ROUTE) },
-	});
-	assert.equal(code, "CG008");
-	assert.match(reason, /status block/i);
-
-	allow({ ...stale, input: { action: "status" } });
-	allow({ ...stale, input: { action: "stop", runId: "abc" } });
-});
-
-test("CG009: unrendered placeholders, and a missing worktree or HEAD, fail the prompt lint", () => {
-	const model = "openai-codex/gpt-5.6-luna:high";
-	assert.equal(
-		deny(request({ input: { agent: "worker", model, task: `${GOOD_ROUTE}\nImplement in undefined/pkg at HEAD ${HEAD}. Never push.` } })).code,
-		"CG009",
-	);
-	assert.equal(
-		deny(request({ input: { agent: "worker", model, task: `${GOOD_ROUTE}\nImplement slice S1 at exact HEAD ${HEAD}. Never push.` } })).code,
-		"CG009",
-	);
-	assert.equal(
-		deny(request({ input: { agent: "worker", model, task: `${GOOD_ROUTE}\nImplement slice S1 in ${WORKTREE}. Never push.` } })).code,
-		"CG009",
-	);
-	assert.equal(
-		deny(request({ input: { agent: "worker", model, task: `${GOOD_ROUTE}\nImplement slice S1 in ${WORKTREE} at exact HEAD ${HEAD}.` } })).code,
-		"CG009",
-	);
-});
-
-test("CG013: an ephemeral worktree path is refused", () => {
-	const task = [
-		GOOD_ROUTE,
-		`Implement slice S1 in /tmp/scratch-worktree at exact HEAD ${HEAD}.`,
-		"Never push.",
-	].join("\n");
-	assert.equal(deny(request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task } })).code, "CG013");
-});
-
-test("CG010: open writer lanes are capped, and lanes awaiting integration still count", () => {
-	const lanes = [
-		{ key: "s1", kind: "implement" as const, model: "m:high", startedAt: 900, state: "running" as const },
-		{ key: "s2", kind: "implement" as const, model: "m:high", startedAt: 900, state: "returned" as const },
-		{ key: "s3", kind: "implement" as const, model: "m:high", startedAt: 900, state: "running" as const },
-	];
-	const { code, reason } = deny(
-		request({
-			campaign: campaign({ lanes }),
-			input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task: implementTask(GOOD_ROUTE) },
-		}),
-	);
-	assert.equal(code, "CG010");
-	assert.match(reason, /s2/);
-
-	const integrated = lanes.map((lane) => (lane.key === "s2" ? { ...lane, state: "integrated" as const } : lane));
-	allow(
-		request({
-			campaign: campaign({ lanes: integrated }),
-			input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task: implementTask(GOOD_ROUTE) },
-		}),
-	);
-});
-
-test("CG010: read-only investigations do not consume writer lanes", () => {
-	const lanes = [
-		{ key: "s1", kind: "implement" as const, model: "m:high", startedAt: 900, state: "running" as const },
-		{ key: "s2", kind: "implement" as const, model: "m:high", startedAt: 900, state: "running" as const },
-		{ key: "s3", kind: "implement" as const, model: "m:high", startedAt: 900, state: "running" as const },
-	];
-	const route = "ROUTE: port-map | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory of the transport call sites";
-	allow(
-		request({
-			campaign: campaign({ lanes }),
-			input: {
-				agent: "scout",
-				model: "openai-codex/gpt-5.6-luna:high",
-				task: `${route}\nRead-only inventory in ${WORKTREE} at HEAD ${HEAD}. Never push.`,
-			},
-		}),
-	);
-});
-
-test("CG011: the same run cannot be steered indefinitely", () => {
-	const steered = campaign({ steers: { run7: 2 } });
-	const { code, reason } = deny(request({ campaign: steered, input: { action: "steer", runId: "run7", message: "try again" } }));
-	assert.equal(code, "CG011");
-	assert.match(reason, /serial milestones/);
-
-	allow(request({ campaign: campaign({ steers: { run7: 1 } }), input: { action: "steer", runId: "run7", message: "try again" } }));
-});
-
-test("CG014: spawning an agent through bash bypasses the guard and is refused", () => {
-	assert.equal(deny(request({ tool: "bash", input: { command: "codex exec 'implement slice 4'" } })).code, "CG014");
-	assert.equal(deny(request({ tool: "bash", input: { command: "pi -p 'go build the thing'" } })).code, "CG014");
-	allow(request({ tool: "bash", input: { command: "npm test -- --run" } }));
-});
-
-test("CG015: a destructive git command is refused behind global options too", () => {
-	assert.equal(
-		deny(request({ tool: "bash", input: { command: `git -C ${WORKTREE} reset --hard origin/main` } })).code,
-		"CG015",
-	);
-	assert.equal(deny(request({ tool: "bash", input: { command: "git -c core.pager=cat stash" } })).code, "CG015");
-});
-
-test("readStatusBlock reads the block, not the prose around it", () => {
-	const chatty = [
-		"I checked the PR and the AGENTS file and the DIRECT dependencies.",
-		"",
-		"CAMPAIGN demo  WORKTREE /w",
-		"SLICES 1 done / 4 total",
-		"NEXT integrate lane s2",
-	].join("\n");
-	const result = readStatusBlock(chatty);
-	assert.equal(result.ok, false);
-	assert.ok(result.missing.includes("PR"), `expected PR to be missing, got ${result.missing.join(", ")}`);
-});
-
-test("a closed campaign injects no contract", () => {
-	assert.equal(contractPrompt(campaign({ status: "closed" }), false, 1_000), "");
-});
-
-test("CG015: the destructive git commands the skill forbids are refused while a campaign is active", () => {
-	assert.equal(deny(request({ tool: "bash", input: { command: "git reset --hard origin/main" } })).code, "CG015");
-	assert.equal(deny(request({ tool: "bash", input: { command: "git stash" } })).code, "CG015");
-	assert.equal(deny(request({ tool: "bash", input: { command: "git checkout -- src/app.ts" } })).code, "CG015");
-	assert.equal(deny(request({ tool: "bash", input: { command: "git push --force origin main" } })).code, "CG015");
-	assert.equal(deny(request({ tool: "bash", input: { command: "git push --force-with-lease origin main" } })).code, "CG015");
-	assert.equal(
-		deny(request({ tool: "bash", input: { command: "git push --force-with-lease=main:abc1234 origin main" } })).code,
-		"CG015",
-	);
-	allow(request({ tool: "bash", input: { command: "git push origin HEAD" } }));
-	allow(request({ tool: "bash", input: { command: "git switch -C feat/x abc1234" } }));
-});
-
-test("a fully compliant implementation dispatch is allowed", () => {
-	allow(request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task: implementTask(GOOD_ROUTE) } }));
-});
-
-test("an implementer prompt is a writer even when its agent name is unknown", () => {
-	const task = [
-		GOOD_ROUTE,
-		"You are an implementer subagent working for a coordinator that owns the campaign.",
-		`Work only in: ${WORKTREE}`,
-		"Commit locally and never push.",
-	].join("\n");
-	// No HEAD sha, which only writers are required to carry: proves it was not read as an investigation.
-	const { code, reason } = deny(request({ input: { agent: "custom-impl", model: "openai-codex/gpt-5.6-luna:high", task } }));
-	assert.equal(code, "CG009");
-	assert.match(reason, /HEAD sha/);
-});
-
-test("an implementation prompt is a writer even when carried by a read-only agent name", () => {
-	const route = "ROUTE: s1 | class 1 | openai-codex/gpt-5.6-luna:high | mechanical one-file change";
-	const { code, reason } = deny(
-		request({
-			input: {
-				agent: "scout",
-				model: "openai-codex/gpt-5.6-luna:high",
-				task: `${route}\nImplement the parser change in ${WORKTREE}. Never push.`,
-			},
-		}),
-	);
-	assert.equal(code, "CG009");
-	assert.match(reason, /HEAD sha/);
-});
-
-test("CG007: a never-push promise does not license gh pr commands", () => {
-	const task = [
-		GOOD_ROUTE,
-		`Implement slice S1 in ${WORKTREE} at exact HEAD ${HEAD}.`,
-		"Commit locally and never push. Then run gh pr create to open the PR.",
-	].join("\n");
-	assert.equal(deny(request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task } })).code, "CG007");
-});
-
-test("CG009: prose about null or undefined values is not a placeholder", () => {
-	const task = [
-		GOOD_ROUTE,
-		`Implement slice S1 in ${WORKTREE} at exact HEAD ${HEAD}, stop if it differs: fix null handling so an undefined id is rejected.`,
-		"Never push.",
-	].join("\n");
-	allow(request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task } }));
-
-	const unrendered = [
-		GOOD_ROUTE,
-		`Implement slice S1 in undefined/packages/app at exact HEAD ${HEAD}. Stop if it differs.`,
-		"Never push.",
-	].join("\n");
-	assert.equal(
-		deny(request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task: unrendered } })).code,
-		"CG009",
-	);
-
-	const emptyValue = [GOOD_ROUTE, `Implement slice S1 in ${WORKTREE} at exact HEAD: undefined.`, "Never push."].join("\n");
-	assert.equal(
-		deny(request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task: emptyValue } })).code,
-		"CG009",
-	);
-});
-
-test("CG004: the tier table's listed effort is enforced for writers", () => {
-	const lazy = "ROUTE: s1 | class 1 | openai-codex/gpt-5.6-luna:off | mechanical one-file change";
-	const { code, reason } = deny(
-		request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:off", task: implementTask(lazy) } }),
+	const lazyEffort = "ROUTE: s1 | class 1 | openai-codex/gpt-5.6-luna:off | mechanical change";
+	const { code, reason } = structure(
+		request({ input: launch({ model: "openai-codex/gpt-5.6-luna:off", task: implementTask(lazyEffort) }) }),
 	);
 	assert.equal(code, "CG004");
 	assert.match(reason, /high/);
 });
 
-test("a workflow child's declared model must be the model it launches with", () => {
-	const header = (key: string, model: string) =>
-		`ROUTE: ${key} | class 1 | ${model} | read-only inventory. Read-only inventory in ${WORKTREE}. Never push.`;
-	const script = `const r = await runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("a", "openai-codex/gpt-5.6-luna:high")}\`}, {key:'b', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("b", "claude-bridge/claude-sonnet-5:medium")}\`}]); return r`;
-	const { code, reason } = deny(request({ input: { workflowScript: script } }));
-	assert.equal(code, "CG004");
-	assert.match(reason, /declares/i);
+test("CG005: hard turn and tool budgets are refused, in arguments or inside a script", () => {
+	assert.equal(structure(request({ input: launch({ turnBudget: { maxTurns: 40 } }) })).code, "CG005");
+	assert.equal(structure(request({ input: launch({ toolBudget: { soft: 60, hard: 90 } }) })).code, "CG005");
+	assert.equal(targets(request({ input: launch({ usageBudget: { tokens: { soft: 200_000 } } }) })).length, 1);
+
+	const script = `const r = await runs.run('s1', {agent:'worker', model:'openai-codex/gpt-5.6-luna:high', maxTurns: 30, task: 'x'}); return r`;
+	assert.equal(structure(request({ input: { workflowScript: script, async: true } })).code, "CG005");
 });
 
-test("CG015: a force refspec is a force push", () => {
-	assert.equal(deny(request({ tool: "bash", input: { command: "git push origin +HEAD:main" } })).code, "CG015");
-	allow(request({ tool: "bash", input: { command: "git push origin HEAD:main" } }));
+test("CG007: the harness commit agent is never dispatched", () => {
+	assert.equal(structure(request({ input: launch({ agent: "commit" }) })).code, "CG007");
+});
+
+test("CG008: launches are refused while the status block is stale, management actions are not", () => {
+	const stale = { ...request(), now: 1_000 + 6 * 60_000 };
+	const { code, reason } = structure({ ...stale, input: launch({ async: true }) });
+	assert.equal(code, "CG008");
+	assert.match(reason, /status block/i);
+
+	assert.deepEqual(evaluateStructure({ ...stale, input: { action: "status" } }), { allow: true, judge: [] });
+	assert.deepEqual(evaluateStructure({ ...stale, input: { action: "stop", runId: "abc" } }), { allow: true, judge: [] });
 });
 
 test("CG010: a route key cannot be reused while its lane is still open", () => {
-	const busy = campaign({
-		lanes: [{ key: "s1-parser", kind: "implement", model: "m:high", startedAt: 1, state: "returned" }],
-	});
-	const { code, reason } = deny(
-		request({ campaign: busy, input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task: implementTask(GOOD_ROUTE) } }),
-	);
+	const busy = campaign({ lanes: [{ key: "s1-parser", kind: "implement", model: "m:high", startedAt: 1, state: "returned" }] });
+	const { code, reason } = structure(request({ campaign: busy, input: launch() }));
 	assert.equal(code, "CG010");
 	assert.match(reason, /already open/);
 });
 
-test("ordinary mutating assignments are writer work", () => {
-	for (const assignment of ["Add coverage for the parser", "Write the migration", "Update the reducer contract"]) {
-		const route = "ROUTE: s9 | class 1 | openai-codex/gpt-5.6-luna:high | mechanical change";
-		const { code } = deny(
-			request({
-				input: { agent: "scout", model: "openai-codex/gpt-5.6-luna:high", task: `${route}\n${assignment} in ${WORKTREE}. Never push.` },
-			}),
-		);
-		assert.equal(code, "CG009", `${assignment} should have been read as writer work`);
+test("CG011: corrections are capped, counted by id, runId or dir, and resume counts too", () => {
+	const steered = campaign({ steers: { run7: 2 } });
+	assert.equal(structure(request({ campaign: steered, input: { action: "steer", runId: "run7" } })).code, "CG011");
+	assert.equal(structure(request({ campaign: steered, input: { action: "steer", id: "run7", task: "again" } })).code, "CG011");
+	assert.equal(structure(request({ campaign: steered, input: { action: "resume", id: "run7" } })).code, "CG011");
+	assert.equal(structure(request({ campaign: campaign({ steers: { "/w/lane": 2 } }), input: { action: "steer", dir: "/w/lane" } })).code, "CG011");
+
+	assert.deepEqual(evaluateStructure(request({ campaign: campaign({ steers: { run7: 1 } }), input: { action: "steer", id: "run7" } })), {
+		allow: true,
+		judge: [],
+	});
+});
+
+test("CG014: spawning an agent through bash bypasses the guard and is refused", () => {
+	assert.equal(structure(request({ tool: "bash", input: { command: "codex exec 'implement slice 4'" } })).code, "CG014");
+	assert.equal(structure(request({ tool: "bash", input: { command: "pi -p 'go build the thing'" } })).code, "CG014");
+	assert.deepEqual(evaluateStructure(request({ tool: "bash", input: { command: "npm test -- --run" } })), { allow: true, judge: [] });
+});
+
+test("CG015: destructive git is refused, including behind global options and force refspecs", () => {
+	for (const command of [
+		"git reset --hard origin/main",
+		"git stash",
+		"git checkout -- src/app.ts",
+		"git push --force origin main",
+		"git push --force-with-lease origin main",
+		"git push origin +HEAD:main",
+		"git push origin +main",
+		`git -C ${WORKTREE} reset --hard origin/main`,
+		"git -c core.pager=cat stash",
+		"git worktree remove -f /w/lane",
+	]) {
+		assert.equal(structure(request({ tool: "bash", input: { command } })).code, "CG015", `expected ${command} to be refused`);
+	}
+	for (const command of ["git push origin HEAD", "git push origin HEAD:main", "git switch -C feat/x abc1234"]) {
+		assert.deepEqual(evaluateStructure(request({ tool: "bash", input: { command } })), { allow: true, judge: [] }, command);
 	}
 });
 
-test("CG006: an audit-shaped prompt is a review whatever its route key says", () => {
-	const route = "ROUTE: correctness | class 1 | openai-codex/gpt-5.6-luna:high | independent look at the branch";
-	const task = `${route}\nAudit the diff for regressions in ${WORKTREE} at HEAD ${HEAD} and report bugs. Never push.`;
-	assert.equal(deny(request({ input: { agent: "scout", model: "openai-codex/gpt-5.6-luna:high", task } })).code, "CG006");
+test("CG016: unclassifiable actions and scheduled work are refused", () => {
+	const { code, reason } = structure(request({ input: { action: "schedule.create", agent: "worker", task: "later", every: "1h" } }));
+	assert.equal(code, "CG016");
+	assert.match(reason, /scheduler/);
+	assert.equal(structure(request({ input: { action: "schedule.run", scheduleName: "nightly" } })).code, "CG016");
+	assert.deepEqual(evaluateStructure(request({ input: { action: "get", agent: "worker" } })), { allow: true, judge: [] });
 });
 
-test("CG002: a workflow script whose child fields are not literals cannot be verified", () => {
+test("CG017: a launch must say whether it runs in the foreground", () => {
+	const { code, reason } = structure({ ...request(), input: launch() });
+	assert.equal(code, "CG017");
+	assert.match(reason, /async/);
+});
+
+// ── workflow scripts ────────────────────────────────────────────────────────────
+
+test("parseScriptChildren keeps each child's fields together, quoted or not", () => {
+	const script = `runs.all([{key:'a', agent:'scout', model:'m:high', task: \`ROUTE: a | class 1 | m:high | why\`}, {"key":"b","agent":"worker","model":"n:high","task":"t"}])`;
+	const { children, agentKeys } = parseScriptChildren(script);
+	assert.equal(agentKeys, 2);
+	assert.deepEqual(
+		children.map((child) => [child.agent, child.model]),
+		[
+			["scout", "m:high"],
+			["worker", "n:high"],
+		],
+	);
+});
+
+test("CG002: a script whose child fields are not literals cannot be verified", () => {
 	const shorthand = `const agent = 'scout'; const model = otherModel; return runs.run('x', {agent, model, task})`;
-	const { code, reason } = deny(request({ input: { workflowScript: shorthand } }));
+	const { code, reason } = structure(request({ input: { workflowScript: shorthand, async: true } }));
 	assert.equal(code, "CG002");
 	assert.match(reason, /literal/i);
 });
 
-test("CG016: an action the guard cannot classify is refused rather than waved through", () => {
-	const { code, reason } = deny(request({ input: { action: "schedule.run", scheduleName: "nightly" } }));
-	assert.equal(code, "CG016");
-	assert.match(reason, /schedule\.run/);
+test("every child of a script needs its own pinned model and routing header", () => {
+	const header = (key: string) => `ROUTE: ${key} | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory`;
+	const noModel = `runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("a")}\`}, {key:'b', agent:'scout', task: \`${header("b")}\`}])`;
+	assert.match(structure(request({ input: { workflowScript: noModel, async: true } })).reason, /no literal model/);
+
+	const noRoute = `runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("a")}\`}, {key:'b', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: 'just do it'}])`;
+	assert.equal(structure(request({ input: { workflowScript: noRoute, async: true } })).code, "CG003");
 });
 
-test("every child prompt in a workflow is linted on its own", () => {
-	const good = `ROUTE: a | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory. Read-only inventory in ${WORKTREE}. Never push.`;
-	const missingBoundary = `ROUTE: b | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory. Read-only inventory in ${WORKTREE}.`;
-	const script = `const r = await runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${good}\`}, {key:'b', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${missingBoundary}\`}]); return r`;
-	const { code, reason } = deny(request({ input: { workflowScript: script } }));
-	assert.equal(code, "CG009");
-	assert.match(reason, /never pushes/);
+test("CG004: a child's header must name the model that child launches with", () => {
+	const good = `ROUTE: a | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory`;
+	const wrong = `ROUTE: b | class 1 | claude-bridge/claude-sonnet-5:medium | read-only inventory`;
+	const script = `runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${good}\`}, {key:'b', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${wrong}\`}])`;
+	const { code, reason } = structure(request({ input: { workflowScript: script, async: true } }));
+	assert.equal(code, "CG004");
+	assert.match(reason, /declares/i);
 });
 
-test("a read-only investigation is not mistaken for a review", () => {
-	const route = "ROUTE: port-map | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory of the transport call sites";
-	allow(
-		request({
-			input: {
-				agent: "scout",
-				model: "openai-codex/gpt-5.6-luna:high",
-				task: `${route}\nRead-only inventory in ${WORKTREE}. Do not modify files, and never push.`,
-			},
-		}),
-	);
+test("CG010: two children of one script cannot share a route key", () => {
+	const header = `ROUTE: same | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory`;
+	const script = `runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header}\`}, {key:'b', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header}\`}])`;
+	assert.equal(structure(request({ input: { workflowScript: script, async: true } })).code, "CG010");
 });
 
-test("CG006: a review task cannot slip through by being dispatched as a worker", () => {
-	const route = "ROUTE: s1-accept | class 3 | openai-codex/gpt-5.6-sol:high | acceptance pass over the returned slice";
-	const { code } = deny(
-		request({
-			input: {
-				agent: "worker",
-				model: "openai-codex/gpt-5.6-sol:high",
-				task: `${route}\nConduct an independent acceptance review of commit ${HEAD} in ${WORKTREE}. Never push.`,
-			},
-		}),
-	);
+// ── judged rules, decided from the verdict ──────────────────────────────────────
+
+test("a compliant writer dispatch passes both phases", () => {
+	assert.deepEqual(judged(request({ input: launch() }), [verdict()]), { allow: true });
+});
+
+test("CG006: a review before the review phase is refused however the prompt is labelled", () => {
+	const { code, reason } = denyJudged(request({ input: launch() }), [verdict({ kind: "review", stopsOnHeadMismatch: false })]);
 	assert.equal(code, "CG006");
+	assert.match(reason, /0 of 4/);
+
+	const reviewing = campaign({ status: "review", slicesDone: 4 });
+	assert.deepEqual(judged(request({ campaign: reviewing, input: launch() }), [verdict({ kind: "review", stopsOnHeadMismatch: false })]), {
+		allow: true,
+	});
 });
+
+test("CG006: only one reviewer runs at a time", () => {
+	const busy = campaign({
+		status: "review",
+		slicesDone: 4,
+		lanes: [{ key: "r1", kind: "review", model: "m:high", startedAt: 1, state: "running" }],
+	});
+	assert.equal(denyJudged(request({ campaign: busy, input: launch() }), [verdict({ kind: "review" })]).code, "CG006");
+});
+
+test("CG007: branch-moving git work is refused even beside real implementation", () => {
+	for (const work of ["rebase", "cherry-pick", "push", "pr"] as const) {
+		const { code } = denyJudged(request({ input: launch() }), [verdict({ coordinatorGitWork: work })]);
+		assert.equal(code, "CG007", `expected ${work} to be refused`);
+	}
+});
+
+test("CG009: the prompt's boundaries are enforced from what it actually says", () => {
+	assert.equal(denyJudged(request({ input: launch() }), [verdict({ worktree: null })]).code, "CG009");
+	assert.equal(denyJudged(request({ input: launch() }), [verdict({ expectedHead: null })]).code, "CG009");
+	assert.equal(denyJudged(request({ input: launch() }), [verdict({ stopsOnHeadMismatch: false })]).code, "CG009");
+	assert.equal(denyJudged(request({ input: launch() }), [verdict({ forbidsPush: false })]).code, "CG009");
+
+	const { code, reason } = denyJudged(request({ input: launch() }), [verdict({ worktree: "/Users/dev/some-other-checkout" })]);
+	assert.equal(code, "CG009");
+	assert.match(reason, /demo-20260101/);
+
+	assert.deepEqual(judged(request({ input: launch() }), [verdict({ worktree: `${WORKTREE.slice(0, WORKTREE.lastIndexOf("/"))}/demo-lane-a` })]), {
+		allow: true,
+	});
+});
+
+test("CG009: an investigation needs no HEAD, a writer does", () => {
+	assert.deepEqual(judged(request({ input: launch() }), [verdict({ kind: "investigate", expectedHead: null, stopsOnHeadMismatch: false })]), {
+		allow: true,
+	});
+});
+
+test("CG009: unrendered placeholders the judge found are refused", () => {
+	const { code, reason } = denyJudged(request({ input: launch() }), [verdict({ unrenderedPlaceholders: ["undefined/packages/app"] })]);
+	assert.equal(code, "CG009");
+	assert.match(reason, /undefined\/packages\/app/);
+});
+
+test("CG012: class 3 implementation needs a justification, not a label", () => {
+	const route = "ROUTE: s1 | class 3 | openai-codex/gpt-5.6-sol:medium | hard";
+	const req = request({ input: launch({ model: "openai-codex/gpt-5.6-sol:medium", task: implementTask(route) }) });
+	assert.equal(denyJudged(req, [verdict({ classJustification: "label" })]).code, "CG012");
+	assert.deepEqual(judged(req, [verdict({ classJustification: "substantive" })]), { allow: true });
+});
+
+test("CG013: an ephemeral worktree is refused", () => {
+	assert.equal(denyJudged(request({ input: launch() }), [verdict({ worktree: "/tmp/scratch" })]).code, "CG013");
+});
+
+test("CG010: the writer cap counts open lanes plus the ones this call would open", () => {
+	const lanes = [
+		{ key: "s1", kind: "implement" as const, model: "m:high", startedAt: 1, state: "running" as const },
+		{ key: "s2", kind: "implement" as const, model: "m:high", startedAt: 1, state: "returned" as const },
+		{ key: "s3", kind: "implement" as const, model: "m:high", startedAt: 1, state: "running" as const },
+	];
+	const { code, reason } = denyJudged(request({ campaign: campaign({ lanes }), input: launch() }), [verdict()]);
+	assert.equal(code, "CG010");
+	assert.match(reason, /s2/);
+
+	const integrated = lanes.map((lane) => (lane.key === "s2" ? { ...lane, state: "integrated" as const } : lane));
+	assert.deepEqual(judged(request({ campaign: campaign({ lanes: integrated }), input: launch() }), [verdict()]), { allow: true });
+});
+
+test("CG010: read-only lanes do not consume writer capacity", () => {
+	const lanes = [
+		{ key: "s1", kind: "implement" as const, model: "m:high", startedAt: 1, state: "running" as const },
+		{ key: "s2", kind: "implement" as const, model: "m:high", startedAt: 1, state: "running" as const },
+		{ key: "s3", kind: "implement" as const, model: "m:high", startedAt: 1, state: "running" as const },
+	];
+	assert.deepEqual(
+		judged(request({ campaign: campaign({ lanes }), input: launch() }), [verdict({ kind: "investigate", expectedHead: null, stopsOnHeadMismatch: false })]),
+		{ allow: true },
+	);
+});
+
+test("a script may carry investigations, but never writers or reviewers", () => {
+	const header = (key: string) => `ROUTE: ${key} | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory`;
+	const script = `runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("a")}\`}, {key:'b', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("b")}\`}])`;
+	const req = request({ input: { workflowScript: script, async: true } });
+	const readOnly = verdict({ kind: "investigate", expectedHead: null, stopsOnHeadMismatch: false });
+
+	assert.deepEqual(judged(req, [readOnly, readOnly]), { allow: true });
+
+	const { code, reason } = denyJudged(req, [readOnly, verdict()]);
+	assert.equal(code, "CG010");
+	assert.match(reason, /one dispatch at a time/);
+
+	assert.equal(denyJudged(req, [readOnly, verdict({ kind: "review" })]).code, "CG006");
+});
+
+// ── campaign lifecycle and prompts ──────────────────────────────────────────────
 
 test("openReview refuses while slices remain or lanes are unintegrated", () => {
-	const midCampaign = openReview(campaign({ slicesDone: 3 }));
-	assert.equal(midCampaign.ok, false);
-
+	assert.equal(openReview(campaign({ slicesDone: 3 })).ok, false);
 	const unintegrated = openReview(
-		campaign({
-			slicesDone: 4,
-			lanes: [{ key: "s4", kind: "implement", model: "m:high", startedAt: 1, state: "returned" }],
-		}),
+		campaign({ slicesDone: 4, lanes: [{ key: "s4", kind: "implement", model: "m:high", startedAt: 1, state: "returned" }] }),
 	);
 	assert.equal(unintegrated.ok, false);
-	if (!unintegrated.ok) assert.match(unintegrated.error, /s4/);
-
 	assert.deepEqual(
-		openReview(
-			campaign({
-				slicesDone: 4,
-				lanes: [{ key: "s4", kind: "implement", model: "m:high", startedAt: 1, state: "integrated" }],
-			}),
-		),
+		openReview(campaign({ slicesDone: 4, lanes: [{ key: "s4", kind: "implement", model: "m:high", startedAt: 1, state: "integrated" }] })),
 		{ ok: true },
 	);
 });
@@ -760,14 +479,19 @@ test("laneSummary hides integrated lanes and reports the open ones", () => {
 	);
 });
 
-test("the injected contract carries the live campaign state and the enforced rules", () => {
-	const text = contractPrompt(campaign({ slicesDone: 2, lanes: [{ key: "s3", kind: "implement", model: "m:high", startedAt: 1, state: "running" }] }), true, 1_000);
+test("the injected contract carries the live campaign state, and nothing once closed", () => {
+	const text = contractPrompt(
+		campaign({ slicesDone: 2, lanes: [{ key: "s3", kind: "implement", model: "m:high", startedAt: 1, state: "running" }] }),
+		true,
+		1_000,
+	);
 	assert.match(text, /2 done of 4/);
 	assert.match(text, /s3 \(implement/);
 	assert.match(text, /ROUTE: <key> \| class <1\|2\|3>/);
 	assert.match(text, /Agents are in flight/);
 
 	assert.equal(contractPrompt(null, false, 1_000), "");
+	assert.equal(contractPrompt(campaign({ status: "closed" }), false, 1_000), "");
 	assert.match(contractPrompt(null, true, 1_000), /coordinator_campaign/);
 });
 

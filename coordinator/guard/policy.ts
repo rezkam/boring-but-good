@@ -1,10 +1,23 @@
 /**
  * Coordinator guard policy: harness-agnostic rules, pure functions only.
  *
- * Every rule here exists because a real campaign broke it while the skill text said
- * not to. Prose asks; this refuses. Each denial names the exact unblock action, so a
- * blocked call is one corrected retry away rather than a stall.
+ * Every rule here exists because a real campaign broke it while the skill text said not to.
+ * Prose asks; this refuses. Each denial names the exact unblock action, so a blocked call is
+ * one corrected retry away rather than a stall.
+ *
+ * Evaluation runs in two phases, and the split is the point:
+ *
+ * - `evaluateStructure` decides everything that is a fact about the call: is a model pinned,
+ *   does the class match the tier table, is there a budget key, is the lane cap full, is the
+ *   status block stale. No model call, no reading of prose.
+ * - `evaluateVerdicts` decides everything that depends on what a prompt *says*, using the
+ *   judge's structured answers as evidence. The decisions stay here; only the reading moves.
+ *
+ * Reading intent with regexes was tried first and failed: six review rounds were spent on it,
+ * and two of them broke on this guard's own vocabulary. See judge.ts.
  */
+
+import type { JudgedKind, PromptVerdict } from "./judge.ts";
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
@@ -17,14 +30,12 @@ export interface GuardConfig {
 	statusMaxAgeMs: number;
 	laneCap: number;
 	steerCap: number;
-	class3ReasonMinChars: number;
 }
 
 export const DEFAULT_CONFIG: GuardConfig = {
 	statusMaxAgeMs: 5 * 60_000,
 	laneCap: 3,
 	steerCap: 2,
-	class3ReasonMinChars: 30,
 };
 
 export interface Lane {
@@ -94,22 +105,6 @@ const MANAGEMENT_ACTIONS = new Set([
 
 /** Actions that hand a run another instruction, and so count as corrections of it. */
 const CORRECTION_ACTIONS = new Set(["steer", "resume"]);
-
-const KIND_BY_AGENT: Record<string, LaneKind> = {
-	worker: "implement",
-	implementer: "implement",
-	delegate: "implement",
-	coder: "implement",
-	reviewer: "review",
-	"review-agent": "review",
-	critic: "review",
-	scout: "investigate",
-	oracle: "investigate",
-	advisor: "investigate",
-	researcher: "investigate",
-	planner: "investigate",
-	"context-builder": "investigate",
-};
 
 const COORDINATOR_OWNED_AGENTS = new Set(["commit", "committer", "pr", "release"]);
 
@@ -288,53 +283,11 @@ export function readStatusBlock(text: string): { ok: boolean; missing: string[] 
 	return { ok: missing.length === 0, missing };
 }
 
-export function laneKindFor(agent: string | undefined, task: string): LaneKind {
-	const known = agent ? KIND_BY_AGENT[agent.toLowerCase()] : undefined;
-	// Writing a report is not mutating a repository, so "write your findings" stays read-only
-	// while "write the migration" does not.
-	// Classify the assignment, not the header's key and model: a slice named "port-map" is not
-	// a port, and a prohibition is not an assignment ("do not modify files" is read-only work).
-	const assignment = task
-		.replace(/(?:^|[`'"])[ \t>*-]*ROUTE:\s*[^|]*\|\s*class\s*[123]\s*\|[^|]*\|/i, " ")
-		.replace(/\b(do not|don't|never|no)\s+(modify|edit|change|create|add|write|delete|remove|rename|update|implement|commit)\b/gi, " ");
-	const writes =
-		/(implementer subagent|\b(implement|fix|repair|refactor|migrate|extract|compose|introduce|rename|delete|remove|update|create|edit|change|modify|wire|port)\b|\badd\b(?!\s+(a\s+)?(note|comment|finding|severity))|\bwrite\b(?!\s+(the\s+|your\s+)?(findings|report|notes|summary|result)))/i.test(
-			assignment,
-		);
-
-	// A review reads and reports; it never owns the tree. Detect that assignment directly,
-	// because a reviewer prompt is full of remediation words ("findings the author would fix")
-	// and a coordinator can always relabel the agent.
-	const route = parseRouteHeader(task);
-	const reviewKey = route ? /\b(review|accept|audit)/i.test(route.key) : false;
-	const reviewPhrase =
-		/(read-only review|independent review|acceptance review|whole-branch review|review of the|review the (change|diff|branch|commit)|re-?review|return every finding|audit the (diff|change|branch|commit)|for regressions|report (bugs|defects|regressions)|defect-first)/i.test(
-			task,
-		);
-	if (reviewKey || reviewPhrase) return "review";
-
-	// Agent names are transport, so the assignment decides. A read-only agent name carrying an
-	// implementation prompt is still a writer: it has write-capable tools and it escapes the
-	// lane cap, the HEAD check, and the class-3 justification if it is read as an investigation.
-	if (writes) return "implement";
-	if (known) return known;
-
-	const readOnly = /(read-only|reconnaissance|inventory of|do not modify|make no changes)/i.test(task);
-	return readOnly ? "investigate" : "implement";
-}
 
 function text(value: unknown): string {
 	return typeof value === "string" ? value : "";
 }
 
-function firstInstruction(task: string): string {
-	for (const line of task.split("\n")) {
-		const trimmed = line.trim();
-		if (!trimmed || /^[ \t>*-]*ROUTE:/i.test(trimmed)) continue;
-		return trimmed;
-	}
-	return "";
-}
 
 export function isManagementAction(input: Record<string, unknown>): boolean {
 	const action = text(input.action);
@@ -465,7 +418,7 @@ function readField(objectBody: string, field: string): string | undefined {
 }
 
 /** Model pin and declared class, checked the same way for a lone dispatch and for a child. */
-function checkRoute(route: RouteHeader, config: GuardConfig, kind: LaneKind): GuardDecision {
+function checkRoute(route: RouteHeader): GuardDecision {
 	const pin = parseModelPin(route.model);
 	if (!pin) return deny("CG004", `The routing header model ${route.model} is not pinned as provider/model:effort.`);
 	const actualClass = modelClass(pin.id, pin.effort);
@@ -486,12 +439,6 @@ function checkRoute(route: RouteHeader, config: GuardConfig, kind: LaneKind): Gu
 		return deny(
 			"CG004",
 			`Route ${route.key} declares class ${route.cls} but ${pin.id} at ${pin.effort} is class ${actualClass} in the tier table. Fix whichever is wrong: choosing a class is choosing a model, not a label.`,
-		);
-	}
-	if (kind === "implement" && route.cls === 3 && route.reason.length < config.class3ReasonMinChars) {
-		return deny(
-			"CG012",
-			`Class 3 implementation needs a written justification of at least ${config.class3ReasonMinChars} characters saying what makes the slice cross-layer or long-horizon; "${route.reason}" is a label. Escalate exactly one class only when the task is complex or the lower class cannot make progress.`,
 		);
 	}
 	return { allow: true };
@@ -516,7 +463,24 @@ function checkBudgets(input: Record<string, unknown>, script: string): GuardDeci
 	return { allow: true };
 }
 
-export function evaluate(request: GuardRequest): GuardDecision {
+/** One prompt the judge must read before this launch can be decided. */
+export interface JudgeTarget {
+	routeKey: string;
+	prompt: string;
+	agent?: string;
+	declaredClass: ImplementationClass;
+	model: string;
+}
+
+export type StructureDecision =
+	| { allow: false; code: string; reason: string }
+	| { allow: true; judge: JudgeTarget[] };
+
+/**
+ * Phase one: everything decidable from the call itself. Runs before any model call, so a
+ * malformed dispatch is refused without spending one.
+ */
+export function evaluateStructure(request: GuardRequest): StructureDecision {
 	const config = request.config ?? DEFAULT_CONFIG;
 	const { input, now } = request;
 	// A closed campaign is history, not a live one: enforcement returns to inert so ordinary
@@ -524,11 +488,12 @@ export function evaluate(request: GuardRequest): GuardDecision {
 	const campaign = request.campaign && request.campaign.status !== "closed" ? request.campaign : null;
 
 	if (request.tool === "bash") {
-		if (!campaign && !request.armed) return { allow: true };
-		return checkBash(text(input.command));
+		if (!campaign && !request.armed) return { allow: true, judge: [] };
+		const verdict = checkBash(text(input.command));
+		return verdict.allow ? { allow: true, judge: [] } : verdict;
 	}
 
-	if (request.tool !== "subagent") return { allow: true };
+	if (request.tool !== "subagent") return { allow: true, judge: [] };
 
 	const action = text(input.action);
 	if (isManagementAction(input)) {
@@ -542,7 +507,7 @@ export function evaluate(request: GuardRequest): GuardDecision {
 				);
 			}
 		}
-		return { allow: true };
+		return { allow: true, judge: [] };
 	}
 
 	if (action && (campaign || request.armed)) {
@@ -564,13 +529,13 @@ export function evaluate(request: GuardRequest): GuardDecision {
 		}
 	}
 
-	if (!isLaunch(input)) return { allow: true };
+	if (!isLaunch(input)) return { allow: true, judge: [] };
 
 	if (!campaign) {
-		if (!request.armed) return { allow: true };
+		if (!request.armed) return { allow: true, judge: [] };
 		return deny(
 			"CG001",
-			"The coordinator skill is loaded but no campaign is registered, so no routing, lane, or status rule can be enforced. Call coordinator_campaign with action \"start\" (slug, worktree, plan path, slice count, authorization scope) before the first dispatch.",
+			'The coordinator skill is loaded but no campaign is registered, so no routing, lane, or status rule can be enforced. Call coordinator_campaign with action "start" (slug, worktree, plan path, slice count, authorization scope) before the first dispatch.',
 		);
 	}
 
@@ -578,8 +543,27 @@ export function evaluate(request: GuardRequest): GuardDecision {
 	const budgets = checkBudgets(input, script);
 	if (!budgets.allow) return budgets;
 
+	const agent = typeof input.agent === "string" ? input.agent : undefined;
+	if (agent && COORDINATOR_OWNED_AGENTS.has(agent.toLowerCase())) {
+		return deny(
+			"CG007",
+			`Committing, pushing, PR state, and rebasing are coordinator-owned and are never dispatched. Run git yourself, then use the pr-ready skill. Dispatching agent "${agent}" hands a subagent write access to your branch to save one tool call.`,
+		);
+	}
+
+	if (input.async === undefined) {
+		return deny(
+			"CG017",
+			"State async explicitly on the launch. Whether a dispatch runs in the foreground depends on configuration and per-agent defaults, and a lane whose mode is guessed is either closed while its agent is still working or left open forever. Use async: true for a background lane you will close with coordinator_lane, or async: false to wait for it here.",
+		);
+	}
+
+	// One target per child for a script, one for a plain dispatch. Each carries its own prompt,
+	// because each child receives its own prompt.
+	const targets: JudgeTarget[] = [];
+	const seenKeys = new Set<string>();
+
 	if (script) {
-		const seenKeys = new Set<string>();
 		const { children, agentKeys } = parseScriptChildren(script);
 		if (children.length === 0 || children.length !== agentKeys) {
 			return deny(
@@ -607,86 +591,13 @@ export function evaluate(request: GuardRequest): GuardDecision {
 					`Child "${child.agent}" declares ${route.model} in its routing header but launches with ${child.model}. Each child's header must describe that child's own launch.`,
 				);
 			}
-			if (seenKeys.has(route.key)) {
-				return deny("CG010", `Two children of this script share the route key ${route.key}. Each lane needs its own key, or its result cannot be recorded against the right one.`);
-			}
-			seenKeys.add(route.key);
-			const openLane = campaign.lanes.find((lane) => lane.key === route.key && lane.state !== "integrated");
-			if (openLane) {
-				return deny("CG010", `Lane ${route.key} is already open (${openLane.state}), so this child would collide with it. Close it with coordinator_lane first, or give this child its own key.`);
-			}
-			const kind = laneKindFor(child.agent, child.task);
-			if (kind === "implement") {
-				return deny(
-					"CG010",
-					"A workflow script carries writers. Writers go out one dispatch at a time so each becomes a tracked lane you integrate before the next: a script hides them behind a single call, which is how five of them once opened in one instant and none landed for hours. Scripts are for independent read-only investigations.",
-				);
-			}
-			if (kind === "review") {
-				return deny(
-					"CG006",
-					"A workflow script carries a reviewer. Review is one dispatch, once, at the end, so it is never a child of a script.",
-				);
-			}
-			const routeVerdict = checkRoute(route, config, kind);
-			if (!routeVerdict.allow) return routeVerdict;
-			const childLint = lintPrompt(child.task, kind, campaign);
-			if (!childLint.allow) return childLint;
+			const keyCheck = checkKey(route.key, seenKeys, campaign);
+			if (!keyCheck.allow) return keyCheck;
+			const routeCheck = checkRoute(route);
+			if (!routeCheck.allow) return routeCheck;
+			targets.push({ routeKey: route.key, prompt: child.task, agent: child.agent, declaredClass: route.cls, model: child.model });
 		}
-	}
-
-	const task = text(input.task) || script;
-	const agent = typeof input.agent === "string" ? input.agent : undefined;
-
-	if (agent && COORDINATOR_OWNED_AGENTS.has(agent.toLowerCase())) {
-		return deny(
-			"CG007",
-			`Committing, pushing, PR state, and rebasing are coordinator-owned and are never dispatched. Run git yourself, then use the pr-ready skill. Dispatching agent "${agent}" hands a subagent write access to your branch to save one tool call.`,
-		);
-	}
-	const gitWrite = /\b(commit|commits|committing|stage|staged|staging|rebase|cherry-pick|push)\b/i;
-	const realWork =
-		/\b(implement\w*|fix|repair|add|write|update|create|introduce|rename|delete|remove|wire|refactor|migrate|port|extract|design|review|audit|investigate|inventory|analy[sz]e|research|reconnaissance|compose)\b/i;
-	// The prompt is required to forbid pushing, so that mandatory sentence must not itself read
-	// as an instruction to push.
-	const withoutBoundaries = task.replace(/\b(never|do not|don't|no)\s+(push|run\s+gh|open\s+(a\s+)?pr)\b/gi, " ");
-	if (gitWrite.test(withoutBoundaries) && !realWork.test(task)) {
-		return deny(
-			"CG007",
-			"This dispatch is git plumbing with no implementation in it. Committing, staging, rebasing, pushing, and PR state belong to the coordinator alone: run git yourself. Handing a subagent write access to your branch to save one tool call is a bad trade every time.",
-		);
-	}
-	if (/^[ \t>*-]*(commit|stage|push|rebase|open (a |the )?pr)\b/i.test(firstInstruction(task))) {
-		return deny(
-			"CG007",
-			"The assignment line of this prompt begins with a git action. If a dispatch prompt you are writing begins with \"commit\", stop and run git yourself.",
-		);
-	}
-	// Checked apart from each other: every compliant prompt says "never push", and that promise
-	// must not read as permission for the gh commands sitting beside it.
-	if (/\bgit push\b/i.test(task) && !/\b(never|do not|don't|no)\s+push/i.test(task)) {
-		return deny(
-			"CG007",
-			"This prompt tells a subagent to push. Pushing belongs to the coordinator alone. Remove it, and state that the agent commits locally and never pushes.",
-		);
-	}
-	// Rebasing and cherry-picking move the branch, so they are the coordinator's whatever else
-	// the prompt asks for. The local commit is the one git step an implementer owns.
-	const integration = /\b(rebase|rebasing|cherry-pick|cherry-picking)\b/i.exec(withoutBoundaries.replace(/\b(never|do not|don't|no)\s+(rebase|cherry-pick)\w*\b/gi, " "));
-	if (integration) {
-		return deny(
-			"CG007",
-			`This prompt asks a subagent to ${integration[0]}. Rebasing, cherry-picking, and every other move of the branch belong to the coordinator, even alongside real implementation work. Let the agent commit locally and do the integration yourself.`,
-		);
-	}
-	if (/\bgh\s+(pr|release|api)\b/i.test(task) && !/\b(never|do not|don't|no)\s+(run\s+)?gh\b/i.test(task)) {
-		return deny(
-			"CG007",
-			"This prompt tells a subagent to change PR or release state through gh. That belongs to the coordinator alone, and a promise not to push does not cover it. Remove the gh instruction and state that the agent never runs gh.",
-		);
-	}
-
-	if (!script) {
+	} else {
 		const pin = parseModelPin(input.model);
 		if (!pin) {
 			const seen = typeof input.model === "string" && input.model ? `"${input.model}"` : "nothing";
@@ -695,76 +606,130 @@ export function evaluate(request: GuardRequest): GuardDecision {
 				`Pin the model as provider/model:effort, for example openai-codex/gpt-5.6-luna:high. This launch carries ${seen}. A bare id inherits the role's own default effort, and no model key at all inherits the session model. The thinking field does not count as a pin.`,
 			);
 		}
-	}
-
-	const route = parseRouteHeader(task);
-	if (!route) {
-		return deny(
-			"CG003",
-			"Start the prompt with a routing header, then the guard records it as the routing-table row for this dispatch:\nROUTE: <key> | class <1|2|3> | <provider/model:effort> | <why this class>\nRouting is planned before and proved after. A dispatch with no declared row is an undecided one.",
-		);
-	}
-
-	const pinnedModel = script ? route.model : text(input.model);
-	if (!script && route.model !== pinnedModel) {
-		return deny(
-			"CG004",
-			`The routing header declares ${route.model} but the launch carries ${pinnedModel}. The table and the call must agree, or the table proves nothing.`,
-		);
-	}
-
-	const kind = laneKindFor(agent, task);
-	const routeVerdict = checkRoute(route, config, kind);
-	if (!routeVerdict.allow) return routeVerdict;
-
-	if (kind === "review") {
-		if (campaign.status !== "review") {
+		const task = text(input.task);
+		const route = parseRouteHeader(task);
+		if (!route) {
 			return deny(
-				"CG006",
-				`Review runs once, at the end, after every slice is done: ${campaign.slicesDone} of ${campaign.slicesTotal} are. No code review per slice. Verify the slice against its acceptance criteria yourself and move on. When the last slice lands, call coordinator_campaign with action "open-review".`,
+				"CG003",
+				"Start the prompt with a routing header, then the guard records it as the routing-table row for this dispatch:\nROUTE: <key> | class <1|2|3> | <provider/model:effort> | <why this class>\nRouting is planned before and proved after. A dispatch with no declared row is an undecided one.",
 			);
 		}
-		const runningReview = campaign.lanes.find((lane) => lane.kind === "review" && lane.state === "running");
-		if (runningReview) {
+		if (route.model !== text(input.model)) {
 			return deny(
-				"CG006",
-				`Reviewer "${runningReview.key}" is still running. One reviewer at a time: parallel reviewers produce overlapping findings and a reconciliation you cannot audit.`,
+				"CG004",
+				`The routing header declares ${route.model} but the launch carries ${text(input.model)}. The table and the call must agree, or the table proves nothing.`,
 			);
 		}
+		const keyCheck = checkKey(route.key, seenKeys, campaign);
+		if (!keyCheck.allow) return keyCheck;
+		const routeCheck = checkRoute(route);
+		if (!routeCheck.allow) return routeCheck;
+		targets.push({ routeKey: route.key, prompt: task, agent, declaredClass: route.cls, model: text(input.model) });
 	}
 
 	if (campaign.lastStatusAt !== null && now - campaign.lastStatusAt > config.statusMaxAgeMs) {
 		const minutes = Math.floor((now - campaign.lastStatusAt) / 60_000);
 		return deny(
 			"CG008",
-			`The last status block was ${minutes} minutes ago. Print the status block, then retry this launch in the same turn. Required fields: ${STATUS_FIELDS.join(", ")}, plus WORKTREE, PARKED, and NEEDS YOU.`,
+			`The last status block was ${minutes} minutes ago. Print the status block, then retry this launch in the same turn. Required fields: ${STATUS_FIELDS.join(", ")}.`,
 		);
 	}
 
-	if (!script) {
-		// Script children were each linted against their own prompt above.
-		const lint = lintPrompt(task, kind, campaign);
-		if (!lint.allow) return lint;
-	}
+	return { allow: true, judge: targets };
+}
 
-	if (input.async === undefined) {
-		return deny(
-			"CG017",
-			"State async explicitly on the launch. Whether a dispatch runs in the foreground depends on configuration and per-agent defaults, and a lane whose mode is guessed is either closed while its agent is still working or left open forever. Use async: true for a background lane you will close with coordinator_lane, or async: false to wait for it here.",
-		);
+function checkKey(key: string, seen: Set<string>, campaign: Campaign): GuardDecision {
+	if (seen.has(key)) {
+		return deny("CG010", `Two children of this script share the route key ${key}. Each lane needs its own key, or its result cannot be recorded against the right one.`);
 	}
-
-	const reused = campaign.lanes.find((lane) => lane.key === route.key && lane.state !== "integrated");
-	if (reused) {
+	seen.add(key);
+	const open = campaign.lanes.find((lane) => lane.key === key && lane.state !== "integrated");
+	if (open) {
 		return deny(
 			"CG010",
-			`Lane ${route.key} is already open (${reused.state}). Reusing the key would drop the first attempt from the accounting, so its partial work would stop holding capacity and stop blocking review. Integrate it with coordinator_lane, or mark it dead if the run failed, then dispatch again.`,
+			`Lane ${key} is already open (${open.state}). Reusing the key would drop the first attempt from the accounting, so its partial work would stop holding capacity and stop blocking review. Integrate it with coordinator_lane, or mark it dead if the run failed, then dispatch again.`,
 		);
 	}
+	return { allow: true };
+}
 
-	if (kind === "implement") {
+/**
+ * Phase two: the decisions that depend on what the prompt says. The judge supplied the
+ * reading; the rules are still here, and still deterministic.
+ */
+export function evaluateVerdicts(
+	request: GuardRequest,
+	judged: Array<{ target: JudgeTarget; verdict: PromptVerdict }>,
+): GuardDecision {
+	const config = request.config ?? DEFAULT_CONFIG;
+	const campaign = request.campaign && request.campaign.status !== "closed" ? request.campaign : null;
+	if (!campaign) return { allow: true };
+
+	const isScript = judged.length > 1 || text(request.input.workflowScript) !== "";
+	let newWriters = 0;
+
+	for (const { target, verdict } of judged) {
+		const { kind } = verdict;
+
+		if (isScript && kind === "implement") {
+			return deny(
+				"CG010",
+				`Child "${target.agent ?? target.routeKey}" is writer work. Writers go out one dispatch at a time so each becomes a tracked lane you integrate before the next: a script hides them behind a single call, which is how five of them once opened in one instant and none landed for hours. Scripts are for independent read-only investigations.`,
+			);
+		}
+		if (isScript && kind === "review") {
+			return deny(
+				"CG006",
+				`Child "${target.agent ?? target.routeKey}" is a review. Review is one dispatch, once, at the end, so it is never a child of a script.`,
+			);
+		}
+
+		if (kind === "review") {
+			if (campaign.status !== "review") {
+				return deny(
+					"CG006",
+					`This dispatch reads as a review, and review runs once, at the end, after every slice is done: ${campaign.slicesDone} of ${campaign.slicesTotal} are. No code review per slice, whatever the prompt is labelled. Verify the slice against its acceptance criteria yourself and move on. When the last slice lands, call coordinator_campaign with action "open-review".`,
+				);
+			}
+			const running = campaign.lanes.find((lane) => lane.kind === "review" && lane.state === "running");
+			if (running) {
+				return deny(
+					"CG006",
+					`Reviewer "${running.key}" is still running. One reviewer at a time: parallel reviewers produce overlapping findings and a reconciliation you cannot audit.`,
+				);
+			}
+		}
+
+		if (kind === "implement" && target.declaredClass === 3 && verdict.classJustification !== "substantive") {
+			return deny(
+				"CG012",
+				`Class 3 implementation needs a written justification naming what makes the slice cross-layer or long-horizon. The reason on route ${target.routeKey} reads as ${verdict.classJustification === "label" ? "a label rather than a reason" : "no reason at all"}. Escalate exactly one class only when the task is complex or the lower class cannot make progress.`,
+			);
+		}
+
+		if (verdict.coordinatorGitWork !== "none") {
+			return deny(
+				"CG007",
+				`This prompt asks the subagent to ${verdict.coordinatorGitWork === "pr" ? "change pull request state" : verdict.coordinatorGitWork}. Committing locally is the agent's job; moving the branch is yours, even alongside real implementation work. Remove it and do that step yourself.`,
+			);
+		}
+
+		if (verdict.unrenderedPlaceholders.length > 0) {
+			return deny(
+				"CG009",
+				`The rendered prompt still contains ${verdict.unrenderedPlaceholders.map((entry) => `"${entry}"`).join(", ")}. One unset interpolation once shipped "cd undefined/<pkg>" to every agent in a fan-out under a header telling them the path was verified. Render every placeholder before launching.`,
+			);
+		}
+
+		const lint = checkBoundaries(verdict, kind, campaign);
+		if (!lint.allow) return lint;
+
+		if (kind === "implement") newWriters += 1;
+	}
+
+	if (newWriters > 0) {
 		const open = campaign.lanes.filter((lane) => lane.kind === "implement" && lane.state !== "integrated");
-		if (open.length >= config.laneCap) {
+		if (open.length + newWriters > config.laneCap) {
 			const awaiting = open.filter((lane) => lane.state === "returned").map((lane) => lane.key);
 			return deny(
 				"CG010",
@@ -780,72 +745,46 @@ export function evaluate(request: GuardRequest): GuardDecision {
 	return { allow: true };
 }
 
-function lintPrompt(task: string, kind: LaneKind, campaign: Campaign): GuardDecision {
-	// An unset interpolation lands in a value position or inside a path ("cd undefined/<pkg>",
-	// "worktree: undefined"), which is what to catch. The same words in prose ("fix null
-	// handling") are ordinary domain terms and must not fail a dispatch.
-	const placeholders = [
-		/\$\{[^}]*\}/,
-		/\{\{[^}]*\}\}/,
-		/\[[A-Z][A-Z _-]{3,}\]/,
-		/(^|[\s"'`(])(undefined|null|NaN)\//,
-		/\/(undefined|null|NaN)([\s/,.)"'`]|$)/,
-		/[:=]\s*(undefined|null|NaN)([\s,.)"'`]|$)/,
-	];
-	for (const pattern of placeholders) {
-		const found = pattern.exec(task);
-		if (found) {
-			return deny(
-				"CG009",
-				`The rendered prompt still contains "${found[0].trim()}". One unset interpolation once shipped "cd undefined/<pkg>" to every agent in a fan-out under a header telling them the path was verified. Render every placeholder before launching.`,
-			);
-		}
-	}
-
-	const paths = task.match(/(^|\s)(\/[\w./-]+)/g)?.map((match) => match.trim()) ?? [];
-	const ephemeral = paths.find((path) => /^(\/tmp|\/private\/var\/folders|\/var\/folders)/.test(path));
-	if (ephemeral) {
-		return deny(
-			"CG013",
-			`${ephemeral} is an ephemeral path. The worktree, the plan, the handoff doc, and the notes all live under ~/.agents/worktrees or the repo, never /tmp or $TMPDIR.`,
-		);
-	}
-
-	// A lane usually runs in its own worktree beside the campaign's, so accept a sibling, but
-	// not an arbitrary deep path: /usr/bin/env is not a statement of where the work happens.
-	const worktreeParent = campaign.worktree.slice(0, campaign.worktree.lastIndexOf("/") + 1);
-	const hasWorktree = paths.some((path) => path === campaign.worktree || (worktreeParent.length > 1 && path.startsWith(worktreeParent)));
-	if (!hasWorktree) {
+/** The boundaries every dispatched prompt has to carry, read out of the verdict. */
+function checkBoundaries(verdict: PromptVerdict, kind: JudgedKind, campaign: Campaign): GuardDecision {
+	const worktree = verdict.worktree;
+	if (!worktree) {
 		return deny(
 			"CG009",
 			`State the full resolved worktree path verbatim, and make it the campaign worktree ${campaign.worktree} or a lane worktree beside it. An agent spending turns rediscovering the environment is a dispatch defect, and an agent pointed at an unrelated tree is worse.`,
 		);
 	}
-
-	if (kind !== "investigate") {
-		// The sha has to be presented as the expected HEAD, not merely appear somewhere: a digest
-		// quoted in passing is not a preflight.
-		const declaresHead = /\bHEAD\b[^\n]{0,40}?\b(?=[0-9a-f]{7,40}\b)[0-9a-f]*[a-f][0-9a-f]*\b/i.test(task);
-		if (!declaresHead) {
-			return deny(
-				"CG009",
-				"Name the exact expected HEAD sha, as \"at exact HEAD <sha>\". Without it, a returned diff cannot be attributed to this dispatch.",
-			);
-		}
-		if (kind === "implement" && !/\bstop\b/i.test(task)) {
-			return deny(
-				"CG009",
-				"Tell the agent to stop and report if HEAD differs from the expected sha. A preflight with no instruction for the mismatch case is a sha the agent is free to ignore.",
-			);
-		}
+	if (/^(\/tmp|\/private\/var\/folders|\/var\/folders)/.test(worktree)) {
+		return deny(
+			"CG013",
+			`${worktree} is an ephemeral path. The worktree, the plan, the handoff doc, and the notes all live under ~/.agents/worktrees or the repo, never /tmp or $TMPDIR.`,
+		);
+	}
+	const parent = campaign.worktree.slice(0, campaign.worktree.lastIndexOf("/") + 1);
+	if (worktree !== campaign.worktree && !(parent.length > 1 && worktree.startsWith(parent))) {
+		return deny(
+			"CG009",
+			`This prompt points the agent at ${worktree}, which is neither the campaign worktree ${campaign.worktree} nor a lane worktree beside it.`,
+		);
 	}
 
-	if (!/\b(never|do not|don't|no)\s+push\b/i.test(task)) {
+	if (kind !== "investigate" && !verdict.expectedHead) {
+		return deny(
+			"CG009",
+			'Name the exact expected HEAD sha, as "at exact HEAD <sha>". Without it, a returned diff cannot be attributed to this dispatch.',
+		);
+	}
+	if (kind === "implement" && !verdict.stopsOnHeadMismatch) {
+		return deny(
+			"CG009",
+			"Tell the agent to stop and report if HEAD differs from the expected sha. A preflight with no instruction for the mismatch case is a sha the agent is free to ignore.",
+		);
+	}
+	if (!verdict.forbidsPush) {
 		return deny(
 			"CG009",
 			"The prompt must say the agent commits locally and never pushes, never runs gh, and never opens a PR. Pushing and PR state belong to the coordinator alone.",
 		);
 	}
-
 	return { allow: true };
 }

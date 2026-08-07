@@ -242,7 +242,7 @@ else
     if [ "$NODE_OK" != "1" ]; then
         skip "guard policy tests (node $(node -p 'process.versions.node') predates type stripping)"
     else
-        GUARD_OUT=$(cd "${COORD_DIR}/guard" && node --test policy.test.ts 2>&1)
+        GUARD_OUT=$(cd "${COORD_DIR}/guard" && node --test policy.test.ts judge.test.ts 2>&1)
         GUARD_RC=$?
         GUARD_PASS=$(printf '%s' "$GUARD_OUT" | grep -oE '^. pass [0-9]+' | grep -oE '[0-9]+' | tail -1)
         if [ "$GUARD_RC" -eq 0 ]; then

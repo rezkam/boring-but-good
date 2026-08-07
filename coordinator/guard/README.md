@@ -8,10 +8,40 @@ block went silent for the two hours of heaviest fan-out. Nothing refused any of 
 This turns the mechanical half of the skill into refusals at the tool boundary.
 
 - `policy.ts`: the rules, pure and harness-agnostic. No IO, no pi imports.
-- `policy.test.ts`: `node --test policy.test.ts`. Node 24 runs the TypeScript directly.
-- `pi-extension.ts`: the pi wiring. Blocks tool calls, restates the contract every turn,
-  and keeps the session from going quiet while agents are in flight.
+- `judge.ts`: the prompt, the verdict contract, and the strict parser for the model that
+  reads dispatch prompts.
+- `*.test.ts`: `node --test policy.test.ts judge.test.ts`. Node 24 runs the TypeScript directly.
+- `pi-extension.ts`: the pi wiring. Blocks tool calls, calls the judge, restates the
+  contract every turn, and keeps the session from going quiet while agents are in flight.
 - `index.ts`: the entry point pi discovers.
+
+## Two phases, and why
+
+Enforcement splits by what kind of question is being asked.
+
+**Structure** is a fact about the call: is a model pinned, does the declared class match the
+tier table, is there a budget key, is the lane cap full, is the status block stale. These are
+decided deterministically, before any model call, so a malformed dispatch costs nothing.
+
+**Meaning** is what a prompt says: is this a review or an implementation, does it point at
+the right worktree, does it tell the agent to rebase, is the class-3 reason a justification
+or a label. A small model reads the prompt and answers those questions in a fixed JSON
+shape; `policy.ts` then decides. The verdict is evidence, not a ruling.
+
+That second half was regexes first, and it did not work. Six review rounds went into
+patching them, and two rounds broke on this guard's own vocabulary: a slice named
+`port-map` read as an instruction to port something, and the mandatory sentence "never push"
+read as an instruction to push. Prose does not have a grammar you can match; a model reads
+it, a regex counts words.
+
+The judge sees only the dispatch prompt, delimited and labelled as data. It cannot allow
+anything: it answers questions, and every decision stays in `policy.ts` where it can be
+tested. Verdicts are cached per prompt, so a corrected retry costs one call, not two.
+
+**The posture is fail closed.** A judge that cannot be resolved, errors, or answers with
+something the parser cannot read whole refuses the dispatch (CG018), because an unread
+prompt is an unchecked one. `/campaign judge off` turns it off; that is the user's decision,
+not the agent's, and the structural rules keep running without it.
 
 ## Install on pi
 
@@ -48,6 +78,8 @@ Commands:
 - `/campaign arm` and `/campaign disarm` force it on or off
 - `/campaign close` ends the campaign and disarms, returning to inert
 - `/campaign resume` re-activates a paused or closed campaign
+- `/campaign judge` shows the judge model; `/campaign judge <provider/model:effort>` changes
+  it; `/campaign judge off` disables prompt rules entirely
 
 Closing is the way out: a closed campaign is treated as no campaign, so ordinary dispatches
 work again immediately.
@@ -71,6 +103,7 @@ work again immediately.
 | CG013 | An ephemeral `/tmp` or `$TMPDIR` worktree path | |
 | CG014 | Spawning an agent through bash (`codex exec`, `claude -p`, `pi -p`) | Otherwise the guard only guards the polite path |
 | CG016 | An action the guard cannot classify, and work deferred to a scheduler | A read-only action belongs in the guard's management list, named there rather than assumed; a scheduled run starts with no tool call, so no rule can see it |
+| CG018 | A dispatch the judge could not read, including an unavailable judge model | An unread prompt is an unchecked one, so it fails rather than passing by default |
 | CG017 | A launch that does not state `async` | Whether a run is foreground depends on configuration and per-agent defaults, so a guessed mode either closes a lane while its agent works or leaves it open forever |
 | CG015 | `git reset --hard`, `git stash`, `git restore`, `git checkout -- <path>`, force push | A campaign created a backup branch, ran `git reset --hard`, and destroyed a pending dependency override |
 
@@ -79,14 +112,19 @@ away rather than a stall.
 
 ## What it cannot do
 
-Judgment stays with the coordinator. The guard checks that a class was declared and that
-the declared class matches the model at the effort it was pinned at; it cannot tell whether
-the slice was really class 2 work. It enforces the shell, not the thinking.
+Judgment stays with the coordinator. The guard checks that a class was declared and that the
+declared class matches the model at the effort it was pinned at; it cannot tell whether the
+slice was really class 2 work. It enforces the shell, not the thinking.
+
+The judge is a model, so it can be wrong. It is asked narrow, factual questions about one
+delimited prompt, its answers are parsed strictly, and it can only ever supply evidence for
+a rule that lives in `policy.ts`. A wrong verdict blocks a dispatch or lets a badly-shaped
+one through; it cannot invent a new rule or lift an existing one.
 
 Workflow scripts are read as text, not parsed as JavaScript. Children must therefore be
 written as literal `agent`, `model`, and `task` fields; shorthand or variables are refused
-rather than waved through, because a child whose model cannot be read is a child whose
-model was never pinned.
+rather than waved through, because a child whose model cannot be read is a child whose model
+was never pinned.
 
 No harness can force text out of a running agent. Status cadence is therefore enforced
 three ways: launches fail while the block is stale, the contract is restated in the system
