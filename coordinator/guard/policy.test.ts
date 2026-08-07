@@ -38,7 +38,7 @@ function campaign(overrides: Partial<Campaign> = {}): Campaign {
 function implementTask(routeLine: string): string {
 	return [
 		routeLine,
-		`Implement slice S1 in ${WORKTREE} at exact HEAD ${HEAD}.`,
+		`Implement slice S1 in ${WORKTREE} at exact HEAD ${HEAD}. Stop and report if HEAD differs.`,
 		"Commit locally on your branch and never push, never run gh, never open a PR.",
 	].join("\n");
 }
@@ -125,7 +125,7 @@ test("every child of a workflow script needs its own routing header", () => {
 	const oneHeader = `const r = await runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${investigation("a")}\`}, {key:'b', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: 'read-only inventory, never push'}]); return r`;
 	const { code, reason } = deny(request({ input: { workflowScript: oneHeader } }));
 	assert.equal(code, "CG003");
-	assert.match(reason, /2 agent/);
+	assert.match(reason, /no ROUTE header/);
 });
 
 test("a workflow child's routing header is class-checked like any other", () => {
@@ -152,14 +152,14 @@ test("CG009: the prompt must name the campaign's worktree or one beside it", () 
 	const sibling = "/Users/dev/.agents/worktrees/demo-lane-a";
 	allow(
 		request({
-			input: { agent: "worker", model, task: `${GOOD_ROUTE}\nImplement slice S1 in ${sibling} at exact HEAD ${HEAD}. Never push.` },
+			input: { agent: "worker", model, task: `${GOOD_ROUTE}\nImplement slice S1 in ${sibling} at exact HEAD ${HEAD}. Stop and report if it differs. Never push.` },
 		}),
 	);
 
 	const elsewhere = "/Users/dev/some-other-checkout";
 	const { code, reason } = deny(
 		request({
-			input: { agent: "worker", model, task: `${GOOD_ROUTE}\nImplement slice S1 in ${elsewhere} at exact HEAD ${HEAD}. Never push.` },
+			input: { agent: "worker", model, task: `${GOOD_ROUTE}\nImplement slice S1 in ${elsewhere} at exact HEAD ${HEAD}. Stop and report if it differs. Never push.` },
 		}),
 	);
 	assert.equal(code, "CG009");
@@ -309,9 +309,13 @@ test("CG005: budgets hidden inside a workflow script are refused too", () => {
 	assert.equal(deny(request({ input: { workflowScript: script } })).code, "CG005");
 });
 
-test("CG002: every agent in a workflow script needs its own pinned model", () => {
-	const script = `const r = await runs.all([{key:'a', agent:'worker', model:'openai-codex/gpt-5.6-luna:high', task: 'x'}, {key:'b', agent:'worker', task: 'y'}]); return r`;
-	assert.equal(deny(request({ input: { workflowScript: script } })).code, "CG002");
+test("CG002: every child of a workflow script needs its own pinned model", () => {
+	const header = (key: string) =>
+		`ROUTE: ${key} | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory. Read-only inventory in ${WORKTREE}. Never push.`;
+	const script = `const r = await runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("a")}\`}, {key:'b', agent:'scout', task: \`${header("b")}\`}]); return r`;
+	const { code, reason } = deny(request({ input: { workflowScript: script } }));
+	assert.equal(code, "CG002");
+	assert.match(reason, /no literal model/);
 });
 
 test("CG006: reviewers cannot be dispatched before the review phase is open", () => {
@@ -553,14 +557,14 @@ test("CG007: a never-push promise does not license gh pr commands", () => {
 test("CG009: prose about null or undefined values is not a placeholder", () => {
 	const task = [
 		GOOD_ROUTE,
-		`Implement slice S1 in ${WORKTREE} at exact HEAD ${HEAD}: fix null handling so an undefined id is rejected.`,
+		`Implement slice S1 in ${WORKTREE} at exact HEAD ${HEAD}, stop if it differs: fix null handling so an undefined id is rejected.`,
 		"Never push.",
 	].join("\n");
 	allow(request({ input: { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task } }));
 
 	const unrendered = [
 		GOOD_ROUTE,
-		`Implement slice S1 in undefined/packages/app at exact HEAD ${HEAD}.`,
+		`Implement slice S1 in undefined/packages/app at exact HEAD ${HEAD}. Stop if it differs.`,
 		"Never push.",
 	].join("\n");
 	assert.equal(
@@ -590,7 +594,7 @@ test("a workflow child's declared model must be the model it launches with", () 
 	const script = `const r = await runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("a", "openai-codex/gpt-5.6-luna:high")}\`}, {key:'b', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("b", "claude-bridge/claude-sonnet-5:medium")}\`}]); return r`;
 	const { code, reason } = deny(request({ input: { workflowScript: script } }));
 	assert.equal(code, "CG004");
-	assert.match(reason, /declared/i);
+	assert.match(reason, /declares/i);
 });
 
 test("CG015: a force refspec is a force push", () => {
