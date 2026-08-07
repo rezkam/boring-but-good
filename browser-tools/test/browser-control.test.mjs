@@ -562,10 +562,16 @@ test('managedChromeCommandSafety refuses main Chrome and accepts only exact mana
   };
   const mainChromeCommand = `${CHROME_BIN} --flag-switches-begin`;
   const managedCommand = `${CHROME_BIN} --remote-debugging-port=9222 --user-data-dir=${PROFILE_DST} --pi-browser-tools-managed=token-1`;
+  const previousOverrideCommand = `/opt/browser-v1 --remote-debugging-port=9222 --user-data-dir=${PROFILE_DST} --pi-browser-tools-managed=token-1`;
 
   assert.equal(managedChromeCommandSafety({ pid: 123, port: 9222, state, command: mainChromeCommand }).ok, false);
   assert.equal(managedChromeCommandSafety({ pid: 123, port: 9222, state, command: mainChromeCommand }).reason, 'debug-port-mismatch');
   assert.equal(managedChromeCommandSafety({ pid: 123, port: 9222, state, command: managedCommand }).ok, true);
+  assert.equal(
+    managedChromeCommandSafety({ pid: 123, port: 9222, state, command: previousOverrideCommand }).ok,
+    true,
+    'managed lifecycle identity must survive a configured binary change',
+  );
 });
 
 test('startChrome fails invalid Chrome binary without leaving lifecycle files or lock', async () => {

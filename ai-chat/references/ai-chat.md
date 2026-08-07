@@ -11,7 +11,7 @@ Normal AI Chat commands do not require a manual Browser Tools start.
 1. If a provider needs browser access, AI Chat reads its private browser state file or `AI_CHAT_BROWSER_STATE_FILE` when set.
 2. If the saved browser is healthy, Browser Tools managed, and owned by `ai-chat`, AI Chat reconnects with the saved owner token.
 3. If no usable owned browser exists, AI Chat starts Browser Tools with owner id `ai-chat`, task profile `ai-chat`, fallback Chrome profile `Default` when no task profile is configured, and auto port allocation unless `--port` is explicit.
-4. After a successful request, AI Chat disconnects from CDP but leaves Chrome running for reuse.
+4. After a Gemini request or Gemini model-listing command, AI Chat disconnects from CDP and stops the owned browser with its matching owner token, including on failure. Other providers disconnect from CDP but leave Chrome running for reuse.
 5. Explicit cleanup must use Browser Tools stop with the matching owner token. Use `--clean` to remove the copied profile when auth state is stale and a fresh sync is needed.
 
 AI Chat refuses to attach to unmanaged Chrome, another owner, missing owner token, wrong owner token, and a live owned browser whose debug port cannot be reached. Stale private state where the process is gone is removed and replaced by a new owned browser.
@@ -67,6 +67,9 @@ scripts/ai-chat.mjs --provider perplexity --prompt "Analyze this file" --file ./
 | `--thinking` | Enable thinking mode where supported by a UI adapter |
 | `--out <file>` | Save response to file. Sidecars are written as `<out>.meta.json` and `<out>.raw.txt` when available |
 | `--port <n>` | Preferred Chrome debug port, default `9222`. Without an explicit port, Browser Tools may auto-allocate another port |
+| `--headless` | Launch the owned Browser Tools Chrome without a visible window |
+| `--browser-profile <name>` | Explicit source Chrome profile for a new owned browser, overriding the configured task profile |
+| `--include-google` | Retain Google identity in the managed profile copy. Use only for intentional Google workflows because it restores source-session logout risk |
 | `--timeout <seconds>` | Max wait, default `300`. Perplexity deep research uses at least `3600` unless this flag is explicit |
 | `--json` | Output JSON with metadata and `response` |
 | `--stream` | Enable provider streaming progress where supported. Perplexity writes deltas to stderr and still emits final structured output |
@@ -82,8 +85,11 @@ scripts/ai-chat.mjs --provider perplexity --prompt "Analyze this file" --file ./
 | `--timezone <zone>` | Perplexity timezone passed to the WebUI API |
 | `--file <path>` | Perplexity local attachment. Repeatable. Metadata is safe, file contents are not echoed into metadata |
 | `--space-uuid <uuid>` or `--space <uuid>` | Perplexity Space identifier supplied by the user |
-| `--incognito` | Explicit provider-supported private request. It is not saved to provider history; Perplexity reports an expiry time |
-| `--save-to-library` | Compatibility flag for provider-history persistence where supported. Normal requests already persist and it conflicts with `--incognito` |
+| `--incognito` | Explicit Perplexity Incognito request. It is not saved to history and the provider reports an expiry time |
+| `--temporary <true|false>` | Gemini history mode. Defaults to `true`; use `false` in headless managed-browser mode to retain the chat in provider history |
+| `--save-to-library` | Compatibility alias for Gemini `--temporary false`. Perplexity already persists normal requests and rejects this together with `--incognito` |
+| `--cookie-source <source>` | Gemini cookie source, `managed-browser` by default or `chrome-profile` for the direct fallback |
+| `--chrome-profile <name>` | Gemini direct profile fallback. Prefer Chrome profile `Default` or Browser Tools task profile `ai-chat` for normal AI Chat runs |
 | `--continue` | Continue the active provider conversation tab when the current URL is already a conversation |
 | `--conversation <id-or-url>` | Open a provider conversation. ChatGPT accepts only a provider ID or trusted clean `/c/<id>` URL; no prompt is read-only and never submits |
 | `--list-conversations` | Read-only provider listing where supported. ChatGPT returns a safe structured JSON object |
@@ -126,11 +132,13 @@ Rules for supported non-ChatGPT providers:
 ### Gemini
 
 - URL: `gemini.google.com`.
-- Gemini always sends authenticated requests from the Browser Tools managed page. Credentials and page tokens remain in that page context.
-- `--list-models` uses Gemini account RPC discovery through the managed same-origin page.
-- Verified account models from the managed Gemini-capable browser include `gemini-3-flash`, `gemini-3-flash-thinking`, and `gemini-3-pro`.
-- Default chats persist to Gemini history. Use `--incognito` only when the user explicitly wants a temporary Gemini chat.
+- Default cookie source is the Browser Tools managed browser that AI Chat owns.
+- Use `--cookie-source chrome-profile --chrome-profile <profile-folder>` only as an explicit direct profile fallback.
+- `--list-models` uses Gemini account RPC discovery when cookies work.
+- The managed Gemini browser exposes `gemini-3.6-flash` and `gemini-3.6-flash-extended-thinking`.
+- Default chats are temporary. Use `--temporary false` in headless managed-browser mode when the user wants Gemini history; `--save-to-library` remains a compatibility alias.
 - Native Gemini continuation can return backend error `1097`; the helper reports `native_continuation_error` and uses local transcript fallback.
+- Gemini commands stop the AI Chat owned browser after completion or failure instead of leaving the Google-authenticated copied profile running.
 - Model unavailable error `1052` can fall back only when the adapter reports that fallback in metadata.
 
 ### Perplexity

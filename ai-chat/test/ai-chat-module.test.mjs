@@ -132,6 +132,9 @@ test('parseAiChatArgs supports provider options and conversation flags', () => {
     '--language', 'sv-SE',
     '--timezone', 'Europe/Stockholm',
     '--save-to-library',
+    '--chrome-profile', 'Work Profile',
+    '--browser-profile', 'Browser Profile',
+    '--cookie-source', 'chrome-profile',
     '--file', '/tmp/report.pdf',
     '--file', '/tmp/chart.png',
     '--space-uuid', '123e4567-e89b-12d3-a456-426614174000',
@@ -140,6 +143,8 @@ test('parseAiChatArgs supports provider options and conversation flags', () => {
     '--evidence',
     '--evidence-path', '/tmp/ai-chat-evidence.png',
     '--evidence-full-page',
+    '--headless',
+    '--include-google',
     '--verify-models',
     '--verify-model-timeout', '12',
     '--json',
@@ -158,6 +163,9 @@ test('parseAiChatArgs supports provider options and conversation flags', () => {
   assert.equal(request.providerOptions.language, 'sv-SE');
   assert.equal(request.providerOptions.timezone, 'Europe/Stockholm');
   assert.equal(request.providerOptions.saveToLibrary, true);
+  assert.equal(request.providerOptions.chromeProfile, 'Work Profile');
+  assert.equal(request.browserProfileName, 'Browser Profile');
+  assert.equal(request.providerOptions.cookieSource, 'chrome-profile');
   assert.deepEqual(request.providerOptions.files, ['/tmp/report.pdf', '/tmp/chart.png']);
   assert.equal(request.providerOptions.spaceUuid, '123e4567-e89b-12d3-a456-426614174000');
   assert.equal(request.stream, true);
@@ -165,6 +173,8 @@ test('parseAiChatArgs supports provider options and conversation flags', () => {
   assert.equal(request.captureEvidence, true);
   assert.equal(request.evidencePath, '/tmp/ai-chat-evidence.png');
   assert.equal(request.evidenceFullPage, true);
+  assert.equal(request.browserHeadless, true);
+  assert.equal(request.includeGoogle, true);
   assert.equal(request.verifyModels, true);
   assert.equal(request.verifyModelTimeoutSeconds, 12);
   assert.equal(request.jsonOutput, true);
@@ -188,6 +198,17 @@ test('parseAiChatArgs rejects missing values for value options without breaking 
   assert.throws(() => parseAiChatArgs(['--evidence-path']), /Missing value after --evidence-path/);
   assert.throws(() => parseAiChatArgs(['--attach-conversation']), /Missing value after --attach-conversation/);
   assert.equal(parseAiChatArgs(['--evidence', '--prompt', 'hello']).captureEvidence, true);
+});
+
+test('parseAiChatArgs defaults Gemini temporary mode and accepts an explicit false value', () => {
+  assert.equal(parseAiChatArgs(['--prompt', 'hello']).providerOptions.temporary, null);
+  assert.equal(parseAiChatArgs(['--prompt', 'hello', '--temporary', 'false']).providerOptions.temporary, false);
+  assert.equal(parseAiChatArgs(['--prompt', 'hello', '--temporary', 'true']).providerOptions.temporary, true);
+  assert.throws(() => parseAiChatArgs(['--prompt', 'hello', '--temporary', 'maybe']), /Invalid --temporary value/);
+  assert.throws(
+    () => parseAiChatArgs(['--prompt', 'hello', '--temporary', 'true', '--save-to-library']),
+    /conflicts with --save-to-library/,
+  );
 });
 
 test('parseAiChatArgs strictly validates timeout flags', () => {
@@ -575,7 +596,7 @@ test('runAiChat uses provider direct transport when available', async () => {
   assert.equal(JSON.parse(stdout[0]).provider_state.thread, 't1');
 });
 
-test('runAiChat starts an AI Chat owned Browser Tools browser when no usable state exists', async () => {
+test('runAiChat starts a headless Google-enabled browser from the explicitly selected profile', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ai-chat-browser-start-'));
   try {
     const stateFile = join(dir, 'browser.json');
@@ -584,7 +605,16 @@ test('runAiChat starts an AI Chat owned Browser Tools browser when no usable sta
     let startArgs = null;
     let disconnects = 0;
     const browser = { disconnect: () => { disconnects += 1; } };
-    const request = buildAiChatRequest({ providerName: 'browser-provider', modelName: 'default', prompt: 'hello', jsonOutput: true, browserStateFile: stateFile });
+    const request = buildAiChatRequest({
+      providerName: 'browser-provider',
+      modelName: 'default',
+      prompt: 'hello',
+      jsonOutput: true,
+      browserStateFile: stateFile,
+      browserProfileName: 'Browser Profile',
+      browserHeadless: true,
+      includeGoogle: true,
+    });
 
     await runAiChat(request, {
       provider: {
@@ -598,7 +628,7 @@ test('runAiChat starts an AI Chat owned Browser Tools browser when no usable sta
       },
       async startChrome(args) {
         startArgs = args;
-        return { status: 'started', port: 4555, ownerToken: 'owned-token', profileName: 'Default', requestedProfileName: 'Default', headless: true };
+        return { status: 'started', port: 4555, ownerToken: 'owned-token', profileName: 'Browser Profile', requestedProfileName: 'Browser Profile', headless: true, includeGoogle: true };
       },
       async connectBrowser(port, options) {
         connectCalls.push({ port, options });
@@ -608,18 +638,518 @@ test('runAiChat starts an AI Chat owned Browser Tools browser when no usable sta
       io: { stdout: text => stdout.push(text), writeFile: () => assert.fail('no file expected') },
     });
 
-    assert.deepEqual(startArgs, { port: 9222, taskName: 'ai-chat', defaultProfileName: 'Default', ownerId: 'ai-chat', autoAllocatePort: true });
-    assert.deepEqual(connectCalls, [{ port: 4555, options: { ownerToken: 'owned-token', protocolTimeout: 60000 } }]);
+    assert.deepEqual(startArgs, { port: 9222, taskName: 'ai-chat', profileName: 'Browser Profile', ownerId: 'ai-chat', autoAllocatePort: true, headless: true, includeGoogle: true });
+    assert.deepEqual(connectCalls, [{ port: 4555, options: { ownerToken: 'owned-token', protocolTimeout: 330000 } }]);
     const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
     assert.equal(state.ownerId, 'ai-chat');
     assert.equal(state.ownerToken, 'owned-token');
     assert.equal(state.port, 4555);
-    assert.equal(state.profileName, 'Default');
-    assert.equal(state.requestedProfileName, 'Default');
+    assert.equal(state.profileName, 'Browser Profile');
+    assert.equal(state.requestedProfileName, 'Browser Profile');
     assert.equal(state.headless, true);
+    assert.equal(state.includeGoogle, true);
     assert.equal(statSync(stateFile).mode & 0o777, 0o600);
     assert.equal(disconnects, 1);
     assert.equal(JSON.parse(stdout[0]).response, 'owned answer');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runAiChat stops a newly started Gemini browser when CDP connection fails', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-gemini-browser-connect-failed-'));
+  try {
+    const stateFile = join(dir, 'browser.json');
+    const stopCalls = [];
+    const request = buildAiChatRequest({
+      providerName: 'gemini',
+      prompt: 'hello',
+      browserStateFile: stateFile,
+      browserProfileName: 'Browser Profile',
+      browserHeadless: true,
+      includeGoogle: true,
+    });
+
+    await assert.rejects(() => runAiChat(request, {
+      provider: {
+        ...geminiProvider,
+        runRequiresBrowser: () => true,
+      },
+      async startChrome() {
+        return { status: 'started', port: 4554, ownerToken: 'gemini-connect-owner-token', profileName: 'Browser Profile', headless: true, includeGoogle: true };
+      },
+      async connectBrowser() {
+        throw new Error('connect failed');
+      },
+      stopChrome(args) {
+        stopCalls.push(args);
+        return { status: 'stopped', port: args.port };
+      },
+      cache: noCache(),
+      io: { stdout: () => {}, writeFile: () => assert.fail('no file expected') },
+    }), /connect failed/);
+
+    assert.deepEqual(stopCalls, [{ port: 4554, ownerToken: 'gemini-connect-owner-token', clean: false }]);
+    assert.equal(JSON.parse(readFileSync(stateFile, 'utf-8')).status, 'stopped');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runAiChat stops a reused Gemini browser when CDP connection fails', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-gemini-reused-connect-failed-'));
+  try {
+    const stateFile = join(dir, 'browser.json');
+    writeJson(stateFile, {
+      version: 1,
+      ownerId: 'ai-chat',
+      ownerToken: 'gemini-reused-connect-owner-token',
+      port: 4553,
+      profileName: 'Browser Profile',
+      headless: true,
+      includeGoogle: true,
+      status: 'started',
+    });
+    const stopCalls = [];
+    const request = buildAiChatRequest({
+      providerName: 'gemini',
+      prompt: 'hello',
+      browserStateFile: stateFile,
+      browserProfileName: 'Browser Profile',
+      browserHeadless: true,
+      includeGoogle: true,
+    });
+
+    await assert.rejects(() => runAiChat(request, {
+      provider: {
+        ...geminiProvider,
+        runRequiresBrowser: () => true,
+      },
+      managedBrowserSafetyForPort: () => ({ ok: true }),
+      readManagedStateForPort: () => ({ ownerId: 'ai-chat', profileName: 'Browser Profile', headless: true, includeGoogle: true }),
+      managedBrowserOwnershipSafety: () => ({ ok: true, ownerId: 'ai-chat' }),
+      browserWSEndpoint: async () => 'ws://localhost:4553/devtools/browser/live',
+      async connectBrowser() {
+        throw new Error('connect failed');
+      },
+      stopChrome(args) {
+        stopCalls.push(args);
+        return { status: 'stopped', port: args.port };
+      },
+      cache: noCache(),
+      io: { stdout: () => {}, writeFile: () => assert.fail('no file expected') },
+    }), /connect failed/);
+
+    assert.deepEqual(stopCalls, [{ port: 4553, ownerToken: 'gemini-reused-connect-owner-token', clean: false }]);
+    assert.equal(JSON.parse(readFileSync(stateFile, 'utf-8')).status, 'stopped');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runAiChat stops its owned browser after a Gemini request completes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-gemini-browser-stop-'));
+  try {
+    const stateFile = join(dir, 'browser.json');
+    const stopCalls = [];
+    let disconnects = 0;
+    const browser = { disconnect: () => { disconnects += 1; } };
+    const request = buildAiChatRequest({
+      providerName: 'gemini',
+      modelName: 'gemini-3.6-flash',
+      prompt: 'hello',
+      jsonOutput: true,
+      browserStateFile: stateFile,
+      browserProfileName: 'Browser Profile',
+      browserHeadless: true,
+      includeGoogle: true,
+    });
+
+    await runAiChat(request, {
+      provider: {
+        ...geminiProvider,
+        runRequiresBrowser: () => true,
+        async run() {
+          return { text: 'Gemini answer', rawText: 'Gemini answer', done: true, modelUsed: 'gemini-3.6-flash' };
+        },
+      },
+      async startChrome() {
+        return { status: 'started', port: 4556, ownerToken: 'gemini-owner-token', profileName: 'Browser Profile', requestedProfileName: 'Browser Profile', headless: true, includeGoogle: true };
+      },
+      async connectBrowser() {
+        return browser;
+      },
+      stopChrome(args) {
+        stopCalls.push(args);
+        return { status: 'stopped', port: args.port };
+      },
+      cache: noCache(),
+      io: { stdout: () => {}, writeFile: () => assert.fail('no file expected') },
+    });
+
+    assert.equal(disconnects, 1);
+    assert.deepEqual(stopCalls, [{ port: 4556, ownerToken: 'gemini-owner-token', clean: false }]);
+    assert.equal(JSON.parse(readFileSync(stateFile, 'utf-8')).status, 'stopped');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runAiChat stops its owned browser when a Gemini request fails', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-gemini-browser-stop-error-'));
+  try {
+    const stateFile = join(dir, 'browser.json');
+    const stopCalls = [];
+    const request = buildAiChatRequest({
+      providerName: 'gemini',
+      prompt: 'hello',
+      browserStateFile: stateFile,
+      browserProfileName: 'Browser Profile',
+      browserHeadless: true,
+      includeGoogle: true,
+    });
+
+    await assert.rejects(() => runAiChat(request, {
+      provider: {
+        ...geminiProvider,
+        runRequiresBrowser: () => true,
+        async run() {
+          throw new Error('provider failed');
+        },
+      },
+      async startChrome() {
+        return { status: 'started', port: 4557, ownerToken: 'gemini-error-owner-token', profileName: 'Browser Profile', headless: true, includeGoogle: true };
+      },
+      async connectBrowser() {
+        return { disconnect() {} };
+      },
+      stopChrome(args) {
+        stopCalls.push(args);
+        return { status: 'stopped', port: args.port };
+      },
+      cache: noCache(),
+      io: { stdout: () => {}, writeFile: () => assert.fail('no file expected') },
+    }), /provider failed/);
+
+    assert.deepEqual(stopCalls, [{ port: 4557, ownerToken: 'gemini-error-owner-token', clean: false }]);
+    assert.equal(JSON.parse(readFileSync(stateFile, 'utf-8')).status, 'stopped');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runAiChat still stops its owned Gemini browser if CDP disconnect fails', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-gemini-browser-disconnect-error-'));
+  try {
+    const stateFile = join(dir, 'browser.json');
+    let stopCount = 0;
+    const request = buildAiChatRequest({
+      providerName: 'gemini',
+      prompt: 'hello',
+      browserStateFile: stateFile,
+      browserProfileName: 'Browser Profile',
+      browserHeadless: true,
+      includeGoogle: true,
+    });
+
+    const result = await runAiChat(request, {
+      provider: {
+        ...geminiProvider,
+        runRequiresBrowser: () => true,
+        async run() {
+          return { text: 'Gemini answer', rawText: 'Gemini answer', done: true, modelUsed: 'gemini-3.6-flash' };
+        },
+      },
+      async startChrome() {
+        return { status: 'started', port: 4558, ownerToken: 'gemini-disconnect-owner-token', profileName: 'Browser Profile', headless: true, includeGoogle: true };
+      },
+      async connectBrowser() {
+        return { disconnect() { throw new Error('disconnect failed'); } };
+      },
+      stopChrome() {
+        stopCount += 1;
+        return { status: 'stopped', port: 4558 };
+      },
+      cache: noCache(),
+      io: { stdout: () => {}, writeFile: () => assert.fail('no file expected') },
+    });
+
+    assert.equal(result.result.text, 'Gemini answer');
+    assert.equal(stopCount, 1);
+    assert.equal(JSON.parse(readFileSync(stateFile, 'utf-8')).status, 'stopped');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runAiChat accepts a Gemini shutdown race only after the debug endpoint is gone', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-gemini-browser-stop-race-'));
+  try {
+    const stateFile = join(dir, 'browser.json');
+    let endpointChecks = 0;
+    const request = buildAiChatRequest({
+      providerName: 'gemini',
+      prompt: 'hello',
+      browserStateFile: stateFile,
+      browserProfileName: 'Browser Profile',
+      browserHeadless: true,
+      includeGoogle: true,
+    });
+
+    const result = await runAiChat(request, {
+      provider: {
+        ...geminiProvider,
+        runRequiresBrowser: () => true,
+        async run() {
+          return { text: 'Gemini answer', rawText: 'Gemini answer', done: true, modelUsed: 'gemini-3.6-flash' };
+        },
+      },
+      async startChrome() {
+        return { status: 'started', port: 4560, ownerToken: 'gemini-race-owner-token', profileName: 'Browser Profile', headless: true, includeGoogle: true };
+      },
+      async connectBrowser() {
+        return { disconnect() {} };
+      },
+      stopChrome() {
+        return { status: 'failed', port: 4560, error: new Error('shutdown safety recheck raced with process exit') };
+      },
+      async browserWSEndpoint(port) {
+        assert.equal(port, 4560);
+        endpointChecks += 1;
+        return null;
+      },
+      cache: noCache(),
+      io: { stdout: () => {}, writeFile: () => assert.fail('no file expected') },
+    });
+
+    assert.equal(result.result.text, 'Gemini answer');
+    assert.equal(endpointChecks, 1);
+    assert.equal(JSON.parse(readFileSync(stateFile, 'utf-8')).stopStatus, 'verified-gone');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runAiChat verifies a killed Gemini browser is gone before reporting success', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-gemini-browser-killed-'));
+  try {
+    const stateFile = join(dir, 'browser.json');
+    let endpointChecks = 0;
+    const request = buildAiChatRequest({
+      providerName: 'gemini',
+      prompt: 'hello',
+      browserStateFile: stateFile,
+      browserProfileName: 'Browser Profile',
+      browserHeadless: true,
+      includeGoogle: true,
+    });
+
+    const result = await runAiChat(request, {
+      provider: {
+        ...geminiProvider,
+        runRequiresBrowser: () => true,
+        async run() {
+          return { text: 'Gemini answer', rawText: 'Gemini answer', done: true, modelUsed: 'gemini-3.6-flash' };
+        },
+      },
+      async startChrome() {
+        return { status: 'started', port: 4564, ownerToken: 'gemini-killed-owner-token', profileName: 'Browser Profile', headless: true, includeGoogle: true };
+      },
+      async connectBrowser() {
+        return { disconnect() {} };
+      },
+      stopChrome() {
+        return { status: 'killed', port: 4564 };
+      },
+      async browserWSEndpoint(port) {
+        assert.equal(port, 4564);
+        endpointChecks += 1;
+        return null;
+      },
+      cache: noCache(),
+      io: { stdout: () => {}, writeFile: () => assert.fail('no file expected') },
+    });
+
+    assert.equal(result.result.text, 'Gemini answer');
+    assert.equal(endpointChecks, 1);
+    assert.equal(JSON.parse(readFileSync(stateFile, 'utf-8')).stopStatus, 'verified-gone');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runAiChat verifies the debug endpoint when Gemini stop reports missing lifecycle state', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-gemini-browser-stop-missing-'));
+  try {
+    const stateFile = join(dir, 'browser.json');
+    const request = buildAiChatRequest({
+      providerName: 'gemini',
+      prompt: 'hello',
+      browserStateFile: stateFile,
+      browserProfileName: 'Browser Profile',
+      browserHeadless: true,
+      includeGoogle: true,
+    });
+
+    await assert.rejects(() => runAiChat(request, {
+      provider: {
+        ...geminiProvider,
+        runRequiresBrowser: () => true,
+        async run() {
+          return { text: 'Gemini answer', rawText: 'Gemini answer', done: true, modelUsed: 'gemini-3.6-flash' };
+        },
+      },
+      async startChrome() {
+        return { status: 'started', port: 4562, ownerToken: 'gemini-missing-owner-token', profileName: 'Browser Profile', headless: true, includeGoogle: true };
+      },
+      async connectBrowser() {
+        return { disconnect() {} };
+      },
+      stopChrome() {
+        return { status: 'missing', port: 4562 };
+      },
+      async browserWSEndpoint(port) {
+        assert.equal(port, 4562);
+        return 'ws://localhost:4562/devtools/browser/live';
+      },
+      cache: noCache(),
+      io: { stdout: () => {}, writeFile: () => assert.fail('no file expected') },
+    }), /Failed to close the AI Chat browser on :4562: missing/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runAiChat fails closed when the Gemini browser remains reachable after stop', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-gemini-browser-stop-failed-'));
+  try {
+    const stateFile = join(dir, 'browser.json');
+    const request = buildAiChatRequest({
+      providerName: 'gemini',
+      prompt: 'hello',
+      browserStateFile: stateFile,
+      browserProfileName: 'Browser Profile',
+      browserHeadless: true,
+      includeGoogle: true,
+    });
+
+    await assert.rejects(() => runAiChat(request, {
+      provider: {
+        ...geminiProvider,
+        runRequiresBrowser: () => true,
+        async run() {
+          return { text: 'Gemini answer', rawText: 'Gemini answer', done: true, modelUsed: 'gemini-3.6-flash' };
+        },
+      },
+      async startChrome() {
+        return { status: 'started', port: 4561, ownerToken: 'gemini-live-owner-token', profileName: 'Browser Profile', headless: true, includeGoogle: true };
+      },
+      async connectBrowser() {
+        return { disconnect() {} };
+      },
+      stopChrome() {
+        return { status: 'failed', port: 4561, reason: 'browser-still-running' };
+      },
+      async browserWSEndpoint(port) {
+        assert.equal(port, 4561);
+        return 'ws://localhost:4561/devtools/browser/live';
+      },
+      cache: noCache(),
+      io: { stdout: () => {}, writeFile: () => assert.fail('no file expected') },
+    }), /Failed to close the AI Chat browser on :4561: browser-still-running/);
+
+    assert.equal(JSON.parse(readFileSync(stateFile, 'utf-8')).status, 'started');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runAiChat preserves both provider and Gemini cleanup failures', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-gemini-provider-cleanup-failed-'));
+  try {
+    const stateFile = join(dir, 'browser.json');
+    const request = buildAiChatRequest({
+      providerName: 'gemini',
+      prompt: 'hello',
+      browserStateFile: stateFile,
+      browserProfileName: 'Browser Profile',
+      browserHeadless: true,
+      includeGoogle: true,
+    });
+
+    await assert.rejects(() => runAiChat(request, {
+      provider: {
+        ...geminiProvider,
+        runRequiresBrowser: () => true,
+        async run() {
+          throw new Error('provider failed');
+        },
+      },
+      async startChrome() {
+        return { status: 'started', port: 4563, ownerToken: 'gemini-double-failure-owner-token', profileName: 'Browser Profile', headless: true, includeGoogle: true };
+      },
+      async connectBrowser() {
+        return { disconnect() {} };
+      },
+      stopChrome() {
+        return { status: 'failed', port: 4563, reason: 'browser-still-running' };
+      },
+      async browserWSEndpoint() {
+        return 'ws://localhost:4563/devtools/browser/live';
+      },
+      cache: noCache(),
+      io: { stdout: () => {}, writeFile: () => assert.fail('no file expected') },
+    }), error => {
+      assert.equal(error instanceof AggregateError, true);
+      assert.match(error.message, /provider failed/);
+      assert.match(error.message, /browser cleanup failed/);
+      assert.match(error.errors[0].message, /provider failed/);
+      assert.match(error.errors[1].message, /Failed to close the AI Chat browser/);
+      return true;
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runAiChat stops its owned Gemini browser after model listing', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-gemini-model-list-stop-'));
+  try {
+    const stateFile = join(dir, 'browser.json');
+    let stopCount = 0;
+    const request = buildAiChatRequest({
+      providerName: 'gemini',
+      listModels: true,
+      browserStateFile: stateFile,
+      browserProfileName: 'Browser Profile',
+      browserHeadless: true,
+      includeGoogle: true,
+      jsonOutput: true,
+    });
+
+    await runAiChat(request, {
+      provider: {
+        ...geminiProvider,
+        listModelsRequiresBrowser: () => true,
+        async listModels() {
+          return { models: [{ id: 'gemini-3.6-flash' }] };
+        },
+      },
+      async startChrome() {
+        return { status: 'started', port: 4559, ownerToken: 'gemini-list-owner-token', profileName: 'Browser Profile', headless: true, includeGoogle: true };
+      },
+      async connectBrowser() {
+        return { disconnect() {} };
+      },
+      stopChrome() {
+        stopCount += 1;
+        return { status: 'stopped', port: 4559 };
+      },
+      io: { stdout: () => {}, writeFile: () => assert.fail('no file expected') },
+    });
+
+    assert.equal(stopCount, 1);
+    assert.equal(JSON.parse(readFileSync(stateFile, 'utf-8')).status, 'stopped');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -850,6 +1380,34 @@ test('runAiChat refuses old AI Chat browsers that were started with a fresh prof
       connectBrowser: () => assert.fail('fresh-profile browser should not connect'),
       cache: noCache(),
     }), /profile-mismatch expected configured-or-default-profile, got fresh-profile.*Recovery/s);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runAiChat refuses a visible saved browser when headless execution is requested', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-browser-headless-mismatch-'));
+  try {
+    const stateFile = join(dir, 'browser.json');
+    writeJson(stateFile, { version: 1, ownerId: 'ai-chat', ownerToken: 'owned-token', port: 4996, profileName: 'Browser Profile' });
+    const request = buildAiChatRequest({
+      providerName: 'browser-provider',
+      prompt: 'hello',
+      browserStateFile: stateFile,
+      browserProfileName: 'Browser Profile',
+      browserHeadless: true,
+    });
+
+    await assert.rejects(() => runAiChat(request, {
+      provider: { name: 'browser-provider', runRequiresBrowser: () => true, run: () => assert.fail('provider should not run') },
+      managedBrowserSafetyForPort: () => ({ ok: true }),
+      readManagedStateForPort: () => ({ managedBy: 'browser-tools', ownerId: 'ai-chat', profileName: 'Browser Profile', headless: false }),
+      managedBrowserOwnershipSafety: () => ({ ok: true, ownerId: 'ai-chat' }),
+      browserWSEndpoint: async () => 'ws://localhost:4996',
+      startChrome: () => assert.fail('visible browser should not be replaced silently'),
+      connectBrowser: () => assert.fail('visible browser should not connect'),
+      cache: noCache(),
+    }), /headless-mismatch expected headless browser.*Recovery/s);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -2022,9 +2580,4 @@ test('runPromptAttempt passes minimal preflight context and skips ChatGPT pre-su
   const result = await runPromptAttempt({ browser, provider, request: buildAiChatRequest({ providerName: 'chatgpt', prompt: 'follow-up' }), selectedModel: 'default', conversation: { providerId: 'provider_1' } });
   assert.equal(result.providerConversationId, 'provider_1');
   assert.deepEqual(order, ['preflight', 'observer', 'clear', 'type', 'submit', 'wait', 'dispose']);
-});
-
-test('parseAiChatArgs rejects retired Gemini credential-source options', () => {
-  assert.throws(() => parseAiChatArgs(['--provider', 'gemini', '--cookie-source', 'chrome-profile']), /no longer supported/);
-  assert.throws(() => parseAiChatArgs(['--provider', 'gemini', '--chrome-profile', 'Personal']), /no longer supported/);
 });

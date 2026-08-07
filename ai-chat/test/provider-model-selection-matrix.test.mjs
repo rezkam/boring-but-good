@@ -98,23 +98,22 @@ const MODEL_SELECTION_MATRIX = [
   },
   {
     provider: geminiProvider,
-    defaultModel: 'gemini-3-flash',
+    defaultModel: 'gemini-3.6-flash',
     resolveId: model => resolveGeminiModel(model)?.id || null,
     aliases: [
-      ['flash', 'gemini-3-flash'],
-      ['thinking', 'gemini-3-flash-thinking'],
-      ['pro', 'gemini-3-pro'],
+      ['flash', 'gemini-3.6-flash'],
+      ['thinking', 'gemini-3.6-flash-extended-thinking'],
+      ['extended-thinking', 'gemini-3.6-flash-extended-thinking'],
     ],
     taskDefaults: [
-      ['quick', 'gemini-3-flash'],
-      ['reasoning', 'gemini-3-flash-thinking'],
-      ['pro', 'gemini-3-pro'],
+      ['quick', 'gemini-3.6-flash'],
+      ['reasoning', 'gemini-3.6-flash-extended-thinking'],
     ],
     unknownModel: 'definitely-not-a-gemini-model',
     outputCase: {
-      requestedModel: 'pro',
-      selectedModel: 'gemini-3-pro',
-      fallbackTrail: ['pro'],
+      requestedModel: 'thinking',
+      selectedModel: 'gemini-3.6-flash-extended-thinking',
+      fallbackTrail: ['thinking'],
       providerState: {
         transport: 'managed-browser-same-origin',
         auth_source: 'managed-browser-same-origin',
@@ -127,7 +126,8 @@ const MODEL_SELECTION_MATRIX = [
       },
     },
     limitations: [
-      'Read-only discovery uses authenticated same-origin requests inside the managed browser.',
+      'Live discovery requires Google cookies from the managed Browser Tools browser or an explicit Chrome profile fallback.',
+      'The exposed modes are Gemini 3.6 Flash and Gemini 3.6 Flash Extended Thinking.',
       'Gemini can reject a model with backend error 1052 and then only fallback when the adapter marks that fallback.',
       'Deep research is not exposed as a stable AI Chat model profile.',
     ],
@@ -283,7 +283,7 @@ test('provider model selection matrix keeps output metadata shape stable', () =>
 test('model fallback metadata exposes rejected requested models', () => {
   const request = buildAiChatRequest({
     providerName: 'gemini',
-    modelName: 'gemini-3-pro',
+    modelName: 'gemini-3.6-flash-extended-thinking',
     prompt: 'matrix fallback',
     jsonOutput: true,
   });
@@ -295,24 +295,23 @@ test('model fallback metadata exposes rejected requested models', () => {
       rawText: 'fallback answer',
       done: true,
       rateLimited: false,
-      modelUsed: 'gemini-3-flash',
+      modelUsed: 'gemini-3.6-flash',
       providerState: {
-        transport: 'managed-browser-same-origin',
-        auth_source: 'managed-browser-same-origin',
-        model_fallback_from: 'gemini-3-pro',
+        transport: 'webui-api',
+        model_fallback_from: 'gemini-3.6-flash-extended-thinking',
         model_fallback_reason: 'error_1052',
       },
       searchResults: [],
     },
     fallbackFrom: null,
-    fallbackTrail: ['gemini-3-pro'],
+    fallbackTrail: ['gemini-3.6-flash-extended-thinking'],
   });
 
-  assert.equal(metadata.requested_model, 'gemini-3-pro');
-  assert.equal(metadata.selected_model, 'gemini-3-flash');
-  assert.equal(metadata.model_fallback_from, 'gemini-3-pro');
+  assert.equal(metadata.requested_model, 'gemini-3.6-flash-extended-thinking');
+  assert.equal(metadata.selected_model, 'gemini-3.6-flash');
+  assert.equal(metadata.model_fallback_from, 'gemini-3.6-flash-extended-thinking');
   assert.equal(metadata.model_fallback_reason, 'error_1052');
-  assert.equal(metadata.provider_state.model_fallback_from, 'gemini-3-pro');
+  assert.equal(metadata.provider_state.model_fallback_from, 'gemini-3.6-flash-extended-thinking');
 });
 
 test('model matrix and eval fixtures contain no automated live-write flags or retired Gemini credential fields', () => {

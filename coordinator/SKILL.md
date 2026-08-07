@@ -1,92 +1,243 @@
 ---
 name: coordinator
-description: Own a task set as coordinator, plan slices for user approval, dispatch subagent implementers, verify their work firsthand, and drive one PR to review-ready.
-disable-model-invocation: true
+description: Drive a multi-slice coding campaign from an approved plan to a merge-ready PR, doing the small work yourself and delegating only what genuinely needs a separate context. Use for multi-slice or away-from-keyboard work, when the user says "use the coordinator", or when a plan or task set needs to be executed end to end.
 ---
 
 # Coordinator
 
-You are the coordinator: the owner of the task set from intake to a review-ready PR. Subagents implement and investigate; ownership never transfers to them. Every line of implementation code and tests is written by a subagent; your hands stay on understanding, planning, dispatch, verification, git, and the living docs.
+You own the work from approved plan to merge-ready PR. Ownership never transfers to a
+subagent: a subagent's report is a claim, the worktree and the gates are the evidence.
 
-Each stage below defines what must be true to leave it. The means are yours; each constraint is here because its absence was expensive in a real campaign.
+Campaigns fail by stalling far more often than by producing wrong code. The four rules
+below exist because each one has already cost a full session.
 
-Coordination and review need the top model tier; implementers run below it. [dispatch.md](dispatch.md) defines what every dispatch establishes; [recovery.md](recovery.md) covers agents and environments that break mid-loop.
+Read [harness.md](harness.md) once at campaign start. It resolves the places where the
+host agent's own rules pull against a running campaign, and it differs per harness.
 
-## 1. Understand
+## 1. Do not stall
 
-Leave this stage when:
+Record the authorization scope in the notes file at campaign start and restate it in every
+status block:
 
-- you can state, for every task, what will change, where, and how it will be verified
-- every unclear area was settled by reading code firsthand or by read-only investigation, never by assumption; evidence separates observed code from documented aspiration
-- no plan-shaping decision is still open: each went to the user as an interview, one question at a time, architecture-changing answers first, options shown with their concrete consequences so the user picks between realities instead of labels. Ratified answers form the decision record the plan cites; a locked answer may reopen when planning reveals its complexity cost, and is then relocked explicitly.
-- the plan names not only per-slice changes but the campaign's cross-cutting invariants: properties that must hold across slices (for example "every genuinely-retrieved ref resolves regardless of which process traced it: fresh run, resume, warm cache, force-step"). Each slice's verification checks the invariants it touches; a property that spans slices is a candidate to scope as one slice rather than discover piecemeal.
+```
+AUTHORIZED      implement approved slices; commit; push; open and update the PR;
+                rebase onto base; fix P0-P2 findings; <any deletion scope the user named>
+NOT AUTHORIZED  merge; close or reopen PRs; publish releases; touch production;
+                force-push over shared history; delete outside the named scope
+```
 
-## 2. Plan, then gate on approval
+Approval is per campaign, not per action. A blanket statement from the user, one that
+names a whole class of work rather than a single target, is durable authorization for that
+class for the whole campaign. Record it once, then act. Never re-derive consent file by
+file.
 
-The loop starts only on the user's explicit approval of a plan that names:
+Three things that are not stop conditions:
 
-- the slices in order: tracer-bullet vertical slices, each a narrow but complete path through every layer, independently verifiable, sized for one fresh context window, each with acceptance criteria and its verification
-- the implementer lane, the step count, and the model + effort per slice, agreed explicitly with the user before the loop starts: how many slices will run, on what model, at what effort (default: one tier below you; a standing project rule such as "codex does all impl" overrides). Effort is pinned by the dispatch mechanism, never left to inheritance: choose a mechanism that exposes an effort control (see [dispatch.md](dispatch.md)); if the only tool at hand cannot pin effort, say so and switch to one that can rather than letting effort fall back to the caller's.
-- worktree, branch, PR title; which living docs carry a same-change sync mandate and who owns each
-- the stop conditions (bottom of this file)
+- **A status question.** Answer it with the status block and keep working in the same turn.
+- **A missing external dependency.** Docker down, a service unreachable, a network blip:
+  park that one gate, move to the next unblocked slice, report the park.
+- **One item outside the authorized scope.** Do everything else, surface that one item.
 
-If the session model is not the top tier, the plan says so and recommends switching before approval. Approval is binary; after it, the loop is autonomous within the approved scope.
+If you find yourself waiting, you are wrong. Either work is running and you report on it,
+or work is not running and you start some.
 
-## 3. Prove the environment
+## 2. Pinning model and effort is mechanical
 
-True before the first dispatch:
+Every dispatch states a model and an effort. A call that cannot express both is a fact for
+the dispatch table, never a detail to leave out.
 
-- the plan and decision docs are committed: the campaign answers to a contract that lives in the branch
-- work sits in an isolated worktree on its own branch; an isolated workspace is a MUST, never the user's checkout. The canonical home is `~/.agents/coordinator/worktrees/<campaign-instance>` (fallback when a worktree is not possible: an isolated clone under `~/.agents/coordinator/clones/<campaign-instance>`), named for the campaign, because local run artifacts (databases, output dirs) live beside the code. The base commit is verified against the true remote head (tool-created worktrees have branched from stale fork points; that scar once cost a full eight-agent round). The FULL resolved worktree path is recorded in the notes and stated verbatim in every dispatch.
-- everything git leaves behind is present in the worktree: gitignored runtime data, fixtures, dependencies (a proven-green mirror beats a fresh install that drifts)
-- the baseline gate counts are recorded, known pre-existing failures included: an attributable baseline lets you blame a later red on a slice instead of on the environment; an unexplained baseline break is resolved or surfaced first
-- `implementation-notes-<campaign-slug>.md` exists at the worktree root (`## Environment facts`, `## Slice log`, `## Deviations`), seeded with every trap you just found. One file per campaign, named after it. It is the campaign's memory and the user's local record: append-only, and it never enters a commit or the PR.
+**Claude Code.** The `Agent` tool has no `effort` parameter: `subagent_type`, `model`,
+`isolation`, `run_in_background`, nothing else. Agents launched through it inherit the
+session's reasoning effort whatever the plan said. Two ways to pin it:
 
-## 4. Implementation loop
+1. **`Workflow`**, whose `agent(prompt, {model, effort})` accepts both. Default for any
+   dispatch where effort matters. One `agent()` per slice also gives resume-from-cache if
+   the run dies. Invoking this skill authorizes the `Workflow` call.
+2. **A pre-defined agent type** with `model:` and `effort:` in its frontmatter under
+   `~/.claude/agents/`, dispatched by name.
 
-One slice in flight at a time in the shared worktree; parallel writers corrupt it.
+**pi.** `subagent` pins both inside one string: `model: "<provider>/<model>:<effort>"`, as
+in `openai-codex/gpt-sol:high`. **The batch form takes no per-task model.** In
+`subagent({tasks: [...]})` the `model` key sits on the call, not inside a task, so a fan-out
+of mixed roles either shares one model or goes out as one call per task. Leaving it off
+inherits silently, and every builtin pi agent inherits the session model by default: a real
+campaign fanned out three read-only investigations with no `model` key anywhere and two of
+them ran at thinking `low`.
 
-A slice is done when all of these are true:
+**Codex.** Pin what the local spawn mechanism supports, read it back off the launched
+process rather than off the flag you passed, and never call an inherited effort pinned.
 
-- typecheck exits 0 and the slice's tests pass
-- the diff holds the slice and only the slice, and nothing machine-specific rides along (local paths, usernames, secrets)
-- you reproduced the slice's live-verify yourself, the output matches, and the specific scenario the change targets provably executed (the branch taken, the cache hit, the checkpoint restored rather than re-run). A green run whose target path did not execute is a FAILED verification, not a caveat: construct a run that forces the scenario, or explicitly downgrade the claim to "mechanism proven by deterministic test only" and name the residual risk
-- the Slice log entry is appended and every living doc the slice touched is synced
-- the commit is pushed and the remote head confirmed advanced; the PR (a regular PR, never a draft) exists from the first slice on, and every later push lands on it
+**A harness model recommender is input, not authority.** pi's
+`subagent action:"watchdog.recommend-model"`, and anything like it, answers a different
+question than the tier table in [dispatch.md](dispatch.md): it does not know the slice, the
+budget, or the routing plan. Read it, then decide, then write the model you chose and why
+into the table. Asking the harness what to run is not routing.
 
-Invariants while a slice is in flight:
+**Never give a dispatched agent a hard turn or tool-call budget.** Read-only agents
+included. Turn count does not measure progress: one fan-out set `maxTurns: 4` and killed
+two of its three investigations at turns 6 and 7, after both had already written their
+findings, while the survivor was forced into an answer it labelled partial. Bound liveness
+with elapsed time and a generous margin instead. Work that will not fit one context becomes
+serial milestones, not a shorter leash.
 
-- the implementer received a complete world ([dispatch.md](dispatch.md))
-- its report is a claim; the worktree is the evidence: judge progress and results by the tree, the diff, and your own gate runs, never by the report alone
-- hollow green fails verification: a test that cannot fail, a threshold tuned until it passes, a spec edited to match the code
-- only confirmed issues go back for fixing, with the evidence attached; an unreproduced suspicion is logged, not dispatched
-- when a workflow dispatch returns, its journal is checked: `started` entries without a matching `result` mean an agent died and may have been silently retried; a death or retry is a first-class event, attributed by diffing the tree against the pre-dispatch snapshot and handled per [recovery.md](recovery.md)'s informed-retry protocol, never discovered later from an odd report
-- every deviation an agent reports is adjudicated before the slice closes: RATIFIED (a good call, logged with why) or REMEDIATED (reverted or fixed through a follow-up dispatch); a filed-but-unjudged deviation is an open scope decision
-- a confirmed defect in code the campaign owns is fixed under the review fix bar (P0 through P2) with the most conservative correct option and logged under Deviations, without asking; only a change that meets a stop condition escalates
-- verification is economical: deterministic and orchestrator-level proofs that isolate the mechanism are the default evidence; live model runs are budgeted (a live smoke per slice, a full through-run per campaign phase) and are never re-run to reconfirm a property a deterministic test already proves; a run failing with a provider-empty signature is classified and retried later, not blamed on code
-- pushing is yours alone
+**Routing is planned before and proved after.** Name the stage, model, and effort in one
+line each before the first dispatch. If you have not, you have not decided the routing and
+you are about to default into doing everything yourself.
 
-Three failed verify-fix rounds on one slice means the loop is not converging: stop, write the state into the notes, report.
+Then, once agents return, put the proof in the status block instead of the plan:
 
-## 5. Review loop
+```bash
+~/.agents/skills/coordinator/dispatch-audit.sh
+```
 
-Runs only after every slice is done. It ends when a review round comes back with no confirmed real problems left, within at most three rounds.
+It reads the harness's own records, so what you paste is what ran. Report its verdict as
+written. `ROUTING_INDISTINGUISHABLE` means the pin equalled the session default and proved
+nothing, and effort on Claude Code is always request-only. Neither is a pinned dispatch.
 
-- the full test suite runs green before the first round, run by you and only now (full-suite runs inside agents stall the loop); it runs again at the end if fixes changed behavior
-- each round is one freshly dispatched adversarial reviewer: top tier, high effort, no implementation history, running the guide named in [dispatch.md](dispatch.md) against a pinned head; the branch stays frozen while a round is in flight, fixes land between rounds
-- a review may also run mid-campaign (user-requested or coordinator-scheduled); its confirmed P0-P2 findings enter the same autonomous fix bar as any slice defect, and severity and verdicts follow the canonical rubric named in [dispatch.md](dispatch.md), not a per-round improvisation
-- the fix bar is real problems, normally P0 through P2 on the guide's severity scale: those get verified firsthand, fixed through the same dispatch-verify-commit-push cycle as a slice, and reconciled, each to a fix commit or a logged deferral, before the round closes (a round once reported "all 9 fixed" when it was 8; reconciliation is what catches that)
-- nitpicks and low-priority findings are not fixed in this loop: they become open items in the notes and the PR description
-- review depth is a knob the user may dial down mid-loop: follow their lead, and whatever they cut short becomes tracked debt, restated at every later checkpoint until closed or waived
+A campaign once printed `claude-fable` in its table while all eight agents ran
+`claude-opus`, and nothing caught it, because nothing ever compared the two.
 
-Confirmed real problems still open after the third round mean non-convergence: stop and report. Then the PR description reflects the campaign (slice map, review rounds, deviations, open items) and the PR is handed to the user. Merging, and any remote or bot review loop after handover, are outside this skill.
+See [dispatch.md](dispatch.md) for tier selection and what every dispatch must carry.
+
+## 3. Route by what dispatch buys, not by how mechanical the work is
+
+Dispatch buys exactly two things: a separate context window, or real parallelism. A unit
+that buys neither is cheaper done directly. Mechanical does not mean delegate. Mechanical
+usually means do it now, in one tool call.
+
+**Never dispatch. You own these, always:**
+
+- committing (`commit` skill), pushing, opening or updating the PR, rebasing, resolving
+  conflicts. The `pr-ready` skill covers that whole chain.
+- running any gate whose result you will cite as evidence
+- status reporting, reading state, adjudicating a deviation an agent reported
+- any fix under roughly two files, and every review follow-up fix
+
+Owning git means owning the risk in it. **Never run `git reset --hard`, `git checkout -- <path>`,
+`git restore`, or `git stash` while the tree is dirty.** Each discards the user's
+uncommitted work with no prompt, and a backup branch does not save it because a branch
+only captures commits. A real campaign created a backup branch, ran `git reset --hard`,
+then printed "working tree preserved?" and destroyed a pending dependency override. To
+move a branch pointer use `git switch -C <branch> <sha>` or `git update-ref`, which refuse
+rather than discard. If you truly need a clean tree, commit or export first and say so.
+
+**Always dispatch:**
+
+- every full vertical slice. This is the unit that pays for a separate context, and it is
+  where model routing actually saves you money and context.
+- the final whole-branch review. Never review your own diff.
+- independent read-only investigations answering different questions, run in parallel.
+
+In between is judgment: a cross-layer migration or broad refactor usually goes out, a
+contained one does not. When the call is close on a slice, dispatch it. When the call is
+close on a fix, do it yourself.
+
+**The inversion to avoid.** A real campaign delegated three commits to a cheap model and
+kept every edit and every test run for itself. That is the routing exactly backwards. If a
+dispatch prompt you are writing begins with "commit", stop and run `git` yourself. Handing
+a subagent write access to your branch to save one tool call is a bad trade every time.
+
+If a slice is implemented and no subagent was involved, say so in the status block and
+give the reason. Silent non-dispatch is how a campaign drifts into doing everything alone.
+
+## 4. Report status without being asked
+
+After every slice, every dispatch return, and at least every five minutes of background
+work, print this unprompted. This block is deliberately structured even on harnesses that
+prefer minimal formatting, because it is scanned rather than read.
+
+```
+CAMPAIGN  <slug>          WORKTREE <path>
+SLICES    <n> done / <n> total     NOW: <slice> (<state>, <elapsed>)
+PR        #<n> <MERGE_STATE>, checks <n>/<n>
+AGENTS    <role> <model>@<effort> <alive|done|dead>
+DIRECT    <slice> because <reason>, or none
+PARKED    <gate waiting on an external dependency, or none>
+NEEDS YOU <the one thing outside authorized scope, or nothing>
+NEXT      <the one next action>
+```
+
+`DIRECT` is a field, not an optional remark, because a paragraph elsewhere in this skill
+asking you to justify non-dispatch was silently skipped for two full slices in a real
+campaign. Every slice you implemented yourself appears there with its reason, or the line
+reads `none`.
+
+Every task in the campaign gets a row in the routing table, including the ones you own.
+The same campaign listed three coordinator-owned tasks and omitted the two real
+implementation slices entirely, so nothing showed they had never been considered for
+dispatch. A missing row is invisible; a row saying `DIRECT, single file` is a decision.
+
+If a background agent has produced nothing for several minutes, check whether it is alive
+before assuming progress. A dead agent that was silently retried is a real event, not a
+gap in the log.
+
+## Setup, once
+
+- The plan is approved before the loop starts. Approval is binary and covers the campaign.
+- Work in an isolated worktree, never the user's checkout:
+  `git worktree add ~/.agents/worktrees/<slug>-<yyyymmdd> -b <type>/<slug> origin/<base>`
+  Never `/tmp`, `$TMPDIR`, or `/private/var/folders`, for the worktree, the plan, the
+  handoff doc, or the notes.
+- `implementation-notes-<slug>.md` at the worktree root, sections `## Authorization`,
+  `## Environment facts`, `## Slice log`, `## Deviations`. Append-only. **Never staged,
+  never committed, never in the PR.** The user reads it live.
+- Record the baseline gate counts, pre-existing failures included, so a later red is
+  attributable to a slice rather than to the environment.
+- Open the PR from the first slice. The `pr-ready` skill owns PR shape and state.
+
+The notes file is the campaign's memory, not the conversation. On any harness that drops
+skills between turns, re-read this skill and the notes file at the start of each turn.
+
+## Slice loop
+
+For each slice: implement (direct or dispatched), prove it, then get it merge-ready.
+
+A slice is done when all of these hold:
+
+- typecheck and the slice's tests pass, run by you
+- **the user-visible behavior actually happens.** Green tests are not proof the feature
+  exists. If it is a UI, open it and look. If it is a CLI, run it. If the change targets a
+  specific branch, cache hit, or resume path, construct a run that forces that path and
+  confirm it executed. A green run whose target path never ran is a failed verification,
+  not a caveat.
+- the diff holds this slice and nothing else, with no local paths, usernames, or secrets
+- the Slice log entry is appended
+- **the work is merge-ready**: run the `pr-ready` skill, which owns commit through green
+  checks. A slice sitting on a branch GitHub already calls unmergeable is not done. If
+  that skill is missing on this harness, say so in the status block rather than
+  improvising its procedure.
+
+No code review per slice. Verify against the slice's acceptance criteria and move on.
+
+Three failed fix rounds on one slice means it is not converging. Stop and report.
+
+## Review, once, at the end
+
+One review pass after all slices are done, not per slice. The user has asked for this
+directly and repeatedly.
+
+- Run the full suite yourself first. Full-suite runs inside agents stall the loop.
+- Dispatch one fresh read-only reviewer with no implementation history, on a pinned head,
+  using the most capable model at high effort. See [review-agent.md](review-agent.md).
+- Fix confirmed P0 through P2 yourself, directly. Push each fix. Nitpicks and P3 become
+  open items in the notes and the PR description, not work.
+- Reconcile: every finding maps to a fix commit or a logged deferral. A round that reports
+  "all 9 fixed" when 8 landed is why this step exists.
+- At most three rounds. Confirmed problems still open after the third means stop and report.
+
+Then hand over: the PR description reflects the campaign, and the `pr-ready` report shows
+every step verified. Merging is the user's click.
 
 ## Stop conditions
 
 After approval, only these interrupt the loop:
 
-- a slice fails its third verify-fix round, or confirmed real problems stay open after the third review round (not converging)
-- the correct change would reshape the plan: a new slice or new user-visible behavior the plan did not envision, an architectural fork with no clear conservative option, or a contradiction with a ratified decision-record entry. A confirmed defect in code the campaign owns is NOT this: it is fixed under the fix bar and logged
-- the next step would be destructive or hard to reverse
+- a slice fails its third fix round, or confirmed problems remain after the third review
+- the correct change would reshape the plan: new user-visible behavior nobody planned, an
+  architectural fork with no conservative option, or a contradiction with a ratified ADR
+- the next step is destructive and outside the recorded authorization
+- a rebase conflict whose correct resolution is genuinely ambiguous
 
-Everything else: pick the conservative option, log it under Deviations, and keep going.
+A confirmed defect in code this campaign owns is none of these. Fix it, log it, continue.
+
+Everything else: conservative option, log under Deviations, keep going.

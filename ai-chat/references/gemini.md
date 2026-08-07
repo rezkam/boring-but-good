@@ -1,46 +1,44 @@
 # Gemini WebUI API
 
-Gemini uses a same-origin WebUI API path inside the Browser Tools managed page. This reference documents supported behavior and known failure modes.
+Gemini uses a direct WebUI API path through Browser Tools managed Chrome cookies. This reference documents supported behavior and the known failure modes. Keep account-specific verification artifacts and local profile names outside the repo.
 
 ## Current capability
 
-- Always requires the Browser Tools managed browser; credentials and page tokens remain in page context.
-- Validates managed-browser UI readiness with safe status and reason fields only.
-- Fetches page data and sends account RPCs inside the `gemini.google.com` page.
+- Reads Google cookies from the AI Chat owned Browser Tools managed Chrome by default. AI Chat uses Chrome profile `Default` unless the Browser Tools task profile `ai-chat` is configured or `--browser-profile` selects a profile for a new owned browser. Use `--headless --include-google` for a background Gemini session that retains Google identity. Including Google identity reintroduces the source-session logout risk that Browser Tools normally avoids, so use it only for an intentional Google workflow. Gemini requests and model-listing commands stop the owned browser with its matching owner token after completion or failure. If auth looks stale, rerun so Browser Tools resyncs the copied profile.
+- Supports an explicit direct profile fallback with `--cookie-source chrome-profile --chrome-profile <profile-folder>`.
+- Verifies Gemini session state on live runs and model listing. The result separates direct WebUI auth from browser UI readiness.
+- Fetches Gemini page tokens from `https://gemini.google.com/app`.
 - Sends prompts to `/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate`.
-- Parses the chunked response stream for answer text.
+- In headless managed-browser mode, submits through the authenticated page and captures the complete `StreamGenerate` response through the browser network layer. Non-browser cookie sources continue to use direct WebUI replay.
+- Parses the chunked response stream for answer text. It does not depend on rendered answer text.
 - Discovers account-visible model choices through Gemini's `otAQ7b` user status RPC.
-- Falls back to known model headers when live discovery fails:
-  - `gemini-3-flash` alias `flash`
-  - `gemini-3-flash-thinking` aliases `thinking`, `reasoning`
-  - `gemini-3-pro` alias `pro`
-  - `gemini-3-flash-plus`
-  - `gemini-3-flash-thinking-plus`
-  - `gemini-3-pro-plus` alias `plus-pro`
-  - advanced variants when the account allows them
-- Falls back from `pro` to `flash` on Gemini model unavailable error `1052`.
+- Exposes two current model modes when live discovery is unavailable:
+  - `gemini-3.6-flash`, alias `flash`
+  - `gemini-3.6-flash-extended-thinking`, aliases `thinking`, `extended-thinking`, and `reasoning`
+- Falls back from `gemini-3.6-flash-extended-thinking` to `gemini-3.6-flash` on Gemini model unavailable error `1052`.
 - Extracts Gemini conversation ids from stream responses.
-- Defaults to normal provider history and omits `innerReqList[45]`.
-- Sets `innerReqList[45]=1` only for an explicit `--incognito` request. `--save-to-library` remains a compatibility flag for normal persistence.
+- Defaults to temporary chats. In browser-network mode it verifies that Gemini's Temporary chat UI activated before sending; in direct replay it sets `innerReqList[45]=1`.
+- Uses `--temporary false` in headless managed-browser mode to retain the chat in Gemini history. `--save-to-library` remains a compatibility alias. Direct replay rejects persistence because it cannot verify provider history mode.
 - Attempts native Gemini metadata continuation first.
 - Reports `native_continuation_error` when Gemini rejects the stored ids, commonly backend error `1097`.
 - Saves a local conversation transcript and can continue by replaying prior messages as context when Gemini backend continuation rejects the stored ids.
 
-`--list-models --json` is read-only and returns live account models from the managed browser when the RPC succeeds. `--verify-models` sends a tiny temporary prompt to each discovered model, so it requires explicit user authorization and must never run in automated tests or evals. Its output marks `available`, `verified_at`, and `verification.status`.
+`--list-models --json` returns live account models from the managed browser when the RPC succeeds. Add `--verify-models` to send a tiny temporary prompt to each discovered model and mark `available`, `verified_at`, and `verification.status`.
 
 Task defaults:
 
 | Task | Model |
 | --- | --- |
-| `quick` | `gemini-3-flash` |
-| `reasoning` | `gemini-3-flash-thinking` |
-| `pro` | `gemini-3-pro` |
+| `quick` | `gemini-3.6-flash` |
+| `reasoning` | `gemini-3.6-flash-extended-thinking` |
 
 ## Important limitations
 
-Gemini backend continuation can reject stale or mismatched state with error `1097`. Treat native continuation as best effort. Keep the fallback path visible in JSON with `native_continuation_error` and `local_transcript_fallback` so callers can tell whether Gemini accepted the stored backend ids. Direct Gemini URLs and provider IDs contain only a conversation ID, not the RPC metadata required for continuation, so they are rejected before browser submission. Continue only from a locally saved Gemini record with complete `provider_state.conversation_state.metadata`.
+Gemini backend continuation can reject stale or mismatched state with error `1097`. Treat native continuation as best effort. Keep the fallback path visible in JSON with `native_continuation_error` and `local_transcript_fallback` so callers can tell whether Gemini accepted the stored backend ids.
 
-The managed page can be signed out, blocked by consent, or lack a visible prompt input. The helper reports only safe UI readiness status and reason fields; it never returns page text, credentials, tokens, or headers.
+A split auth state is possible: direct WebUI auth can pass through cookies and account RPC while the managed browser UI is not fully ready. The helper reports this through `session_verification.direct_ready`, `session_verification.ui_ready`, and `session_verification.ui.reason`.
+
+The required-cookie gate requires `__Secure-1PSID`. `__Secure-1PSIDTS` is collected when present but is optional because Gemini can work without it for some accounts.
 
 Use `--include-conversation` when the caller needs the full messages returned in the JSON output. The helper includes `conversation_messages` and `conversation_message_count`.
 
@@ -49,8 +47,8 @@ Use `--include-conversation` when the caller needs the full messages returned in
 Before claiming a Gemini behavior works:
 
 1. Run `npm test`.
-2. Ensure the managed Browser Tools session is signed in to Gemini. If auth is stale, cleanly restart the managed browser and sign in again.
-3. Run the read-only `--list-models --json` command and save output under a user-supplied `<private-output-dir>/gemini/<case>/`. Do not add `--verify-models` unless the user explicitly authorizes the provider prompts.
+2. Ensure the Browser Tools task profile `ai-chat` points at a Gemini-capable Chrome profile. If current cookies matter and auth looks stale, cleanly stop the AI Chat owned browser and rerun so the profile copy is refreshed.
+3. Run the command with `--json` and save output to a private local verification directory, one folder per case.
 4. Verify non-empty response text and useful `provider_state`.
 5. For continuation, verify a second prompt using the same saved conversation id.
 6. Record whether native continuation was accepted or whether the local transcript fallback was used.

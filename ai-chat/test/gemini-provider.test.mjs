@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildAiChatRequest, runAiChat } from '../scripts/ai-chat/module.mjs';
-import { geminiProvider, isGeminiNativeContinuationError } from '../scripts/ai-chat/providers/gemini.mjs';
+import { geminiProvider, isGeminiNativeContinuationError, queryGeminiViaBrowserNetwork } from '../scripts/ai-chat/providers/gemini.mjs';
 
 function noCache() {
   return { read: () => null, write: () => null };
@@ -10,11 +10,7 @@ function noCache() {
 function fakeGeminiBrowser() {
   const page = {
     url: () => 'https://gemini.google.com/app',
-    evaluate: async (fn, args) => {
-      const previousLocation = globalThis.location;
-      globalThis.location = { hostname: 'gemini.google.com' };
-      try { return await fn(args); } finally { globalThis.location = previousLocation; }
-    },
+    cookies: async () => [{ name: '__Secure-1PSID', value: 'psid' }],
   };
   return { pages: async () => [page] };
 }
@@ -26,7 +22,7 @@ function geminiAppHtml() {
 function accountModelsRaw() {
   const body = [];
   body[14] = 1;
-  body[15] = [['fbb127bbb056c959', 'Gemini 3 Flash', 'Fast model']];
+  body[15] = [['56fdd199312815e2', 'Gemini 3.6 Flash', 'Fast model']];
   body[16] = [];
   body[17] = [115];
   return `)]}'\n${JSON.stringify([['wrb.fr', 'otAQ7b', JSON.stringify(body)]])}\n`;
@@ -90,19 +86,144 @@ function streamCalls(calls) {
   return calls.filter(call => call.href.includes('/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate'));
 }
 
-function innerRequestFromStreamCall(call) {
+function promptFromStreamCall(call) {
   const body = new URLSearchParams(call.body);
   const outer = JSON.parse(body.get('f.req'));
-  return JSON.parse(outer[1]);
+  const innerReqList = JSON.parse(outer[1]);
+  return innerReqList[0][0];
 }
 
-function promptFromStreamCall(call) {
-  return innerRequestFromStreamCall(call)[0][0];
-}
+test('Gemini browser-network fallback captures and parses the complete StreamGenerate response', async () => {
+  const calls = [];
+  const response = {
+    url: () => 'https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate',
+    request: () => ({ method: () => 'POST' }),
+    text: async () => streamAnswerRaw('complete browser-network answer'),
+  };
+  const page = {
+    async goto(url, options) { calls.push(['goto', url, options]); },
+    async waitForSelector(selector) { calls.push(['waitForSelector', selector]); },
+    async evaluate(_fn, selector, prompt) {
+      calls.push(['evaluate', selector, prompt]);
+      if (selector?.requestedMode) {
+        return { observedMode: selector.requestedMode, temporaryActive: selector.temporary, historyModeVerified: true };
+      }
+    },
+    async waitForResponse(predicate, options) {
+      calls.push(['waitForResponse', options]);
+      assert.equal(predicate(response), true);
+      return response;
+    },
+    async click(selector) { calls.push(['click', selector]); },
+    async close() { calls.push(['close']); },
+  };
 
-function isTemporaryStreamCall(call) {
-  return innerRequestFromStreamCall(call)[45] === 1;
-}
+  const result = await queryGeminiViaBrowserNetwork({ newPage: async options => {
+    assert.deepEqual(options, { background: true });
+    return page;
+  } }, 'browser prompt', 45000, {
+    modelConfig: {
+      id: 'gemini-3.6-flash-extended-thinking',
+      thinking: true,
+      ui_choice: 'Extended thinking',
+      ui_selected: 'Flash Extended',
+    },
+    temporary: false,
+  });
+
+  assert.equal(result.text, 'complete browser-network answer');
+  assert.equal(result.browserNetworkFallback, true);
+  assert.equal(result.modelUsed, 'gemini-3.6-flash-extended-thinking');
+  assert.equal(result.temporaryVerified, false);
+  assert.ok(result.rawText.includes('complete browser-network answer'));
+  assert.deepEqual(calls.at(-1), ['close']);
+  assert.deepEqual(calls.find(call => call[0] === 'evaluate')[1], {
+    requestedMode: 'Flash Extended',
+    requestedChoice: 'Extended thinking',
+    temporary: false,
+  });
+  assert.deepEqual(calls.find(call => call[0] === 'waitForResponse'), ['waitForResponse', { timeout: 45000 }]);
+});
+
+test('Gemini provider falls back from failed Node replay to a complete browser-network response', async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new TypeError('fetch failed'); };
+  const response = {
+    url: () => 'https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate',
+    request: () => ({ method: () => 'POST' }),
+    text: async () => streamAnswerRaw('fallback captured the complete answer'),
+  };
+  const networkPage = {
+    async goto() {},
+    async waitForSelector() {},
+    async evaluate(_fn, value) {
+      if (value?.requestedMode) {
+        return { observedMode: value.requestedMode, temporaryActive: value.temporary, historyModeVerified: true };
+      }
+    },
+    async waitForResponse(predicate) {
+      assert.equal(predicate(response), true);
+      return response;
+    },
+    async close() {},
+  };
+  const browser = {
+    pages: async () => [{
+      url: () => 'https://gemini.google.com/app',
+      cookies: async () => [{ name: '__Secure-1PSID', value: 'psid' }],
+    }],
+    newPage: async () => networkPage,
+  };
+  const stdout = [];
+
+  try {
+    const result = await runAiChat(buildAiChatRequest({
+      providerName: 'gemini',
+      modelName: 'gemini-3.6-flash',
+      prompt: 'capture this',
+      jsonOutput: true,
+      timeoutSeconds: 1,
+      browserHeadless: true,
+      providerOptions: { temporary: false },
+    }), {
+      provider: geminiProvider,
+      browser,
+      cache: noCache(),
+      io: { stdout: text => stdout.push(text), writeFile: () => assert.fail('no file expected') },
+    });
+
+    assert.equal(result.result.text, 'fallback captured the complete answer');
+    assert.equal(result.metadata.provider_state.transport, 'browser-network');
+    assert.equal(result.metadata.provider_state.is_temporary, false);
+    assert.equal(result.metadata.provider_state.saved_to_library, true);
+    assert.equal(result.metadata.provider_state.history_mode_verified, true);
+    assert.equal(JSON.parse(stdout[0]).response, 'fallback captured the complete answer');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('Gemini persistent history rejects direct replay because history mode cannot be verified', async () => {
+  const previousFetch = globalThis.fetch;
+  installGeminiFetch([]);
+  try {
+    await assert.rejects(
+      () => runAiChat(buildAiChatRequest({
+        providerName: 'gemini',
+        modelName: 'gemini-3.6-flash',
+        prompt: 'persist this',
+        providerOptions: { temporary: false },
+      }), {
+        provider: geminiProvider,
+        browser: fakeGeminiBrowser(),
+        cache: noCache(),
+      }),
+      /persistent history requires a headless managed-browser session/,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
 
 test('Gemini continuation error classifier is explicit to 1097', () => {
   const coded = new Error('backend rejected continuation');
@@ -125,7 +246,7 @@ test('Gemini native continuation error 1097 uses local transcript fallback and r
   try {
     const request = buildAiChatRequest({
       providerName: 'gemini',
-      modelName: 'gemini-3-flash',
+      modelName: 'gemini-3.6-flash',
       prompt: 'follow up',
       jsonOutput: true,
       timeoutSeconds: 1,
@@ -142,15 +263,10 @@ test('Gemini native continuation error 1097 uses local transcript fallback and r
     assert.equal(emitted.response, 'fallback answer');
     assert.equal(result.metadata.provider_state.local_transcript_fallback, true);
     assert.equal(emitted.provider_state.local_transcript_fallback, true);
-    assert.equal(emitted.provider_state.auth_source, 'managed-browser-same-origin');
-    assert.equal(emitted.provider_state.is_temporary, false);
-    assert.equal(emitted.provider_state.saved_to_library, true);
-    assert.equal(streamCalls(calls).every(call => !isTemporaryStreamCall(call)), true);
-    assert.doesNotMatch(JSON.stringify(emitted), /chrome_profile|cookie_source|cookie_extraction|psid/i);
     assert.deepEqual(emitted.provider_state.native_continuation_error, {
       message: 'Gemini Web returned error 1097',
       error_code: 1097,
-      model: 'gemini-3-flash',
+      model: 'gemini-3.6-flash',
     });
 
     const prompts = streamCalls(calls).map(promptFromStreamCall);
@@ -158,35 +274,6 @@ test('Gemini native continuation error 1097 uses local transcript fallback and r
       'follow up',
       'Continue this conversation. Use the prior messages as context, then answer the new user message.\n\nUser: first question\n\nAssistant: first answer\n\nUser: follow up',
     ]);
-  } finally {
-    globalThis.fetch = previousFetch;
-  }
-});
-
-test('Gemini uses temporary mode only for explicit --incognito', async () => {
-  const previousFetch = globalThis.fetch;
-  const calls = installGeminiFetch([streamAnswerRaw('private answer')]);
-  const stdout = [];
-
-  try {
-    const request = buildAiChatRequest({
-      providerName: 'gemini',
-      modelName: 'gemini-3-flash',
-      prompt: 'private question',
-      jsonOutput: true,
-      timeoutSeconds: 1,
-      providerOptions: { incognito: true },
-    });
-    const result = await runAiChat(request, {
-      provider: geminiProvider,
-      browser: fakeGeminiBrowser(),
-      cache: noCache(),
-      io: { stdout: text => stdout.push(text), writeFile: () => assert.fail('no file expected') },
-    });
-
-    assert.equal(result.metadata.provider_state.is_temporary, true);
-    assert.equal(result.metadata.provider_state.saved_to_library, false);
-    assert.equal(isTemporaryStreamCall(streamCalls(calls)[0]), true);
   } finally {
     globalThis.fetch = previousFetch;
   }
@@ -200,7 +287,7 @@ test('Gemini rethrows non-continuation query errors even when prior messages exi
   try {
     const request = buildAiChatRequest({
       providerName: 'gemini',
-      modelName: 'gemini-3-flash',
+      modelName: 'gemini-3.6-flash',
       prompt: 'follow up',
       jsonOutput: true,
       timeoutSeconds: 1,

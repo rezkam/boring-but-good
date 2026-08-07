@@ -15,10 +15,10 @@ Use this skill when the task is about using AI provider web sessions as tools. D
 AI Chat owns its normal Browser Tools browser lifecycle.
 
 - Startup: when a provider needs browser access and no healthy AI Chat owned browser exists, AI Chat starts Browser Tools with owner id `ai-chat`, task profile `ai-chat`, and fallback Chrome profile `Default` when no `ai-chat` task profile is configured. Perplexity prefers a headless launch because its only transport is same-origin HTTP and SSE. If the default port is busy and no explicit `--port` was passed, Browser Tools auto-allocates a free port.
-- Reuse: later AI Chat commands read the private AI Chat browser state file, validate Browser Tools managed state, owner token, and copied profile presence, then reconnect to the same browser. The same browser can be reused across Grok, ChatGPT, Gemini, and Perplexity.
+- Reuse: later AI Chat commands read the private AI Chat browser state file, validate Browser Tools managed state, owner token, and copied profile presence, then reconnect to the same browser. Grok, ChatGPT, and Perplexity can leave the browser available for later reuse. Gemini can reuse a healthy owned browser at command start, but closes it when the Gemini command finishes.
 - Refusal: AI Chat refuses unmanaged Chrome, missing owner tokens, wrong owner tokens, browsers owned by another agent, and live owned browsers with an unavailable debug port. Error messages include the reason and recovery path.
 - Stale recovery: stale private state where the process is gone is discarded and a new owned browser is started. Unsafe live state is not killed or replaced.
-- Cleanup: successful requests disconnect from CDP but leave the owned browser open for reuse. Cleanup is explicit and must use Browser Tools stop with the matching owner token from the private AI Chat state. Use `--clean` when you need the next run to resync the copied profile.
+- Cleanup: Gemini requests and model-listing commands disconnect from CDP and stop the owned browser with its matching owner token on both success and failure. Other providers disconnect from CDP but leave the owned browser open for reuse. Explicit cleanup for those providers must use Browser Tools stop with the matching owner token from the private AI Chat state. Use `--clean` when you need the next run to resync the copied profile.
 
 By default, AI Chat copies and uses Chrome profile `Default`, so normal logged-in browser cookies are available without extra setup. Optional one-time setup when another Chrome profile is the logged-in provider profile: use the Browser Tools config helper to set task profile `ai-chat` to that Chrome profile alias or folder.
 
@@ -61,7 +61,9 @@ scripts/ai-chat.mjs --provider perplexity --conversation https://www.perplexity.
 scripts/ai-chat.mjs --provider chatgpt --list-models --json
 scripts/ai-chat.mjs --provider chatgpt --model extra-high --prompt-file ./question.md --json
 scripts/ai-chat.mjs --provider gemini --task reasoning --prompt "Explain this tradeoff" --verify-session --json
-scripts/ai-chat.mjs --provider perplexity --list-models --json
+scripts/ai-chat.mjs --provider gemini --headless --include-google --browser-profile "Browser Profile" --prompt "Search the web for recent evidence" --json
+scripts/ai-chat.mjs --provider gemini --headless --include-google --browser-profile "Browser Profile" --temporary false --prompt "Save this chat to provider history" --json
+scripts/ai-chat.mjs --provider perplexity --list-models --verify-models --verify-model-timeout 180 --json
 scripts/ai-chat.mjs --provider perplexity --model openai/gpt-5.6-terra --thinking --prompt "Find recent evidence" --json
 
 # Perplexity research options with saved continuation state.
@@ -98,7 +100,7 @@ scripts/ai-chat.mjs \
 
 - Perplexity has one transport, `browser-network-sse`. It runs authenticated same-origin requests in a headless-preferred managed browser, parses captured schematized SSE block patches, supports model and Thinking variants, persistent-by-default history, explicit Incognito, research filters, deep research, files, Spaces, streaming, and backend UUID continuation. New responses expose the backend UUID and canonical `/search/<uuid>` thread URL. It never extracts browser cookies and has no rendered HTML, element, or DOM fallback path.
 - ChatGPT uses visible UI only for model selection, composer input, and a single submission. Network observation and authenticated same-origin reads provide progress, listing, and final output. `--submit-only` returns a real provider ID and leaves the managed browser alive. `--stream` writes NDJSON to stdout and ends with exactly one `complete`, `timeout`, or `error` event. It has no local ChatGPT session state, DOM answer fallback, request rewrite, or automated live write verification.
-- Gemini uses same-origin WebUI API requests inside the AI Chat managed browser. Native continuation can fail with backend error `1097`; metadata must show that and the local transcript fallback.
+- Gemini uses WebUI API cookies from the AI Chat owned browser by default. It can fall back to an explicit Chrome profile cookie source. For a fully headless Google-authenticated browser, use `--headless --include-google --browser-profile "<profile folder>"`. Including Google identity reintroduces the source-session logout risk that Browser Tools normally avoids, so use it only for an intentional Google workflow. Gemini chats are temporary by default. In a headless managed-browser session, use `--temporary false` to retain the chat in provider history; `--save-to-library` remains a compatibility alias. The exposed Gemini modes are `gemini-3.6-flash` and `gemini-3.6-flash-extended-thinking`. In headless managed-browser mode, Gemini submits through the authenticated page and parses the complete `StreamGenerate` network response instead of scraping rendered answer text. After the Gemini command completes or fails, AI Chat stops the owned browser with its matching owner token. Native continuation can fail with backend error `1097`; metadata must show that and the local transcript fallback.
 - Grok uses browser UI labels and preflights the X/Grok composer before typing. It can verify visible labels, but not a backend model slug. In the current X/Grok app `Fast` is the reliable default; `Auto` or `Expert` require explicit user-authorized visible-label verification before selection.
 
 ## References

@@ -1,29 +1,22 @@
 # boring-but-good
 
-Shell-script and workflow skills that give AI coding agents (Claude Code, etc.) the ability to interact with engineering systems. Each skill is a directory with a `SKILL.md`; workflow tools also include a `scripts/` folder.
+Shell-script and workflow skills that give AI coding agents (Claude Code, etc.) the ability to
+interact with engineering systems. Each skill is a directory with a `SKILL.md`. Some keep their
+executables in a `scripts/` folder (the `workflow-tools/` skills, `browser-tools`, `ai-chat`,
+`codex`, `finance`, `perplexity`, `skanetrafiken`), others at the skill root
+(`coordinator/dispatch-audit.sh`, `pr-ready/pr-state.sh`), and several are prose only.
 
-## Skills
-
-| Skill | External tool | Auth mechanism |
-|---|---|---|
-| `workflow-tools/jira/` | go-jira CLI (`jira`) | Keychain via `~/.jira.d/config.yml` |
-| `to-tasks/` | jira skill or local files | Uses Jira configuration through `workflow-tools/jira/`, or writes local task files under `.agents/skills/to-tasks/` |
-| `workflow-tools/jenkins/` | curl | `~/.boring/jenkins/{url,user,token}` |
-| `workflow-tools/sonarqube/` | curl | `~/.boring/sonarqube/{url,token}` + optional `auth_method` |
-| `workflow-tools/dependency-track/` | curl | `~/.boring/dependency-track/{url,apikey}` |
-| `workflow-tools/argocd/` | curl | `~/.boring/argocd/{url,token}` |
-| `skanetrafiken/` | curl | No auth needed |
-| `browser-tools/` | Node.js + Chrome | Copied Chrome profile under `~/.cache/pi-browser-tools` |
-| `finance/` | Node.js + Chrome via browser-tools | Browser-authenticated finance sessions from managed Chrome |
-| `ai-chat/` | Node.js + Chrome via browser-tools | Browser-authenticated provider sessions from managed Chrome |
+This file deliberately does not inventory the skills or the test suites. Run `ls` and read
+`tests/test-all.sh` for the current list: every previous attempt to keep an inventory here went
+stale and misled the next reader. Not everything at the top level is a skill: `code-review/` is
+a prompt and rubric set, `hooks/` ships a PreToolUse guard, and `tests/` is the suite runner.
 
 ## Architecture
 
 - **Config loaders** (`_config.sh`): Read credentials from `~/.boring/<skill>/` files. Environment variables take precedence over files (`if [ -z "$VAR" ] && [ -f file ]`).
-- **API helpers** (`_api.sh`): Wrap curl with auth, retry logic (transient failures: codes 7/28/52/56), structured error messages, and HTTP status capture. Jenkins and SonarQube share this pattern. DTrack inlines it in `dtrack-api.sh`.
-- **Jira is different**: Uses go-jira CLI instead of curl. Auth is via keychain, not token files. Scripts wrap `jira request -M METHOD ENDPOINT`.
+- **API helpers** (`_api.sh`): Wrap curl with auth, retry logic (transient failures: codes 7/28/52/56), structured error messages, and HTTP status capture. Jenkins, SonarQube, and ArgoCD share this pattern. Dependency-Track inlines it in `dtrack-api.sh`.
+- **Jira is different**: Uses go-jira CLI instead of curl. Auth is via keychain, not token files. Scripts wrap `jira request -M METHOD ENDPOINT`. There is no `_api.sh` for it.
 - **to-tasks is workflow-only**: It has no scripts or credentials of its own. It tells agents to propose task changes, ask whether the destination is Jira or local, get explicit approval, then use the `jira` skill or write local task files.
-- **`setup.sh`**: Interactive installer. Validates URLs, creates config dirs, symlinks SKILL.md files.
 
 ## CRITICAL: Tests must NEVER have side effects
 
@@ -38,32 +31,36 @@ The live test sections in `tests/test-*.sh` run only when the corresponding serv
 - ArgoCD: `GET /api/v1/session/userinfo` (health check), `GET .../applications` (list apps), `GET .../projects` (list projects)
 - The "invalid type detection" test calls `jira-create.sh` but it exits at type validation before any write API call
 
+The setup, codex, and coordinator suites reach no server at all. Keep them offline; do not add
+a live section to them without re-auditing this rule.
+
 If you add a live test, verify the full call chain to confirm nothing writes to the server.
 
 ## Tests
 
-Run: `bash tests/test-all.sh`
+Run: `bash tests/test-all.sh`. It invokes every suite in `tests/` and aggregates the results.
 
-**Structure:**
-- `tests/test-all.sh` — runner that invokes all suites and aggregates results
-- `tests/test-{jira,jenkins,sonarqube,dependency-track}.sh` — per-skill suites
+**Not in the runner:** `hooks/test-guard-output.sh` covers the PreToolUse guard and
+`tests/test-all.sh` does not call it. Run it by hand after touching `hooks/guard-output.sh`.
 
-**Test categories:**
-1. **Static checks** — SKILL.md structure, script syntax (bash + zsh), `set -e`/`set -eo pipefail`, no hardcoded paths, no company-specific data
-2. **Argument validation** — scripts exit non-zero with missing/invalid args, error messages are actionable. Jira tests use a stub `jira` binary + mock `$HOME` so tests work without go-jira installed.
-3. **Regression tests** — specific bugs that were found and fixed (grep for patterns in script source)
-4. **Live integration tests** — skipped when service is not configured, read-only when it is
-5. **Cross-skill checks** — no data leaks, setup.sh zsh-safety, SKILL.md consistency
-
-**The Jira arg-validation mock:** go-jira may not be installed. The tests create a stub `jira` binary (just `exit 1`) and a mock `$HOME` with `~/.jira.d/config.yml` so `_config.sh` passes. This lets scripts reach their own argument validation code. The stub isn't testing go-jira — it's bypassing the "go-jira not installed" gate.
+**The Jira arg-validation mock:** go-jira may not be installed. The tests create a stub `jira` binary (just `exit 1`) and a mock `$HOME` with `~/.jira.d/config.yml` so `_config.sh` passes. This lets scripts reach their own argument validation code. The stub isn't testing go-jira, it's bypassing the "go-jira not installed" gate.
 
 **`dtrack-metrics-refresh.sh`** is the only script with valid no-arg behavior (portfolio-wide refresh). It's tested separately from the arg-validation loop.
 
 ## Conventions
 
-- All scripts use `set -eo pipefail`
-- All scripts use `#!/bin/bash` shebangs but should pass `zsh -n` syntax check
+- **`set -e` is per skill, not universal.** The curl-based action scripts (jenkins, sonarqube,
+  dependency-track, argocd) use `set -eo pipefail`, and those four suites assert it with
+  `grep -q 'set -e'`. Their `_config.sh` files use plain `set -e`. The jira scripts and
+  `setup.sh` use neither, and no suite requires it there. One exception is asserted in reverse:
+  `jenkins-test-failures.sh` must **not** have `set -e` (it handles 404s with `|| true`), and
+  `tests/test-jenkins.sh` fails if it gains one. Check the skill's own suite before adding or
+  removing the line.
+- **Shebangs are mixed.** Both `#!/bin/bash` and `#!/usr/bin/env bash` are in use; `codex/`,
+  `hooks/`, `setup.sh`, `pr-ready/pr-state.sh`, and `coordinator/dispatch-audit.sh` take the
+  `env` form. Match the directory you are editing. Scripts should also pass `zsh -n`, which the
+  jira, argocd, and coordinator suites check.
 - Config: `~/.boring/<skill>/` with separate files per value (not a single config file)
-- Error messages follow: what failed → context → common causes → recovery commands
+- Error messages follow: what failed, then context, then common causes, then recovery commands
 - curl-based tools have retry logic with exponential backoff for transport failures
 - `_config.sh` files respect pre-set env vars (tests use this to inject fake URLs)
