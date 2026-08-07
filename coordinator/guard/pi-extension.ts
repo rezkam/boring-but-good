@@ -15,6 +15,7 @@ import {
 	continuationPrompt,
 	contractPrompt,
 	evaluate,
+	isManagementAction,
 	laneKindFor,
 	laneSummary,
 	newCampaign,
@@ -69,7 +70,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 	let lastContinuationAt = 0;
 	let continuationQueued = false;
 	let continuationTimer: ReturnType<typeof setTimeout> | null = null;
-	const laneByToolCall = new Map<string, string>();
+	const laneByToolCall = new Map<string, { key: string; foreground: boolean }>();
 
 	function recordProgress(): void {
 		noProgressContinuations = 0;
@@ -161,7 +162,9 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 
 	function recordLaunch(toolCallId: string, input: Record<string, unknown>, ctx: ExtensionContext): void {
 		if (!campaign) return;
-		if (typeof input.action === "string" && input.action) {
+		// A scheduling action creates a run, so it becomes a lane like any other launch. Only a
+		// genuine management action returns here.
+		if (isManagementAction(input)) {
 			if (input.action === "steer") {
 				const runId = typeof input.id === "string" ? input.id : typeof input.runId === "string" ? input.runId : "";
 				if (runId) {
@@ -186,21 +189,30 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		campaign.routes.push(route);
 		// Dispatches run in the background unless async is explicitly false, so only a declared
 		// foreground run finishes when its tool result arrives. Background lanes are closed by
-		// the coordinator through coordinator_lane, which is what the continuation asks for.
-		if (input.async === false) laneByToolCall.set(toolCallId, route.key);
+		// the coordinator through coordinator_lane, which is what the continuation asks for. Both
+		// are tracked, because a launch that errors immediately must not leave a phantom lane.
+		laneByToolCall.set(toolCallId, { key: route.key, foreground: input.async === false });
 		recordProgress();
 		persist();
 		updateStatusLine(ctx);
 	}
 
 	pi.on("tool_result", async (event, ctx) => {
-		const key = laneByToolCall.get(event.toolCallId);
-		if (!key || !campaign) return;
+		const tracked = laneByToolCall.get(event.toolCallId);
+		if (!tracked || !campaign) return;
 		laneByToolCall.delete(event.toolCallId);
-		const lane = campaign.lanes.find((candidate) => candidate.key === key && candidate.state === "running");
+		const lane = campaign.lanes.find((candidate) => candidate.key === tracked.key && candidate.state === "running");
 		if (!lane) return;
-		// Only a writer lane has anything to integrate; a read-only lane is finished when it reports.
-		lane.state = lane.kind === "implement" ? "returned" : "integrated";
+		if (event.isError) {
+			// The run never started, so the lane must not hold capacity or drive continuations.
+			campaign.lanes = campaign.lanes.filter((candidate) => candidate !== lane);
+			notify(ctx, `coordinator-guard: lane ${tracked.key} failed to launch and was removed`, "warning");
+		} else if (tracked.foreground) {
+			// Only a writer lane has anything to integrate; a read-only lane is finished when it reports.
+			lane.state = lane.kind === "implement" ? "returned" : "integrated";
+		} else {
+			return;
+		}
 		recordProgress();
 		persist();
 		updateStatusLine(ctx);
@@ -277,6 +289,14 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 					if (!params.slug || !params.worktree || params.slices_total === undefined || !params.authorized) {
 						throw new Error("start requires slug, worktree, slices_total, and authorized");
 					}
+					if (campaign && campaign.status !== "closed") {
+						throw new Error(
+							`campaign ${campaign.slug} is still ${campaign.status} with lanes: ${laneSummary(campaign)}. Starting over would discard its lanes, routes, and steer counts while its agents are still live. Close it first with action "close".`,
+						);
+					}
+					if (!Number.isInteger(params.slices_total) || params.slices_total < 1) {
+						throw new Error("slices_total must be a positive integer");
+					}
 					campaign = newCampaign({
 						slug: params.slug,
 						worktree: params.worktree,
@@ -290,8 +310,13 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 				}
 				case "set-slices": {
 					if (!campaign) throw new Error("no campaign is registered");
-					if (params.slices_done !== undefined) campaign.slicesDone = params.slices_done;
-					if (params.slices_total !== undefined) campaign.slicesTotal = params.slices_total;
+					const total = params.slices_total ?? campaign.slicesTotal;
+					const done = params.slices_done ?? campaign.slicesDone;
+					if (!Number.isInteger(total) || total < 1) throw new Error("slices_total must be a positive integer");
+					if (!Number.isInteger(done) || done < 0) throw new Error("slices_done must be a non-negative integer");
+					if (done > total) throw new Error(`slices_done ${done} cannot exceed slices_total ${total}`);
+					campaign.slicesTotal = total;
+					campaign.slicesDone = done;
 					break;
 				}
 				case "open-review": {
@@ -329,8 +354,11 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		parameters: LaneParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (!campaign) throw new Error("no campaign is registered");
-			const lane = campaign.lanes.find((candidate) => candidate.key === params.key);
-			if (!lane) throw new Error(`no lane named ${params.key}; open lanes: ${laneSummary(campaign)}`);
+			// A slice key is reused across retries, so target the live lane rather than a finished
+			// one with the same name, which would leave the live one running forever.
+			const open = campaign.lanes.filter((candidate) => candidate.key === params.key && candidate.state !== "integrated");
+			const lane = open[open.length - 1];
+			if (!lane) throw new Error(`no open lane named ${params.key}; open lanes: ${laneSummary(campaign)}`);
 			if (params.action === "dead") {
 				campaign.lanes = campaign.lanes.filter((candidate) => candidate !== lane);
 			} else {

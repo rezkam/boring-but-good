@@ -238,9 +238,9 @@ elif ! command -v node >/dev/null 2>&1; then
     skip "guard policy tests (node not installed)"
 else
     # Node strips TypeScript types natively from 22.18 on; older runtimes cannot run the suite.
-    NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
-    if [ "$NODE_MAJOR" -lt 22 ]; then
-        skip "guard policy tests (node $NODE_MAJOR is too old for type stripping)"
+    NODE_OK=$(node -p 'const [a,b]=process.versions.node.split(".").map(Number); (a>22||(a===22&&b>=18))?1:0' 2>/dev/null || echo 0)
+    if [ "$NODE_OK" != "1" ]; then
+        skip "guard policy tests (node $(node -p 'process.versions.node') predates type stripping)"
     else
         GUARD_OUT=$(cd "${COORD_DIR}/guard" && node --test policy.test.ts 2>&1)
         GUARD_RC=$?
