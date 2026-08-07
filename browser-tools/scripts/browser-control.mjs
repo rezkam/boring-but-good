@@ -35,6 +35,8 @@ export const FRESH_PROFILE_DIR = join(CACHE_DIR, 'chrome-fresh');
 export const PROFILE_SYNC_STATE_FILE = join(CACHE_DIR, 'chrome-profile-sync.json');
 export const OWNER_TOKEN_ENV = 'BROWSER_TOOLS_OWNER_TOKEN';
 export const OWNER_ID_ENV = 'BROWSER_TOOLS_OWNER_ID';
+// Owner stamped on a launch started straight from the command line, so no browser is ever unowned.
+export const CLI_OWNER_ID = 'cli';
 export const OWNER_TOKEN_HASH_ALGORITHM = 'sha256';
 export const PORT_LOCK_STALE_MS = 30000;
 
@@ -268,7 +270,9 @@ function buildOwnerState({ ownerToken, ownerId = null }) {
   };
 }
 
-export function managedBrowserOwnershipSafety({ state, ownerToken }) {
+// allowUnowned is for stopping only. Adoption and connection must never opt in, or an unowned
+// browser could be hijacked by any caller instead of merely being cleaned up.
+export function managedBrowserOwnershipSafety({ state, ownerToken, allowUnowned = false }) {
   if (!state || state.managedBy !== 'browser-tools') {
     return { ok: false, reason: 'missing-managed-state' };
   }
@@ -277,6 +281,11 @@ export function managedBrowserOwnershipSafety({ state, ownerToken }) {
   }
   const token = normalizeOwnerValue(ownerToken);
   if (!token) {
+    // Nothing owns this browser, so no surviving caller holds a token that could ever stop it.
+    // Refusing here is what makes a leaked browser permanent, so allow the reclaim and report it.
+    if (allowUnowned && !normalizeOwnerValue(state.ownerId)) {
+      return { ok: true, ownerId: null, reclaimedUnowned: true };
+    }
     return { ok: false, reason: 'missing-owner-token', ownerId: state.ownerId || null };
   }
   if (ownerTokenHash(token) !== state.ownerTokenHash) {
@@ -1220,6 +1229,9 @@ export function orphanedManagedBrowsers(processes = listManagedChromeProcesses()
     if (!managedChromeLifecycleStateSafety({ pid: entry.pid, port: entry.port, state }).ok) return true;
     if (state.userDataDir !== entry.userDataDir) return true;
     if (state.managedToken !== entry.managedToken) return true;
+    // An unowned browser is tracked but unreachable: its owner token lives only in the caller that
+    // started it, so once that process exits nothing can adopt or stop it. Reclaim it as garbage.
+    if (!normalizeOwnerValue(state.ownerId)) return true;
     return false;
   });
 }
@@ -1461,6 +1473,8 @@ export function launchChrome({ port = DEFAULT_PORT, profileName = null, userData
     includeGoogle: Boolean(includeGoogle),
     managedToken,
     ...buildOwnerState({ ownerToken: effectiveOwnerToken, ownerId }),
+    // Who launched this browser, so a leaked one is attributable instead of anonymous.
+    launchedByPid: process.pid,
     args,
     startedAt: new Date().toISOString(),
   }, null, 2));
@@ -1502,6 +1516,15 @@ export async function startChrome({
   const providedOwnerToken = normalizeOwnerValue(ownerToken);
   const effectiveOwnerToken = providedOwnerToken || generateOwnerToken();
   const normalizedOwnerId = normalizeOwnerValue(ownerId);
+  if (!normalizedOwnerId) {
+    throw new Error([
+      'Refusing to start managed Chrome without an owner id.',
+      'An unowned browser cannot be adopted or stopped by anything: its owner token exists only in the',
+      'caller that started it, so once that process exits the browser leaks with no way to reclaim it.',
+      'Pass ownerId with a stable name for the task that owns this browser, for example ownerId: "ai-chat".',
+      'From the command line, start.mjs stamps the owner for you; pass --owner-id to override it.',
+    ].join(' '));
+  }
   const { requestedProfileName, resolvedProfileName } = resolveStartProfileName({ profileName, taskName, defaultProfileName });
   ensureCacheDir();
 
@@ -1810,7 +1833,7 @@ export function stopChrome({ port = DEFAULT_PORT, clean = false, dryRun = false,
     return { status: 'already-gone', port: normalizedPort, pid, cleaned };
   }
 
-  const ownership = managedBrowserOwnershipSafety({ state, ownerToken });
+  const ownership = managedBrowserOwnershipSafety({ state, ownerToken, allowUnowned: true });
   if (!ownership.ok) {
     return {
       status: 'not-owned',
@@ -1850,7 +1873,7 @@ export function stopChrome({ port = DEFAULT_PORT, clean = false, dryRun = false,
   }
 
   if (dryRun) {
-    return { status: 'would-stop', port: normalizedPort, pid, cleaned: false, command: safety.command, ownerId: ownership.ownerId };
+    return { status: 'would-stop', port: normalizedPort, pid, cleaned: false, command: safety.command, ownerId: ownership.ownerId, ...(ownership.reclaimedUnowned ? { reclaimedUnowned: true } : {}) };
   }
 
   let status = 'stopped';
@@ -1886,7 +1909,7 @@ export function stopChrome({ port = DEFAULT_PORT, clean = false, dryRun = false,
     cleaned = true;
   }
 
-  return { status, port: normalizedPort, pid, cleaned, error };
+  return { status, port: normalizedPort, pid, cleaned, error, ...(ownership.reclaimedUnowned ? { reclaimedUnowned: true } : {}) };
 }
 
 // Sweep cached profile clones that are not currently in use by a running managed Chrome.

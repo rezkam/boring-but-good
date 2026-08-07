@@ -98,3 +98,20 @@ test('status dispatches to scripts/status.mjs and reports no managed instance in
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('start stamps a CLI owner so a command-line launch is never unowned', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'bin-start-owner-test-'));
+  try {
+    // A missing binary stops the launch just after the owner check, so no browser is started.
+    const result = run(['start', '--port', '65407'], {
+      BROWSER_TOOLS_CACHE_DIR: tmp,
+      BROWSER_TOOLS_CHROME_BIN: join(tmp, 'missing-chrome'),
+      BROWSER_TOOLS_OWNER_ID: '',
+    });
+    assert.equal(result.status, 1);
+    assert.doesNotMatch(result.stderr, /without an owner id/i, 'the CLI must supply its own owner id');
+    assert.match(result.stderr, /Chrome binary not found/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

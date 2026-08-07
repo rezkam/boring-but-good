@@ -130,6 +130,27 @@ test('managed browser ownership requires the matching owner token', () => {
   assert.equal(managedBrowserOwnershipSafety({ state: { managedBy: 'browser-tools' }, ownerToken: 'token-a' }).reason, 'missing-state-owner-token');
 });
 
+test('stopping can reclaim an unowned browser, while adopting and connecting still cannot', () => {
+  // Its owner token was generated for a caller that has exited, so no token can address it again.
+  const unowned = { managedBy: 'browser-tools', ownerId: null, ownerTokenHash: ownerTokenHash('lost-token') };
+  const owned = { managedBy: 'browser-tools', ownerId: 'agent-a', ownerTokenHash: ownerTokenHash('token-a') };
+
+  const reclaim = managedBrowserOwnershipSafety({ state: unowned, ownerToken: null, allowUnowned: true });
+  assert.equal(reclaim.ok, true, 'an unowned browser must be stoppable or it leaks forever');
+  assert.equal(reclaim.reclaimedUnowned, true, 'reclaiming someone else nobody owns must be reported, not silent');
+
+  assert.equal(
+    managedBrowserOwnershipSafety({ state: owned, ownerToken: null, allowUnowned: true }).reason,
+    'missing-owner-token',
+    'an owned browser still needs its token even when reclaiming is allowed',
+  );
+  assert.equal(
+    managedBrowserOwnershipSafety({ state: unowned, ownerToken: null }).reason,
+    'missing-owner-token',
+    'adoption and connection never opt in, so an unowned browser cannot be hijacked',
+  );
+});
+
 test('port locks are atomic and releasable', () => {
   const lock = acquirePortLock(65432, { ownerId: 'agent-a', staleMs: 1000 });
   assert.ok(lock, 'first lock should be acquired');
@@ -584,7 +605,32 @@ test('startChrome fails invalid Chrome binary without leaving lifecycle files or
     process.env.BROWSER_TOOLS_CHROME_BIN = join(tmp, 'missing-chrome');
     process.env.BROWSER_TOOLS_CACHE_DIR = cacheDir;
 
-    await assert.rejects(() => startChrome({ port, ownerToken: 'token-a' }), /Chrome binary not found/);
+    await assert.rejects(() => startChrome({ port, ownerToken: 'token-a', ownerId: 'binary-check' }), /Chrome binary not found/);
+    assert.equal(existsSync(pidFileForPort(port)), false);
+    assert.equal(existsSync(stateFileForPort(port)), false);
+    assert.equal(existsSync(portLockDirForPort(port)), false);
+  } finally {
+    if (previousChromeBin === undefined) delete process.env.BROWSER_TOOLS_CHROME_BIN;
+    else process.env.BROWSER_TOOLS_CHROME_BIN = previousChromeBin;
+    if (previousCacheDir === undefined) delete process.env.BROWSER_TOOLS_CACHE_DIR;
+    else process.env.BROWSER_TOOLS_CACHE_DIR = previousCacheDir;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('startChrome refuses an ownerless start before creating lifecycle files', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'browser-start-ownerless-test-'));
+  const cacheDir = join(tmp, 'cache');
+  const port = 65406;
+  const previousChromeBin = process.env.BROWSER_TOOLS_CHROME_BIN;
+  const previousCacheDir = process.env.BROWSER_TOOLS_CACHE_DIR;
+  try {
+    // A missing binary keeps this test from launching a real browser if the owner check is absent.
+    process.env.BROWSER_TOOLS_CHROME_BIN = join(tmp, 'missing-chrome');
+    process.env.BROWSER_TOOLS_CACHE_DIR = cacheDir;
+
+    await assert.rejects(() => startChrome({ port, ownerToken: 'token-a' }), /without an owner id/i);
+    await assert.rejects(() => startChrome({ port, ownerToken: 'token-a', ownerId: '   ' }), /without an owner id/i);
     assert.equal(existsSync(pidFileForPort(port)), false);
     assert.equal(existsSync(stateFileForPort(port)), false);
     assert.equal(existsSync(portLockDirForPort(port)), false);

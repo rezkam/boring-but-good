@@ -164,6 +164,56 @@ test('staleManagedBrowsers finds long-lived sessions so start can warn about the
   assert.deepEqual(staleManagedBrowsers([], { maxAgeMs: 1000 }), []);
 });
 
+test('orphanedManagedBrowsers reclaims a fully tracked browser that nothing owns', () => {
+  withTempCache((tmp) => {
+    const ownedDir = join(tmp, 'chrome-data-9222');
+    const ownedToken = 'tok-9222';
+    writeFileSync(join(tmp, 'chrome-9222.pid'), '100');
+    writeFileSync(join(tmp, 'chrome-9222.json'), JSON.stringify({
+      managedBy: 'browser-tools',
+      pid: 100,
+      port: 9222,
+      userDataDir: ownedDir,
+      managedToken: ownedToken,
+      ownerId: 'ai-chat',
+      args: [
+        '--remote-debugging-port=9222',
+        `--user-data-dir=${ownedDir}`,
+        `--pi-browser-tools-managed=${ownedToken}`,
+      ],
+    }));
+
+    // Same shape, but no owner. Its owner token only ever existed in the caller that started it,
+    // so once that process exits nothing can adopt or stop this browser.
+    const unownedDir = join(tmp, 'chrome-data-9223');
+    const unownedToken = 'tok-9223';
+    writeFileSync(join(tmp, 'chrome-9223.pid'), '200');
+    writeFileSync(join(tmp, 'chrome-9223.json'), JSON.stringify({
+      managedBy: 'browser-tools',
+      pid: 200,
+      port: 9223,
+      userDataDir: unownedDir,
+      managedToken: unownedToken,
+      ownerId: null,
+      args: [
+        '--remote-debugging-port=9223',
+        `--user-data-dir=${unownedDir}`,
+        `--pi-browser-tools-managed=${unownedToken}`,
+      ],
+    }));
+
+    const processes = [
+      { pid: 100, port: 9222, ageMs: 1000, userDataDir: ownedDir, managedToken: ownedToken },
+      { pid: 200, port: 9223, ageMs: 1000, userDataDir: unownedDir, managedToken: unownedToken },
+    ];
+    assert.deepEqual(
+      orphanedManagedBrowsers(processes).map((entry) => entry.pid),
+      [200],
+      'an unowned browser is unreachable by stop, so reap must be able to reclaim it',
+    );
+  });
+});
+
 test('orphanedManagedBrowsers finds running browsers whose lifecycle files no longer describe them', () => {
   // This is the exact incident shape: 86 live browsers, one surviving state file, so stop.mjs
   // reported "No managed debug Chrome instance found" for every one of them.
@@ -177,6 +227,7 @@ test('orphanedManagedBrowsers finds running browsers whose lifecycle files no lo
       port: 9222,
       userDataDir: trackedDir,
       managedToken: trackedToken,
+      ownerId: 'ai-chat',
       args: [
         '--remote-debugging-port=9222',
         `--user-data-dir=${trackedDir}`,
@@ -436,7 +487,7 @@ test('startChrome refuses to launch past the cap instead of allocating another p
   });
 
   await assert.rejects(
-    () => startChrome({ autoAllocatePort: true }),
+    () => startChrome({ autoAllocatePort: true, ownerId: 'cap-check' }),
     (error) => {
       assert.match(error.message, /5 of 5/);
       return true;
@@ -483,7 +534,7 @@ test('startChrome refuses to launch when the managed browser inventory cannot be
   });
 
   await assert.rejects(
-    () => startChrome({ port: 65419, ownerToken: 'inventory-owner' }),
+    () => startChrome({ port: 65419, ownerToken: 'inventory-owner', ownerId: 'inventory-check' }),
     /Cannot read the managed Chrome process inventory/,
   );
   assert.deepEqual(
@@ -543,8 +594,8 @@ process.on('SIGINT', stop);
   });
 
   const results = await Promise.all([
-    startChrome({ port: 65420, autoAllocatePort: true, ownerToken }),
-    startChrome({ port: 65420, autoAllocatePort: true, ownerToken }),
+    startChrome({ port: 65420, autoAllocatePort: true, ownerToken, ownerId: 'concurrent-owner' }),
+    startChrome({ port: 65420, autoAllocatePort: true, ownerToken, ownerId: 'concurrent-owner' }),
   ]);
 
   assert.deepEqual(
@@ -564,7 +615,7 @@ test('the pre-launch reap spares tracked browsers and ports held by a concurrent
   withTempCache((tmp) => {
     const trackedDir = join(tmp, 'chrome-data-9222');
     const trackedToken = 'tok-9222';
-    // tracked: state file agrees with the running pid
+    // tracked: state file agrees with the running pid, and it has an owner that can stop it
     writeFileSync(join(tmp, 'chrome-9222.pid'), '900001');
     writeFileSync(join(tmp, 'chrome-9222.json'), JSON.stringify({
       managedBy: 'browser-tools',
@@ -572,6 +623,7 @@ test('the pre-launch reap spares tracked browsers and ports held by a concurrent
       port: 9222,
       userDataDir: trackedDir,
       managedToken: trackedToken,
+      ownerId: 'ai-chat',
       args: [
         '--remote-debugging-port=9222',
         `--user-data-dir=${trackedDir}`,
@@ -962,6 +1014,7 @@ test('a browser with a half-written lifecycle pair counts as an orphan', () => {
       port: 9602,
       userDataDir: trackedDir,
       managedToken: trackedToken,
+      ownerId: 'ai-chat',
       args: [
         '--remote-debugging-port=9602',
         `--user-data-dir=${trackedDir}`,
@@ -1066,6 +1119,7 @@ test('lifecycle state that contradicts the running process counts as an orphan',
       writeFileSync(join(tmp, `chrome-${port}.pid`), String(state.pid));
       writeFileSync(join(tmp, `chrome-${port}.json`), JSON.stringify({
         managedBy: 'browser-tools',
+        ownerId: 'ai-chat',
         ...state,
         args: [
           `--remote-debugging-port=${state.port}`,

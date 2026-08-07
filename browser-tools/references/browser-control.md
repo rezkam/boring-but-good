@@ -101,6 +101,8 @@ The cap holds under concurrency. Slot reservation and the spawn happen together 
 
 A managed browser whose lifecycle files no longer describe it is an **orphan**. That includes a half-written pair where only one of the pid and state files survives, and state that contradicts the running process on port, clone directory, or managed token. The orphan test deliberately matches what `stop` verifies, so the two can never disagree and strand a browser between them.
 
+A browser that **nothing owns** is also reclaimable, even when its lifecycle files are perfectly consistent. No surviving caller holds a token that could stop it, so refusing to reap it is what would make the leak permanent. For the same reason `browser-tools stop --port <n>` may reclaim an unowned browser without a token, and reports `(reclaimed: nothing owned it)` when it does. An **owned** browser still requires its matching owner token, and adopting or connecting never accepts an unowned browser, so this cannot be used to hijack one.
+
 An orphan: `browser-tools stop --port <n>` cannot see it, and it holds both a memory slot and its clone directory indefinitely.
 
 - `browser-tools stop --status` lists every running managed browser with its port, PID, and age, plus the cap and any warnings.
@@ -115,6 +117,8 @@ Reaping only ever targets processes carrying the Browser Tools managed token *an
 Every Managed Browser is owned by one agent token. For a user-supplied token, export `BROWSER_TOOLS_OWNER_TOKEN` before running `browser-tools start` and reuse that environment for follow-up commands. When no token is provided, start generates a new token and prints it. Store it in the current agent session with `export BROWSER_TOOLS_OWNER_TOKEN="<owner token from start output>"`. Use `--owner-token` only when the environment variable is impractical because command-line arguments can be visible to other local users through process listings.
 
 `browser-tools start` also accepts `--owner-id <label>` or `--agent-id <label>` for diagnostics. The owner ID is not a secret and is not enough to connect or stop. The owner token is hashed in the managed-state file, not written in plain text.
+
+**Every managed browser must have an owner id.** `startChrome` refuses to launch without one, because an unowned browser cannot be adopted or stopped by anything: its owner token exists only in the caller that started it, so once that process exits the browser holds a slot, its clone directory, and its memory with no way to reclaim it. Library callers pass `ownerId` themselves. A command-line `browser-tools start` stamps `cli` when neither `--owner-id` nor `BROWSER_TOOLS_OWNER_ID` is set, so a shell launch is never anonymous. Each lifecycle record also stores `launchedByPid`, so a browser that outlives its launcher is still attributable.
 
 Ownership rules:
 
