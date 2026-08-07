@@ -15,7 +15,7 @@ a prompt and rubric set, `hooks/` ships a PreToolUse guard, and `tests/` is the 
 
 - **Config loaders** (`_config.sh`): Read credentials from `~/.boring/<skill>/` files. Environment variables take precedence over files (`if [ -z "$VAR" ] && [ -f file ]`).
 - **API helpers** (`_api.sh`): Wrap curl with auth, retry logic (transient failures: codes 7/28/52/56), structured error messages, and HTTP status capture. Jenkins, SonarQube, and ArgoCD share this pattern. Dependency-Track inlines it in `dtrack-api.sh`.
-- **Jira is different**: Uses go-jira CLI instead of curl. Auth is via keychain, not token files. Scripts wrap `jira request -M METHOD ENDPOINT`. There is no `_api.sh` for it.
+- **Jira is different**: Uses go-jira CLI instead of curl. Auth is via keychain, not token files. Scripts wrap `jira request -M METHOD ENDPOINT`; `_config.sh` explicitly resolves the macOS login keychain when go-jira's legacy implicit lookup cannot see it in SSH/non-GUI sessions. There is no `_api.sh` for it.
 - **to-tasks is workflow-only**: It has no scripts or credentials of its own. It tells agents to propose task changes, ask whether the destination is Jira or local, get explicit approval, then use the `jira` skill or write local task files.
 
 ## CRITICAL: Tests must NEVER have side effects

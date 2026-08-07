@@ -173,6 +173,103 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
+header "Jira: macOS SSH Keychain fallback"
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_AUTH_MOCK_DIR=$(mktemp -d)
+_AUTH_MOCK_HOME=$(mktemp -d)
+_AUTH_JIRA_LOG="${_AUTH_MOCK_DIR}/jira.log"
+_AUTH_SECURITY_LOG="${_AUTH_MOCK_DIR}/security.log"
+mkdir -p "$_AUTH_MOCK_HOME/.jira.d" "$_AUTH_MOCK_HOME/Library/Keychains"
+cat > "$_AUTH_MOCK_HOME/.jira.d/config.yml" << 'EOF'
+endpoint: https://example.atlassian.net
+user: agent@example.com
+password-source: keyring
+EOF
+
+cat > "$_AUTH_MOCK_DIR/uname" << 'EOF'
+#!/bin/bash
+echo Darwin
+EOF
+
+cat > "$_AUTH_MOCK_DIR/jira" << 'EOF'
+#!/bin/bash
+printf 'token=%s\nargs=%s\n' "${JIRA_API_TOKEN:-}" "$*" > "$AUTH_JIRA_LOG"
+EOF
+
+cat > "$_AUTH_MOCK_DIR/security" << 'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "$AUTH_SECURITY_LOG"
+case "${1:-}" in
+    login-keychain)
+        printf '    "%s/Library/Keychains/login.keychain-db"\n' "$HOME"
+        exit 0
+        ;;
+    find-generic-password)
+        case " $* " in
+            *" $HOME/Library/Keychains/login.keychain-db "*)
+                case " $* " in
+                    *" -w "*)
+                        [ "${MOCK_SECURITY_MODE:-readable}" = "locked" ] && exit 36
+                        echo mock-jira-token
+                        exit 0
+                        ;;
+                    *) exit 0 ;;
+                esac
+                ;;
+            *) exit 44 ;;
+        esac
+        ;;
+esac
+exit 1
+EOF
+chmod +x "$_AUTH_MOCK_DIR/uname" "$_AUTH_MOCK_DIR/jira" "$_AUTH_MOCK_DIR/security"
+
+_AUTH_ERR="${_AUTH_MOCK_DIR}/auth.err"
+env HOME="$_AUTH_MOCK_HOME" PATH="$_AUTH_MOCK_DIR:$PATH" \
+    JIRA_API_TOKEN= JIRA_SECURITY_BIN="$_AUTH_MOCK_DIR/security" \
+    AUTH_JIRA_LOG="$_AUTH_JIRA_LOG" AUTH_SECURITY_LOG="$_AUTH_SECURITY_LOG" \
+    MOCK_SECURITY_MODE=readable \
+    /bin/bash -c '. "$1"; jira request -M GET /rest/api/3/myself' \
+    _ "$JIRA_SCRIPTS/_config.sh" >/dev/null 2>"$_AUTH_ERR"
+_AUTH_RC=$?
+
+if [ "$_AUTH_RC" -eq 0 ] && grep -q '^token=mock-jira-token$' "$_AUTH_JIRA_LOG"; then
+    pass "_config.sh: injects login-keychain token into go-jira under SSH"
+else
+    fail "_config.sh: did not inject explicit login-keychain token" "$(cat "$_AUTH_ERR")"
+fi
+
+if grep -q "$_AUTH_MOCK_HOME/Library/Keychains/login.keychain-db" "$_AUTH_SECURITY_LOG"; then
+    pass "_config.sh: queries the explicit user login keychain"
+else
+    fail "_config.sh: should query login.keychain explicitly"
+fi
+
+rm -f "$_AUTH_JIRA_LOG" "$_AUTH_ERR"
+env HOME="$_AUTH_MOCK_HOME" PATH="$_AUTH_MOCK_DIR:$PATH" \
+    JIRA_API_TOKEN= JIRA_SECURITY_BIN="$_AUTH_MOCK_DIR/security" \
+    AUTH_JIRA_LOG="$_AUTH_JIRA_LOG" AUTH_SECURITY_LOG="$_AUTH_SECURITY_LOG" \
+    MOCK_SECURITY_MODE=locked \
+    /bin/bash -c '. "$1"; jira request -M GET /rest/api/3/myself' \
+    _ "$JIRA_SCRIPTS/_config.sh" >/dev/null 2>"$_AUTH_ERR"
+_AUTH_RC=$?
+
+if [ "$_AUTH_RC" -ne 0 ] && grep -qi 'security unlock-keychain' "$_AUTH_ERR"; then
+    pass "_config.sh: locked keychain failure gives an actionable unlock command"
+else
+    fail "_config.sh: locked keychain failure is not actionable" "$(cat "$_AUTH_ERR")"
+fi
+
+if [ ! -f "$_AUTH_JIRA_LOG" ]; then
+    pass "_config.sh: does not invoke go-jira when the token is inaccessible"
+else
+    fail "_config.sh: should not let go-jira fall through to an EOF prompt"
+fi
+
+rm -rf "$_AUTH_MOCK_DIR" "$_AUTH_MOCK_HOME"
+
+# ═══════════════════════════════════════════════════════════════════════════════
 header "Jira: Error message quality"
 # ═══════════════════════════════════════════════════════════════════════════════
 
