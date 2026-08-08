@@ -83,6 +83,8 @@ export interface GuardRequest {
 	armed: boolean;
 	campaign: Campaign | null;
 	config?: GuardConfig;
+	/** The effective tier lists, defaulting to DEFAULT_TIERS when the user has set none. */
+	tiers?: TierLists;
 }
 
 /** The denial half, so a refusal stays assignable wherever a richer allow shape is expected. */
@@ -168,13 +170,17 @@ export function contractPrompt(
 	armed: boolean,
 	now: number,
 	config: GuardConfig = DEFAULT_CONFIG,
+	tiers: TierLists = DEFAULT_TIERS,
 ): string {
 	const campaign = liveOrClosed && liveOrClosed.status !== "closed" ? liveOrClosed : null;
 	if (!campaign) {
 		if (!armed) return "";
 		return `Coordinator guard: armed, no campaign registered.
 
-The coordinator skill is loaded, so dispatches are blocked until you call coordinator_campaign with action "start" (slug, worktree, plan_path, slices_total, authorized). Registering the campaign is what makes routing, lane, and status enforcement possible.`;
+The coordinator skill is loaded, so dispatches are blocked until you call coordinator_campaign with action "start" (slug, worktree, plan_path, slices_total, authorized). Registering the campaign is what makes routing, lane, and status enforcement possible.
+
+These are the tiers that will be enforced. Position one is what to reach for; the rest are accepted fallbacks:
+${renderTiers(tiers)}`;
 	}
 
 	const staleMinutes = campaign.lastStatusAt === null ? null : Math.floor((now - campaign.lastStatusAt) / 60_000);
@@ -193,14 +199,15 @@ NOT AUTHORIZED  merge; close or reopen PRs; publish releases; touch production; 
 
 These are enforced at the tool boundary, not by your memory of them. A dispatch that breaks one fails:
 
-- Every launch pins provider/model:effort, and only these pairs route. Anything else is refused:
-${tierTable()}
+- Every launch pins provider/model:effort, and only these route. Position one is what to reach
+  for; the rest are accepted fallbacks. Anything else is refused:
+${tierTable(tiers)}
 - Every launch opens with a routing header, and its model must match what the call carries:
   ROUTE: <key> | class <1|2|3> | <provider/model:effort> | <why this class>
   Class 3 implementation needs a real justification, not the word "complex".
 - Review is a separate table with its own two classes, declared as "review 1" or "review 2",
   never an implementation class:
-${reviewTable()}
+${reviewTable(tiers)}
   Review runs once at the end, so the class is the risk of the whole branch. The same model
   at a different effort is a different class.
 - Every dispatched prompt names the worktree, the exact HEAD it must be at, that the agent stops if HEAD differs, and that it commits locally and never pushes, never runs gh, never touches a PR.
@@ -243,71 +250,143 @@ export function parseModelPin(model: unknown): { id: string; effort: ThinkingLev
 	return { id: model.slice(0, colon), effort: effort as ThinkingLevel };
 }
 
-/**
- * The tier table as pairs, because the table lists a model AND the effort to run it at:
- * a class is a model at an effort, not a model. sol and fable also carry the review tier
- * at high, which is why they list two efforts.
- */
-const TIERS: Array<{ family: RegExp; label: string; efforts: Partial<Record<ThinkingLevel, ImplementationClass>> }> = [
-	{ family: /luna/, label: "gpt-5.6-luna", efforts: { high: 1 } },
-	{ family: /sonnet/, label: "claude-sonnet", efforts: { medium: 1 } },
-	{ family: /terra/, label: "gpt-5.6-terra", efforts: { medium: 2 } },
-	{ family: /opus/, label: "claude-opus", efforts: { low: 2, medium: 3 } },
-	{ family: /sol/, label: "gpt-5.6-sol", efforts: { medium: 3, high: 3 } },
-	{ family: /fable/, label: "claude-fable", efforts: { high: 3 } },
-];
-
-/**
- * Review is its own axis. It was checked against the implementation table until now, which
- * put the two models the review doc calls equivalent floors into different classes, and
- * left the mandatory final pass enforceable only by coincidence. Review runs once, at the
- * end, so these two classes differ by branch risk rather than by stage.
- */
 export type ReviewClass = 1 | 2;
 
-const REVIEW_TIERS: Array<{ family: RegExp; label: string; efforts: Partial<Record<ThinkingLevel, ReviewClass>> }> = [
-	{ family: /opus/, label: "claude-opus-5", efforts: { high: 1, xhigh: 2 } },
-	{ family: /terra/, label: "gpt-5.6-terra", efforts: { xhigh: 1 } },
-	{ family: /sol/, label: "gpt-5.6-sol", efforts: { xhigh: 2 } },
-];
-
-export function reviewClass(modelId: string, effort: ThinkingLevel): ReviewClass | null {
-	const id = modelId.toLowerCase();
-	return REVIEW_TIERS.find((tier) => tier.family.test(id))?.efforts[effort] ?? null;
+/**
+ * The tiers, as ordered lists of pins. Ordered because position one is what the contract
+ * tells the coordinator to reach for and the rest are accepted fallbacks: restricting a
+ * class to a single provider means one outage stalls the campaign on refusals, while an
+ * unordered set gives the coordinator no default at all. A class is a model AT an effort,
+ * so every entry carries both.
+ */
+export interface TierLists {
+	class: Record<ImplementationClass, string[]>;
+	review: Record<ReviewClass, string[]>;
 }
 
-function reviewTable(): string {
-	return REVIEW_TIERS.flatMap((tier) =>
-		Object.entries(tier.efforts).map(([effort, cls]) => `  review ${cls}  ${tier.label}:${effort}`),
-	).sort().join("\n");
+export const DEFAULT_TIERS: TierLists = {
+	class: {
+		1: ["claude-bridge/claude-sonnet-5:medium", "openai-codex/gpt-5.6-luna:high"],
+		2: ["claude-bridge/claude-opus-5:low", "openai-codex/gpt-5.6-terra:medium"],
+		3: ["claude-bridge/claude-opus-5:medium", "openai-codex/gpt-5.6-sol:medium"],
+	},
+	review: {
+		1: ["claude-bridge/claude-opus-5:high", "openai-codex/gpt-5.6-terra:xhigh"],
+		2: ["claude-bridge/claude-opus-5:xhigh", "openai-codex/gpt-5.6-sol:xhigh"],
+	},
+};
+
+/** A pin's bare model name, so a list entry matches whichever provider spells it locally. */
+function bareModel(id: string): string {
+	const slash = id.lastIndexOf("/");
+	return (slash === -1 ? id : id.slice(slash + 1)).toLowerCase();
 }
 
-/** Every routable model and effort, so a refusal names the choices instead of implying them. */
-function tierTable(): string {
-	return TIERS.flatMap((tier) =>
-		Object.entries(tier.efforts).map(([effort, cls]) => `  class ${cls}  ${tier.label}:${effort}`),
-	).join("\n");
+function entryMatches(entry: string, pin: { id: string; effort: ThinkingLevel }): boolean {
+	const parsed = parseModelPin(entry);
+	if (!parsed) return false;
+	if (parsed.effort !== pin.effort) return false;
+	const listed = bareModel(parsed.id);
+	const dispatched = bareModel(pin.id);
+	return listed === dispatched || dispatched.includes(listed) || listed.includes(dispatched);
 }
 
-function tierFor(modelId: string) {
-	const id = modelId.toLowerCase();
-	return TIERS.find((tier) => tier.family.test(id));
+function classFrom(lists: Record<number, string[]>, pin: { id: string; effort: ThinkingLevel }): number | null {
+	for (const [cls, entries] of Object.entries(lists)) {
+		if (entries.some((entry) => entryMatches(entry, pin))) return Number(cls);
+	}
+	return null;
 }
 
-export function modelClass(modelId: string, effort: ThinkingLevel): ImplementationClass | null {
-	return tierFor(modelId)?.efforts[effort] ?? null;
+export function modelClass(modelId: string, effort: ThinkingLevel, tiers: TierLists = DEFAULT_TIERS): ImplementationClass | null {
+	return classFrom(tiers.class, { id: modelId, effort }) as ImplementationClass | null;
 }
 
-/** The efforts the table lists for a model, for the refusal to quote back. */
-export function listedReviewEfforts(modelId: string): ThinkingLevel[] {
-	const id = modelId.toLowerCase();
-	const tier = REVIEW_TIERS.find((entry) => entry.family.test(id));
-	return tier ? (Object.keys(tier.efforts) as ThinkingLevel[]) : [];
+export function reviewClass(modelId: string, effort: ThinkingLevel, tiers: TierLists = DEFAULT_TIERS): ReviewClass | null {
+	return classFrom(tiers.review, { id: modelId, effort }) as ReviewClass | null;
 }
 
-export function listedEfforts(modelId: string): ThinkingLevel[] {
-	const tier = tierFor(modelId);
-	return tier ? (Object.keys(tier.efforts) as ThinkingLevel[]) : [];
+/** The efforts a table lists for a model, for a refusal to quote back. */
+function effortsFor(lists: Record<number, string[]>, modelId: string): ThinkingLevel[] {
+	const dispatched = bareModel(modelId);
+	const found: ThinkingLevel[] = [];
+	for (const entries of Object.values(lists)) {
+		for (const entry of entries) {
+			const parsed = parseModelPin(entry);
+			if (!parsed) continue;
+			const listed = bareModel(parsed.id);
+			if ((listed === dispatched || dispatched.includes(listed) || listed.includes(dispatched)) && !found.includes(parsed.effort)) {
+				found.push(parsed.effort);
+			}
+		}
+	}
+	return found;
+}
+
+export function listedEfforts(modelId: string, tiers: TierLists = DEFAULT_TIERS): ThinkingLevel[] {
+	return effortsFor(tiers.class, modelId);
+}
+
+export function listedReviewEfforts(modelId: string, tiers: TierLists = DEFAULT_TIERS): ThinkingLevel[] {
+	return effortsFor(tiers.review, modelId);
+}
+
+/**
+ * A user-supplied tier list. Validated rather than trusted: an entry without an effort is
+ * the exact mistake the whole pin rule exists to prevent, and a silently dropped entry
+ * would make the printed table lie about what is enforced.
+ */
+export function parseTierEntries(raw: string): { ok: true; entries: string[] } | { ok: false; error: string } {
+	const entries = raw
+		.split(",")
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0);
+	if (entries.length === 0) return { ok: false, error: "name at least one model as provider/model:effort." };
+	for (const entry of entries) {
+		const pin = parseModelPin(entry);
+		if (!pin) {
+			return { ok: false, error: `"${entry}" is not provider/model:effort. A class is a model at an effort, so both are required.` };
+		}
+		if (!entry.includes("/")) {
+			return { ok: false, error: `"${entry}" has no provider prefix. Write it the way the local harness spells it, for example openai-codex/gpt-5.6-terra:xhigh.` };
+		}
+	}
+	return { ok: true, entries };
+}
+
+/** The tiers with one class replaced, leaving the rest as they were. */
+export function withTierList(tiers: TierLists, axis: "class" | "review", cls: number, entries: string[]): TierLists {
+	const next: TierLists = { class: { ...tiers.class }, review: { ...tiers.review } };
+	if (axis === "review") next.review[cls as ReviewClass] = entries;
+	else next.class[cls as ImplementationClass] = entries;
+	return next;
+}
+
+/** The table as the contract and refusals print it: position one first, marked as preferred. */
+export function renderTiers(tiers: TierLists = DEFAULT_TIERS): string {
+	const rows: string[] = [];
+	for (const [axis, lists] of [
+		["class", tiers.class],
+		["review", tiers.review],
+	] as const) {
+		for (const [cls, entries] of Object.entries(lists)) {
+			const shown = entries.map((entry, index) => (index === 0 ? `${entry} (preferred)` : entry));
+			rows.push(`  ${axis} ${cls}  ${shown.join("  |  ")}`);
+		}
+	}
+	return rows.join("\n");
+}
+
+function tierTable(tiers: TierLists = DEFAULT_TIERS): string {
+	return Object.entries(tiers.class)
+		.map(([cls, entries]) => `  class ${cls}  ${entries.join("  |  ")}`)
+		.join("\n");
+}
+
+function reviewTable(tiers: TierLists = DEFAULT_TIERS): string {
+	return Object.entries(tiers.review)
+		.map(([cls, entries]) => `  review ${cls}  ${entries.join("  |  ")}`)
+		.join("\n");
 }
 
 export function parseRouteHeader(text: string): RouteHeader | null {
@@ -678,7 +757,7 @@ function readField(objectBody: string, field: string): string | undefined {
 }
 
 /** Model pin and declared class, checked the same way for a lone dispatch and for a child. */
-function checkRoute(route: RouteHeader, agent: string | undefined): GuardDecision {
+function checkRoute(route: RouteHeader, agent: string | undefined, tiers: TierLists): GuardDecision {
 	const pin = parseModelPin(route.model);
 	if (!pin) return deny("CG004", `The routing header model ${route.model} is not pinned as provider/model:effort.`);
 
@@ -688,7 +767,7 @@ function checkRoute(route: RouteHeader, agent: string | undefined): GuardDecisio
 	if (wantsReview && route.axis !== "review") {
 		return deny(
 			"CG004",
-			`Route ${route.key} is dispatched as campaign-reviewer, so its header declares a review class, not an implementation class:\nROUTE: ${route.key} | review <1|2> | <provider/model:effort> | <why this class>\n${reviewTable()}`,
+			`Route ${route.key} is dispatched as campaign-reviewer, so its header declares a review class, not an implementation class:\nROUTE: ${route.key} | review <1|2> | <provider/model:effort> | <why this class>\n${reviewTable(tiers)}`,
 			true,
 		);
 	}
@@ -700,12 +779,12 @@ function checkRoute(route: RouteHeader, agent: string | undefined): GuardDecisio
 		);
 	}
 
-	const actualClass = wantsReview ? reviewClass(pin.id, pin.effort) : modelClass(pin.id, pin.effort);
-	const table = wantsReview ? reviewTable() : tierTable();
+	const actualClass = wantsReview ? reviewClass(pin.id, pin.effort, tiers) : modelClass(pin.id, pin.effort, tiers);
+	const table = wantsReview ? reviewTable(tiers) : tierTable(tiers);
 	const axis = wantsReview ? "review" : "class";
 
 	if (actualClass === null) {
-		const listed = wantsReview ? listedReviewEfforts(pin.id) : listedEfforts(pin.id);
+		const listed = wantsReview ? listedReviewEfforts(pin.id, tiers) : listedEfforts(pin.id, tiers);
 		if (listed.length > 0) {
 			return deny(
 				"CG004",
@@ -842,6 +921,7 @@ export function evaluateStructure(request: GuardRequest): StructureDecision {
 }
 
 function evaluateStructureInner(request: GuardRequest): StructureDecision {
+	const tiers = request.tiers ?? DEFAULT_TIERS;
 	const config = request.config ?? DEFAULT_CONFIG;
 	const { input, now } = request;
 	// A closed campaign is history, not a live one: enforcement returns to inert so ordinary
@@ -986,7 +1066,7 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 						reason: `Child "${child.agent}" declares ${route.model} in its routing header but launches with ${child.model}. Each child's header must describe that child's own launch.`,
 					});
 				}
-				const routeCheck = checkRoute(route, child.agent);
+				const routeCheck = checkRoute(route, child.agent, tiers);
 				if (!routeCheck.allow) problems.push({ code: routeCheck.code, reason: routeCheck.reason });
 			}
 			if (problems.length > 0) return denyAll(problems);
@@ -1024,7 +1104,7 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 					reason: `The routing header declares ${route.model} but the launch carries ${text(input.model)}. The table and the call must agree, or the table proves nothing.`,
 				});
 			}
-			const routeCheck = checkRoute(route, agent);
+			const routeCheck = checkRoute(route, agent, tiers);
 			if (!routeCheck.allow) problems.push({ code: routeCheck.code, reason: routeCheck.reason });
 		}
 		if (problems.length > 0) return denyAll(problems);
@@ -1130,10 +1210,16 @@ function evaluateVerdictsInner(
 			);
 		}
 
-		if (kind === "implement" && target.declaredClass === 3 && verdict.classJustification !== "substantive") {
+		// The top of either axis is the expensive, slow choice, so the judge reads the stated
+		// reason and the guard refuses a label. Escalation should cost a sentence.
+		const atTop = kind === "review" ? target.declaredClass === 2 : kind === "implement" && target.declaredClass === 3;
+		if (atTop && verdict.classJustification !== "substantive") {
+			const reads = verdict.classJustification === "label" ? "a label rather than a reason" : "no reason at all";
 			return deny(
 				"CG012",
-				`Class 3 implementation needs a written justification naming what makes the slice cross-layer or long-horizon. The reason on route ${target.routeKey} reads as ${verdict.classJustification === "label" ? "a label rather than a reason" : "no reason at all"}. Escalate exactly one class only when the task is complex or the lower class cannot make progress.`,
+				kind === "review"
+					? `Review 2 is the top of the review table, so it needs a written reason naming what makes this branch subtle, risky, broad, or cross-layer. The reason on route ${target.routeKey} reads as ${reads}. A routine branch is review 1.`
+					: `Class 3 implementation needs a written justification naming what makes the slice cross-layer or long-horizon. The reason on route ${target.routeKey} reads as ${reads}. Escalate exactly one class only when the task is complex or the lower class cannot make progress.`,
 			);
 		}
 

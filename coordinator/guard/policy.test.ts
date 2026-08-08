@@ -631,7 +631,7 @@ test("an unroutable model refusal names every model that would work", () => {
 	const task = implementTask("ROUTE: s1-parser | class 1 | openai-codex/gpt-9-nova:high | mechanical edit");
 	const { code, reason } = structure(request({ input: launch({ model: "openai-codex/gpt-9-nova:high", task }) }));
 	assert.equal(code, "CG004");
-	for (const listed of ["gpt-5.6-luna:high", "claude-sonnet:medium", "gpt-5.6-terra:medium", "claude-opus:low", "gpt-5.6-sol:medium", "claude-fable:high"]) {
+	for (const listed of ["gpt-5.6-luna:high", "claude-sonnet-5:medium", "gpt-5.6-terra:medium", "claude-opus-5:low", "gpt-5.6-sol:medium"]) {
 		assert.match(reason, new RegExp(listed.replace(/[.]/g, "\\.")), `must list ${listed}`);
 	}
 });
@@ -733,4 +733,24 @@ test("a refusal never teaches a routing row the same dispatch would be refused f
 	const worker = structure(request({ input: launch({ model: "gpt-5.6-luna" }) }));
 	assert.match(worker.reason, /class <1\|2\|3>/, "a worker is taught the implementation row");
 	assert.doesNotMatch(worker.reason, /ROUTE: <key> \| review/, "and never the review row");
+});
+
+test("CG012: the top of the review axis needs a reason too, not just class 3", () => {
+	const reviewing = campaign({ status: "review", slicesDone: 4 });
+	const labelled = denyJudged(
+		request({ campaign: reviewing, input: reviewLaunch({ task: implementTask("ROUTE: final | review 2 | claude-bridge/claude-opus-5:xhigh | risky") }) }),
+		[verdict({ kind: "review", stopsOnHeadMismatch: false, classJustification: "label" })],
+	);
+	assert.equal(labelled.code, "CG012");
+	assert.match(labelled.reason, /Review 2 is the top of the review table/);
+
+	// Review 1 is the routine choice and carries no such burden.
+	const routine = judged(
+		request({
+			campaign: reviewing,
+			input: reviewLaunch({ model: "claude-bridge/claude-opus-5:high", task: implementTask("ROUTE: final | review 1 | claude-bridge/claude-opus-5:high | narrow") }),
+		}),
+		[verdict({ kind: "review", stopsOnHeadMismatch: false, classJustification: "label" })],
+	);
+	assert.deepEqual(routine, { allow: true });
 });

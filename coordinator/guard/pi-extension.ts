@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 
 import { judgeCacheKey, judgeDispatch, type JudgeCall, type PromptVerdict } from "./judge.ts";
 import { findRoleShadows } from "./shadows.ts";
+import { rateFor, readThroughput, type Throughput } from "./throughput.ts";
 
 import {
 	continuationPrompt,
@@ -30,11 +31,16 @@ import {
 	laneSummary,
 	newCampaign,
 	openReview,
+	DEFAULT_TIERS,
 	parseModelPin,
+	parseTierEntries,
+	renderTiers,
+	withTierList,
 	parseRouteHeader,
 	readStatusBlock,
 	type Campaign,
 	type JudgeTarget,
+	type TierLists,
 } from "./policy.ts";
 
 const STATE_TYPE = "coordinator-guard";
@@ -79,6 +85,8 @@ interface PersistedState {
 	campaign: Campaign | null;
 	judgeModel: string;
 	judgeEnabled: boolean;
+	/** Absent until the user overrides a class, so defaults keep evolving with the code. */
+	tiers?: TierLists;
 }
 
 const StartParams = Type.Object({
@@ -104,6 +112,51 @@ const LaneParams = Type.Object({
 });
 
 /** The verdict as display rows, in the order the judge is asked. */
+/**
+ * Each class reordered so the fastest measured entry leads. Entries with no measurement
+ * keep their relative position behind the measured ones rather than being guessed at: a
+ * model with no samples is unknown, not slow.
+ */
+export function reorderByThroughput(
+	tiers: TierLists,
+	measured: Map<string, Throughput>,
+): { tiers: TierLists; changed: string[] } {
+	const next: TierLists = { class: { ...tiers.class }, review: { ...tiers.review } };
+	const changed: string[] = [];
+	for (const [axis, lists] of [
+		["class", next.class],
+		["review", next.review],
+	] as const) {
+		for (const [cls, entries] of Object.entries(lists) as Array<[string, string[]]>) {
+			const ranked = [...entries].sort((left, right) => {
+				const leftRate = rateFor(measured, left);
+				const rightRate = rateFor(measured, right);
+				if (leftRate && rightRate) return rightRate.tokensPerSecond - leftRate.tokensPerSecond;
+				if (leftRate) return -1;
+				if (rightRate) return 1;
+				return 0;
+			});
+			if (ranked.join("|") !== entries.join("|")) {
+				changed.push(`${axis} ${cls}`);
+				(lists as Record<string, string[]>)[cls] = ranked;
+			}
+		}
+	}
+	return { tiers: next, changed };
+}
+
+/** Restored state is data from disk, so its shape is checked before it becomes policy. */
+function isTierLists(value: unknown): value is TierLists {
+	if (!value || typeof value !== "object") return false;
+	const candidate = value as { class?: unknown; review?: unknown };
+	const listsOk = (lists: unknown, keys: string[]) => {
+		if (!lists || typeof lists !== "object") return false;
+		const record = lists as Record<string, unknown>;
+		return keys.every((key) => Array.isArray(record[key]) && (record[key] as unknown[]).every((entry) => typeof entry === "string"));
+	};
+	return listsOk(candidate.class, ["1", "2", "3"]) && listsOk(candidate.review, ["1", "2"]);
+}
+
 function verdictRows(verdict: PromptVerdict): Array<[string, string]> {
 	return [
 		["kind", verdict.kind],
@@ -137,6 +190,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 	let armed = false;
 	let judgeModel = DEFAULT_JUDGE_MODEL;
 	let judgeEnabled = true;
+	let tiers: TierLists = DEFAULT_TIERS;
 	const verdictCache = new Map<string, PromptVerdict>();
 	let noProgressContinuations = 0;
 	let lastContinuationAt = 0;
@@ -167,7 +221,14 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 	}
 
 	function persist(): void {
-		pi.appendEntry<PersistedState>(STATE_TYPE, { version: 1, armed, campaign, judgeModel, judgeEnabled });
+		pi.appendEntry<PersistedState>(STATE_TYPE, {
+			version: 1,
+			armed,
+			campaign,
+			judgeModel,
+			judgeEnabled,
+			...(tiers === DEFAULT_TIERS ? {} : { tiers }),
+		});
 	}
 
 	/**
@@ -237,6 +298,77 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		if (ctx.hasUI) ctx.ui.notify(message, level);
 	}
 
+	/** The tier table with whatever throughput history can be measured for each entry. */
+	function renderModels(): string {
+		const measured = readThroughput();
+		const lines = ["Coordinator guard tiers. Position one is what the contract tells the coordinator to reach for; the rest are accepted fallbacks.", ""];
+		for (const [axis, lists] of [
+			["class", tiers.class],
+			["review", tiers.review],
+		] as const) {
+			for (const [cls, entries] of Object.entries(lists)) {
+				lines.push(`${axis} ${cls}`);
+				entries.forEach((entry, index) => {
+					const rate = rateFor(measured, entry);
+					const speed = rate ? `${rate.tokensPerSecond.toFixed(1)} tok/s over ${rate.samples} samples` : "no measurement yet";
+					lines.push(`  ${index === 0 ? "->" : "  "} ${entry.padEnd(42)} ${speed}`);
+				});
+			}
+		}
+		lines.push(
+			"",
+			tiers === DEFAULT_TIERS ? "These are the defaults." : "These include your overrides; /campaign models reset restores the defaults.",
+			"Throughput is output tokens over wall clock from your own sessions, so it ranks rather than benchmarks: the gap also contains tool and queue time.",
+			"",
+			"Set:   /campaign models class <1|2|3> <provider/model:effort>[, ...]",
+			"       /campaign models review <1|2> <provider/model:effort>[, ...]",
+			"Auto:  /campaign models auto      reorder each class by measured throughput, leaving unmeasured entries in place",
+			"Reset: /campaign models reset",
+		);
+		return lines.join("\n");
+	}
+
+	function handleModels(argument: string): string {
+		if (argument === "") return renderModels();
+
+		if (argument === "reset") {
+			tiers = DEFAULT_TIERS;
+			persist();
+			return `Tiers reset to the defaults.\n\n${renderTiers(tiers)}`;
+		}
+
+		if (argument === "auto") {
+			const measured = readThroughput();
+			const reordered = reorderByThroughput(tiers, measured);
+			if (reordered.changed.length === 0) {
+				return `No reordering: every class is already fastest-first, or has no measurement to go on.\n\n${renderTiers(tiers)}`;
+			}
+			tiers = reordered.tiers;
+			persist();
+			return `Reordered by measured throughput: ${reordered.changed.join(", ")}.\n\n${renderTiers(tiers)}`;
+		}
+
+		const match = /^(class|review)\s+([123])\s+(.+)$/i.exec(argument);
+		if (!match) {
+			return 'Usage: /campaign models [class <1|2|3> <pins> | review <1|2> <pins> | auto | reset]. Pins are comma separated, as provider/model:effort.';
+		}
+		const axis = match[1].toLowerCase() as "class" | "review";
+		const cls = Number(match[2]);
+		if (axis === "review" && cls > 2) return "The review axis has two classes: review 1 and review 2.";
+
+		const parsed = parseTierEntries(match[3]);
+		if (!parsed.ok) return `Not applied: ${parsed.error}`;
+
+		tiers = withTierList(tiers, axis, cls, parsed.entries);
+		persist();
+		return `${axis} ${cls} is now ${parsed.entries.join(", ")}. Enforced from the next dispatch.\n\n${renderTiers(tiers)}`;
+	}
+
+	/** A guard notice in the transcript, outside a command handler. */
+	function notice(text: string): void {
+		pi.sendMessage({ customType: NOTICE_TYPE, content: text, display: true }, { triggerTurn: false });
+	}
+
 	function showJudgeCard(
 		judgements: Array<{ target: JudgeTarget; verdict: PromptVerdict }>,
 		cacheFlags: boolean[],
@@ -276,6 +408,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		armed = false;
 		judgeModel = DEFAULT_JUDGE_MODEL;
 		judgeEnabled = true;
+		tiers = DEFAULT_TIERS;
 		verdictCache.clear();
 		noProgressContinuations = 0;
 		continuationQueued = false;
@@ -290,6 +423,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			campaign = data.campaign ?? null;
 			judgeModel = typeof data.judgeModel === "string" && data.judgeModel ? data.judgeModel : DEFAULT_JUDGE_MODEL;
 			judgeEnabled = data.judgeEnabled !== false;
+			tiers = isTierLists(data.tiers) ? data.tiers : DEFAULT_TIERS;
 		}
 		updateStatusLine(ctx);
 	}
@@ -310,7 +444,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (event) => {
-		const contract = contractPrompt(campaign, armed, Date.now());
+		const contract = contractPrompt(campaign, armed, Date.now(), undefined, tiers);
 		if (!contract) return;
 		return { systemPrompt: `${event.systemPrompt}\n\n${contract}` };
 	});
@@ -363,6 +497,9 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 					armed = true;
 					persist();
 					updateStatusLine(ctx);
+					// Arming silently once meant a campaign could route for an hour before anyone saw
+					// which models were enforceable.
+					notice(`Coordinator guard armed.\n\n${contractPrompt(null, true, Date.now(), undefined, tiers)}`);
 				}
 				return;
 			}
@@ -404,6 +541,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 				now: Date.now(),
 				armed,
 				campaign,
+				tiers,
 			};
 
 			// Phase one is free: a malformed dispatch is refused without spending a model call.
@@ -715,7 +853,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			}
 			persist();
 			updateStatusLine(ctx);
-			const view = campaign ? { ...campaign, contract: contractPrompt(campaign, armed, now) } : null;
+			const view = campaign ? { ...campaign, contract: contractPrompt(campaign, armed, now, undefined, tiers) } : null;
 			return {
 				content: [{ type: "text", text: JSON.stringify(view, null, 2) }],
 				details: view,
@@ -765,7 +903,13 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			const show = (text: string) => pi.sendMessage({ customType: NOTICE_TYPE, content: text, display: true }, { triggerTurn: false });
 			switch (command) {
 				case "":
-					show(campaign ? contractPrompt(campaign, armed, Date.now()) : `Coordinator guard ${armed ? "armed" : "inert"}, no campaign registered.`);
+					show(
+						campaign
+							? contractPrompt(campaign, armed, Date.now(), undefined, tiers)
+							: armed
+								? contractPrompt(null, true, Date.now(), undefined, tiers)
+								: "Coordinator guard inert, no campaign registered.",
+					);
 					break;
 				case "arm":
 				case "disarm":
@@ -775,7 +919,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 					}
 					armed = command === "arm";
 					persist();
-					show(`Coordinator guard ${armed ? "armed" : "disarmed"}.`);
+					show(armed ? `Coordinator guard armed.\n\n${contractPrompt(null, true, Date.now(), undefined, tiers)}` : "Coordinator guard disarmed.");
 					break;
 				case "close":
 					if (campaign) campaign.status = "closed";
@@ -792,6 +936,10 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 					show("Campaign active.");
 					break;
 				default: {
+					if (command === "models" || command.startsWith("models ")) {
+						show(handleModels(args.trim().slice("models".length).trim()));
+						break;
+					}
 					if (command === "judge" || command.startsWith("judge ")) {
 						const argument = command.slice("judge".length).trim();
 						if (!argument) {
@@ -815,7 +963,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 						}
 						break;
 					}
-					show("Usage: /campaign [arm|disarm|close|resume|judge]");
+					show("Usage: /campaign [arm|disarm|close|resume|judge|models]");
 				}
 			}
 			updateStatusLine(ctx);
