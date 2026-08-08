@@ -95,8 +95,15 @@ row, so the table cannot drift from the calls:
 ROUTE: <key> | class <1|2|3> | <provider/model:effort> | <why this class>
 ```
 
+Review dispatches declare a review class instead, from their own table:
+
+```
+ROUTE: <key> | review <1|2> | <provider/model:effort> | <why this class>
+```
+
 The declared model must be the model the call carries, and the declared class must be the
-class the tier table gives that model. Class 3 implementation carries a written reason for
+class its own table gives that model: implementation classes for `campaign-worker` and
+`campaign-scout`, review classes for `campaign-reviewer`. Class 3 implementation carries a written reason for
 what makes the slice cross-layer or long-horizon, not the word "hard". If you have not
 written the row, you have not decided the routing and you are about to default into doing
 everything yourself.

@@ -723,3 +723,14 @@ test("CG004: the review table is opus by effort, terra and sol at xhigh", () => 
 	// A model with no review row at all.
 	assert.equal(ok("openai-codex/gpt-5.6-luna:high", 1), false);
 });
+
+test("a refusal never teaches a routing row the same dispatch would be refused for", () => {
+	// The reviewer correction used to prescribe "class <1|2|3>", which CG004 then rejected.
+	const reviewer = structure(request({ input: reviewLaunch({ model: "claude-bridge/claude-opus-5" }) }));
+	assert.match(reviewer.reason, /review <1\|2>/, "a reviewer is taught the review row");
+	assert.doesNotMatch(reviewer.reason, /ROUTE: <key> \| class/, "and never the implementation row");
+
+	const worker = structure(request({ input: launch({ model: "gpt-5.6-luna" }) }));
+	assert.match(worker.reason, /class <1\|2\|3>/, "a worker is taught the implementation row");
+	assert.doesNotMatch(worker.reason, /ROUTE: <key> \| review/, "and never the review row");
+});
