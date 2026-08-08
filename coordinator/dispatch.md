@@ -37,6 +37,19 @@ table.
 | 2 | `gpt-terra` at `medium`, or `claude-opus` at `low` | Prose-led implementation and integration work |
 | 3 | `gpt-sol` at `medium`, or `claude-opus` at `medium` | Complex cross-layer or long-horizon work |
 
+Each class is an ordered list, and position one is the default rather than a suggestion.
+Without that, a class of `[claude-sonnet-5:medium, gpt-5.6-luna:high]` treats both as
+equally acceptable, so a coordinator can take the second one forever and nothing notices.
+Reaching past the preferred model is still allowed, because a provider outage must not
+stall a campaign, but the routing row has to say why:
+
+```text
+ROUTE: s7 | class 1 | openai-codex/gpt-5.6-luna:high | claude-bridge rate-limited at 14:02
+```
+
+That is the same mechanism class 3 already uses: the reason is read, and a label is
+refused. The deviation costs one clause instead of silence.
+
 Choose the fastest available model in the selected class. Prefer observed throughput from
 this campaign, measured as returned tokens divided by elapsed seconds. A larger model may
 be the faster choice, so do not choose by model size or provider alone. When there is no

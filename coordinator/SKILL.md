@@ -103,7 +103,12 @@ ROUTE: <key> | review <1|2> | <provider/model:effort> | <why this class>
 
 The declared model must be the model the call carries, and the declared class must be the
 class its own table gives that model: implementation classes for `campaign-worker` and
-`campaign-scout`, review classes for `campaign-reviewer`. Class 3 implementation carries a written reason for
+`campaign-scout`, review classes for `campaign-reviewer`.
+
+Each class lists its models in order and the first is the default. Taking a later one is
+allowed when the preferred model is unavailable, and the row's reason is where you say so
+("claude-bridge rate-limited at 14:02"). A reason that does not explain the choice is
+refused, the same way a class 3 label is. Class 3 implementation carries a written reason for
 what makes the slice cross-layer or long-horizon, not the word "hard". If you have not
 written the row, you have not decided the routing and you are about to default into doing
 everything yourself.
