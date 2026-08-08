@@ -99,6 +99,29 @@ Since pi-subagents 0.43.0 the only execution surface is `workflowScript`. A writ
 reviewer is dispatched as the only child of its own script; multi-child scripts are for
 independent read-only investigations.
 
+## Tiers and how to change them
+
+Both axes are ordered lists of pins, defaulting to Claude first with a codex fallback.
+Position one is what the injected contract tells the coordinator to reach for; the rest
+are accepted, so one provider outage does not stall a campaign on refusals.
+
+```
+/campaign models                                    show both tables with measured tok/s
+/campaign models class <1|2|3> <pin>[, <pin>]       replace an implementation class
+/campaign models review <1|2> <pin>[, <pin>]        replace a review class
+/campaign models auto                               reorder each class fastest-measured first
+/campaign models reset                              back to defaults
+```
+
+Throughput comes from pi's own session files, as output tokens over the gap to the
+previous entry. That gap also holds tool and queue time, so it ranks rather than
+benchmarks, and a model with fewer than five samples reports nothing rather than noise.
+`auto` therefore leaves unmeasured entries where they are: no samples means unknown, not
+slow.
+
+Overrides persist with the campaign and are printed whenever the guard arms, so the
+enforced table is never something you have to remember.
+
 ## What fails, and why
 
 | Code | Refuses | The incident behind it |
