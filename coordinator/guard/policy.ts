@@ -318,6 +318,17 @@ function deny(code: string, reason: string): GuardDecision {
 	return { allow: false, code, reason };
 }
 
+/**
+ * One refusal listing every problem found, because revealing them one at a time costs a
+ * round trip each. A real campaign spent five attempts and two minutes on its first
+ * dispatch, learning one rule per refusal.
+ */
+function denyAll(problems: Array<{ code: string; reason: string }>): GuardDecision {
+	if (problems.length === 1) return deny(problems[0].code, problems[0].reason);
+	const list = problems.map((problem, index) => `${index + 1}. [${problem.code}] ${problem.reason}`).join("\n\n");
+	return deny(problems[0].code, `This launch has ${problems.length} problems. Fix them together and retry once:\n\n${list}`);
+}
+
 function checkBash(command: string): GuardDecision {
 	const spawn = /(^|[\s;&|(])((codex\s+(exec|resume))|(claude\s+(-p|--print))|(pi\s+(-p|--prompt|exec))|(npx\s+(-y\s+)?pi\b))/i;
 	if (spawn.test(command)) {
@@ -618,59 +629,73 @@ export function evaluateStructure(request: GuardRequest): StructureDecision {
 			);
 		}
 		for (const child of children) {
+			// Same reason as the single-dispatch path: one refusal per problem is one round trip
+			// per problem.
+			const problems: Array<{ code: string; reason: string }> = [];
 			if (parseModelPin(child.model) === null) {
-				return deny(
-					"CG002",
-					`Child "${child.agent}" carries ${child.model ? `model ${child.model}` : "no literal model"}. Every child pins provider/model:effort, because an unpinned child inherits the session model and effort silently.`,
-				);
+				problems.push({
+					code: "CG002",
+					reason: `Child "${child.agent}" carries ${child.model ? `model ${child.model}` : "no literal model"}. Every child pins provider/model:effort, because an unpinned child inherits the session model and effort silently.`,
+				});
 			}
 			const route = parseRouteHeader(child.task);
 			if (!route) {
-				return deny(
-					"CG003",
-					`Child "${child.agent}" has no ROUTE header. Every child of a workflow script carries its own routing row, or it is an undecided dispatch hidden inside a script.`,
-				);
+				problems.push({
+					code: "CG003",
+					reason: `Child "${child.agent}" has no ROUTE header. Every child carries its own routing row, exactly this shape:\nROUTE: <key> | class <1|2|3> | <provider/model:effort> | <why this class>`,
+				});
+			} else {
+				if (route.model !== child.model) {
+					problems.push({
+						code: "CG004",
+						reason: `Child "${child.agent}" declares ${route.model} in its routing header but launches with ${child.model}. Each child's header must describe that child's own launch.`,
+					});
+				}
+				const routeCheck = checkRoute(route);
+				if (!routeCheck.allow) problems.push({ code: routeCheck.code, reason: routeCheck.reason });
 			}
-			if (route.model !== child.model) {
-				return deny(
-					"CG004",
-					`Child "${child.agent}" declares ${route.model} in its routing header but launches with ${child.model}. Each child's header must describe that child's own launch.`,
-				);
-			}
-			const keyCheck = checkKey(route.key, seenKeys, campaign);
+			if (problems.length > 0) return denyAll(problems);
+
+			const declared = route as RouteHeader;
+			const keyCheck = checkKey(declared.key, seenKeys, campaign);
 			if (!keyCheck.allow) return keyCheck;
-			const routeCheck = checkRoute(route);
-			if (!routeCheck.allow) return routeCheck;
-			targets.push({ routeKey: route.key, prompt: child.task, agent: child.agent, declaredClass: route.cls, model: child.model });
+			targets.push({ routeKey: declared.key, prompt: child.task, agent: child.agent, declaredClass: declared.cls, model: child.model });
 		}
 	} else {
+		// Collected rather than returned one at a time: each separate refusal costs the
+		// coordinator a round trip, and a real campaign spent five of them on one dispatch.
+		const problems: Array<{ code: string; reason: string }> = [];
 		const pin = parseModelPin(input.model);
 		if (!pin) {
 			const seen = typeof input.model === "string" && input.model ? `"${input.model}"` : "nothing";
-			return deny(
-				"CG002",
-				`Pin the model as provider/model:effort, for example openai-codex/gpt-5.6-luna:high. This launch carries ${seen}. A bare id inherits the role's own default effort, and no model key at all inherits the session model. The thinking field does not count as a pin.`,
-			);
+			problems.push({
+				code: "CG002",
+				reason: `Pin the model as provider/model:effort, for example openai-codex/gpt-5.6-luna:high. This launch carries ${seen}. A bare id inherits the role's own default effort, and no model key at all inherits the session model. The thinking field does not count as a pin.`,
+			});
 		}
 		const task = text(input.task);
 		const route = parseRouteHeader(task);
 		if (!route) {
-			return deny(
-				"CG003",
-				"Start the prompt with a routing header, then the guard records it as the routing-table row for this dispatch:\nROUTE: <key> | class <1|2|3> | <provider/model:effort> | <why this class>\nRouting is planned before and proved after. A dispatch with no declared row is an undecided one.",
-			);
+			problems.push({
+				code: "CG003",
+				reason: "Start the prompt with a routing header, exactly this shape and nothing else:\nROUTE: <key> | class <1|2|3> | <provider/model:effort> | <why this class>\nRouting is planned before and proved after. A dispatch with no declared row is an undecided one.",
+			});
+		} else {
+			if (route.model !== text(input.model)) {
+				problems.push({
+					code: "CG004",
+					reason: `The routing header declares ${route.model} but the launch carries ${text(input.model)}. The table and the call must agree, or the table proves nothing.`,
+				});
+			}
+			const routeCheck = checkRoute(route);
+			if (!routeCheck.allow) problems.push({ code: routeCheck.code, reason: routeCheck.reason });
 		}
-		if (route.model !== text(input.model)) {
-			return deny(
-				"CG004",
-				`The routing header declares ${route.model} but the launch carries ${text(input.model)}. The table and the call must agree, or the table proves nothing.`,
-			);
-		}
-		const keyCheck = checkKey(route.key, seenKeys, campaign);
+		if (problems.length > 0) return denyAll(problems);
+
+		const declared = route as RouteHeader;
+		const keyCheck = checkKey(declared.key, seenKeys, campaign);
 		if (!keyCheck.allow) return keyCheck;
-		const routeCheck = checkRoute(route);
-		if (!routeCheck.allow) return routeCheck;
-		targets.push({ routeKey: route.key, prompt: task, agent, declaredClass: route.cls, model: text(input.model) });
+		targets.push({ routeKey: declared.key, prompt: task, agent, declaredClass: declared.cls, model: text(input.model) });
 	}
 
 	if (campaign.lastStatusAt !== null && now - campaign.lastStatusAt > config.statusMaxAgeMs) {
@@ -800,44 +825,47 @@ export function checkWriterCap(campaign: Campaign, newWriters: number, config: G
 
 /** The boundaries every dispatched prompt has to carry, read out of the verdict. */
 function checkBoundaries(verdict: PromptVerdict, kind: JudgedKind, campaign: Campaign): GuardDecision {
+	const problems: Array<{ code: string; reason: string }> = [];
 	const worktree = verdict.worktree;
+
 	if (!worktree) {
-		return deny(
-			"CG009",
-			`State the full resolved worktree path verbatim, and make it the campaign worktree ${campaign.worktree} or a lane worktree beside it. An agent spending turns rediscovering the environment is a dispatch defect, and an agent pointed at an unrelated tree is worse.`,
-		);
-	}
-	if (/^(\/tmp|\/private\/var\/folders|\/var\/folders)/.test(worktree)) {
+		problems.push({
+			code: "CG009",
+			reason: `State the full resolved worktree path verbatim, and make it the campaign worktree ${campaign.worktree} or a lane worktree beside it. An agent spending turns rediscovering the environment is a dispatch defect, and an agent pointed at an unrelated tree is worse.`,
+		});
+	} else if (/^(\/tmp|\/private\/var\/folders|\/var\/folders)/.test(worktree)) {
 		return deny(
 			"CG013",
 			`${worktree} is an ephemeral path. The worktree, the plan, the handoff doc, and the notes all live under ~/.agents/worktrees or the repo, never /tmp or $TMPDIR.`,
 		);
-	}
-	const parent = campaign.worktree.slice(0, campaign.worktree.lastIndexOf("/") + 1);
-	if (worktree !== campaign.worktree && !(parent.length > 1 && worktree.startsWith(parent))) {
-		return deny(
-			"CG009",
-			`This prompt points the agent at ${worktree}, which is neither the campaign worktree ${campaign.worktree} nor a lane worktree beside it.`,
-		);
+	} else {
+		const parent = campaign.worktree.slice(0, campaign.worktree.lastIndexOf("/") + 1);
+		if (worktree !== campaign.worktree && !(parent.length > 1 && worktree.startsWith(parent))) {
+			problems.push({
+				code: "CG009",
+				reason: `This prompt points the agent at ${worktree}, which is neither the campaign worktree ${campaign.worktree} nor a lane worktree beside it.`,
+			});
+		}
 	}
 
 	if (kind !== "investigate" && !verdict.expectedHead) {
-		return deny(
-			"CG009",
-			'Name the exact expected HEAD sha, as "at exact HEAD <sha>". Without it, a returned diff cannot be attributed to this dispatch.',
-		);
+		problems.push({
+			code: "CG009",
+			reason: 'Name the exact expected HEAD sha, as "at exact HEAD <sha>". Without it, a returned diff cannot be attributed to this dispatch.',
+		});
 	}
 	if (kind === "implement" && !verdict.stopsOnHeadMismatch) {
-		return deny(
-			"CG009",
-			"Tell the agent to stop and report if HEAD differs from the expected sha. A preflight with no instruction for the mismatch case is a sha the agent is free to ignore.",
-		);
+		problems.push({
+			code: "CG009",
+			reason: "Tell the agent to stop and report if HEAD differs from the expected sha. A preflight with no instruction for the mismatch case is a sha the agent is free to ignore.",
+		});
 	}
 	if (!verdict.forbidsPush) {
-		return deny(
-			"CG009",
-			"The prompt must say the agent commits locally and never pushes, never runs gh, and never opens a PR. Pushing and PR state belong to the coordinator alone.",
-		);
+		problems.push({
+			code: "CG009",
+			reason: "The prompt must say the agent commits locally and never pushes, never runs gh, and never opens a PR. Pushing and PR state belong to the coordinator alone.",
+		});
 	}
-	return { allow: true };
+
+	return problems.length === 0 ? { allow: true } : denyAll(problems);
 }
