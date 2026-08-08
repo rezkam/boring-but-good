@@ -69,7 +69,9 @@ export interface RouteHeader {
 	key: string;
 	/** Which table the number belongs to: implementation classes or review classes. */
 	axis: "class" | "review";
-	cls: number;
+	/** 1, 2, or 3 for the implementation axis; 1 or 2 for review. Kept finite so a parsed
+	 * route stays assignable where an implementation class is required. */
+	cls: ImplementationClass;
 	model: string;
 	reason: string;
 }
@@ -259,13 +261,15 @@ const TIERS: Array<{ family: RegExp; label: string; efforts: Partial<Record<Thin
  * left the mandatory final pass enforceable only by coincidence. Review runs once, at the
  * end, so these two classes differ by branch risk rather than by stage.
  */
-const REVIEW_TIERS: Array<{ family: RegExp; label: string; efforts: Partial<Record<ThinkingLevel, number>> }> = [
+export type ReviewClass = 1 | 2;
+
+const REVIEW_TIERS: Array<{ family: RegExp; label: string; efforts: Partial<Record<ThinkingLevel, ReviewClass>> }> = [
 	{ family: /opus/, label: "claude-opus-5", efforts: { high: 1, xhigh: 2 } },
 	{ family: /terra/, label: "gpt-5.6-terra", efforts: { xhigh: 1 } },
 	{ family: /sol/, label: "gpt-5.6-sol", efforts: { xhigh: 2 } },
 ];
 
-export function reviewClass(modelId: string, effort: ThinkingLevel): number | null {
+export function reviewClass(modelId: string, effort: ThinkingLevel): ReviewClass | null {
 	const id = modelId.toLowerCase();
 	return REVIEW_TIERS.find((tier) => tier.family.test(id))?.efforts[effort] ?? null;
 }
@@ -313,7 +317,7 @@ export function parseRouteHeader(text: string): RouteHeader | null {
 	const tier = /^(class|review)\s*([123])$/i.exec(parts[1]);
 	if (!tier) return null;
 	const axis = tier[1].toLowerCase() as "class" | "review";
-	const cls = Number(tier[2]);
+	const cls = Number(tier[2]) as ImplementationClass;
 	if (axis === "review" && cls > 2) return null;
 	return {
 		key: parts[0],
@@ -484,6 +488,13 @@ function readChild(body: string, children: ScriptChild[]): ScriptChild | string 
 	const child = { agent, model: readField(body, "model") ?? "", task: readField(body, "task") ?? "", context: readField(body, "context") };
 	children.push(child);
 	return child;
+}
+
+/** The routing row the guard will accept for this role, so a correction cannot be refused. */
+export function routeShapeFor(agent: string | undefined): string {
+	return agent === "campaign-reviewer"
+		? "ROUTE: <key> | review <1|2> | <provider/model:effort> | <why this class>"
+		: "ROUTE: <key> | class <1|2|3> | <provider/model:effort> | <why this class>";
 }
 
 function truncate(value: string): string {
@@ -781,7 +792,7 @@ function checkCampaignAgent(agent: string | undefined): GuardDecision {
  */
 const SHAPE_CODES = new Set(["CG002", "CG003", "CG004", "CG005", "CG009", "CG012", "CG013", "CG017", "CG019"]);
 
-function dispatchContract(campaign: Campaign): string {
+function dispatchContract(campaign: Campaign, agent?: string): string {
 	return [
 		"",
 		"A dispatch that passes every check looks like this. The guard checks shape first and reads the prompt second, so satisfy all of it at once:",
@@ -790,7 +801,7 @@ function dispatchContract(campaign: Campaign): string {
 		"  role:   campaign-worker | campaign-reviewer | campaign-scout, matching the work; a writer or reviewer is the only child of its script",
 		"  tier:   class <1|2|3> for campaign-worker and campaign-scout, review <1|2> for campaign-reviewer",
 		"  pin:    provider/model:effort            (a bare id or no model key is refused)",
-		"  task:   ROUTE: <key> | class <1|2|3> | <provider/model:effort> | <why this class>",
+		`  task:   ${routeShapeFor(agent)}`,
 		"          Work in <worktree>. Writers and reviewers name the exact HEAD <sha> and stop if it differs; read-only investigations may omit it.",
 		"          <what to do, and what done means>",
 		"          Commit locally. Never push, never run gh, never open or comment on a PR.",
@@ -806,16 +817,26 @@ function dispatchContract(campaign: Campaign): string {
 	].join("\n");
 }
 
-function withContract(decision: GuardDecision, campaign: Campaign | null): GuardDecision {
+/** The role a refusal is about, when the launch names exactly one. */
+function contractRole(request: GuardRequest): string | undefined {
+	const direct = request.input.agent;
+	if (typeof direct === "string") return direct;
+	const script = text(request.input.workflowScript);
+	if (!script) return undefined;
+	const { children } = parseScriptChildren(script);
+	return children.length === 1 ? children[0].agent : undefined;
+}
+
+function withContract(decision: GuardDecision, campaign: Campaign | null, agent?: string): GuardDecision {
 	if (decision.allow || !campaign) return decision;
 	if (!SHAPE_CODES.has(decision.code) && !decision.teach) return decision;
-	return { ...decision, reason: `${decision.reason}\n${dispatchContract(campaign)}` };
+	return { ...decision, reason: `${decision.reason}\n${dispatchContract(campaign, agent)}` };
 }
 
 export function evaluateStructure(request: GuardRequest): StructureDecision {
 	const campaign = request.campaign && request.campaign.status !== "closed" ? request.campaign : null;
 	const decision = evaluateStructureInner(request);
-	return decision.allow ? decision : (withContract(decision, campaign) as StructureDecision);
+	return decision.allow ? decision : (withContract(decision, campaign, contractRole(request)) as StructureDecision);
 }
 
 function evaluateStructureInner(request: GuardRequest): StructureDecision {
@@ -954,7 +975,7 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 			if (!route) {
 				problems.push({
 					code: "CG003",
-					reason: `Child "${child.agent}" has no ROUTE header. Every child carries its own routing row, exactly this shape:\nROUTE: <key> | class <1|2|3> | <provider/model:effort> | <why this class>`,
+					reason: `Child "${child.agent}" has no ROUTE header. Every child carries its own routing row, exactly this shape:\n${routeShapeFor(child.agent)}`,
 				});
 			} else {
 				if (route.model !== child.model) {
@@ -992,7 +1013,7 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 		if (!route) {
 			problems.push({
 				code: "CG003",
-				reason: "Start the prompt with a routing header, exactly this shape and nothing else:\nROUTE: <key> | class <1|2|3> | <provider/model:effort> | <why this class>\nRouting is planned before and proved after. A dispatch with no declared row is an undecided one.",
+				reason: `Start the prompt with a routing header, exactly this shape and nothing else:\n${routeShapeFor(agent)}\nRouting is planned before and proved after. A dispatch with no declared row is an undecided one.`,
 			});
 		} else {
 			if (route.model !== text(input.model)) {
@@ -1047,7 +1068,7 @@ export function evaluateVerdicts(
 	judged: Array<{ target: JudgeTarget; verdict: PromptVerdict }>,
 ): GuardDecision {
 	const active = request.campaign && request.campaign.status !== "closed" ? request.campaign : null;
-	return withContract(evaluateVerdictsInner(request, judged), active);
+	return withContract(evaluateVerdictsInner(request, judged), active, judged.length === 1 ? judged[0].target.agent : undefined);
 }
 
 function evaluateVerdictsInner(

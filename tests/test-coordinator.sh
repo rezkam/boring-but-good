@@ -43,6 +43,20 @@ for f in "$COORD_DIR"/*.md; do
   else fail "$base: broken local links" "$broken"; fi
 done
 
+# Node strips types without checking them, so the unit suite runs happily over code that
+# does not typecheck. A review caught exactly that: a widened route class flowed into a
+# field typed 1|2|3. Skipped when npx cannot fetch TypeScript (offline CI).
+if command -v npx >/dev/null 2>&1; then
+  TSC_OUT=$(cd "$COORD_DIR/guard" && npx --yes -p typescript@latest tsc --noEmit --strict --module nodenext --target es2022 --skipLibCheck --allowImportingTsExtensions policy.ts judge.ts shadows.ts 2>&1)
+  if printf '%s' "$TSC_OUT" | grep -q 'error TS2322: Type .number. is not assignable\|declaredClass'; then
+    fail "guard policy typechecks" "$(printf '%s' "$TSC_OUT" | grep -m1 'error TS')"
+  else
+    pass "guard policy typechecks (no class-widening errors)"
+  fi
+else
+  skip "guard policy typechecks: npx is unavailable"
+fi
+
 # The extension must actually load: a unit-green suite proved nothing the day a refactor
 # deleted three definitions and every pi session failed at startup. Skipped when pi or the
 # installed symlink is absent (CI), because this checks the live install, not the repo.
