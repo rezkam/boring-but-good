@@ -234,10 +234,14 @@ test("CG008: launches are refused while the status block is stale, management ac
 });
 
 test("CG010: a route key cannot be reused while its lane is still open", () => {
-	const busy = campaign({ lanes: [{ key: "s1-parser", kind: "implement", model: "m:high", startedAt: 1, state: "returned" }] });
+	const busy = campaign({
+		lanes: [{ key: "s1-parser", kind: "implement", model: "m:high", startedAt: 1, state: "returned", note: "returned commit ab12cd34" }],
+	});
 	const { code, reason } = structure(request({ campaign: busy, input: launch() }));
 	assert.equal(code, "CG010");
-	assert.match(reason, /already open/);
+	assert.match(reason, /You already dispatched s1-parser/, "must lead with the fact that the work happened");
+	assert.match(reason, /returned commit ab12cd34/, "must replay what came back, so the retry is obviously redundant");
+	assert.match(reason, /action "integrated"/, "must name the call that unblocks the next dispatch");
 });
 
 test("CG011: corrections are capped, counted by id, runId or dir, and resume counts too", () => {
@@ -446,7 +450,7 @@ test("a script may carry investigations, but never writers or reviewers", () => 
 
 	const { code, reason } = denyJudged(req, [readOnly, verdict()]);
 	assert.equal(code, "CG010");
-	assert.match(reason, /one dispatch at a time/);
+	assert.match(reason, /one at a time/);
 
 	assert.equal(denyJudged(req, [readOnly, verdict({ kind: "review" })]).code, "CG006");
 });
@@ -556,4 +560,40 @@ test("every missing prompt boundary is reported in one refusal", () => {
 	assert.match(reason, /expected HEAD sha/);
 	assert.match(reason, /stop and report/);
 	assert.match(reason, /never pushes/);
+});
+
+test("a shape refusal teaches the rules the agent has not been shown yet", () => {
+	// Refused on structure, so the prompt was never read: the boundary rules still have to
+	// arrive now, or the retry gets refused for something it was never told.
+	const { reason } = structure(request({ input: { agent: "worker", model: "gpt-5.6-luna", task: "Do slice one.", async: true } }));
+	assert.match(reason, /exact HEAD/, "must state the HEAD requirement");
+	assert.match(reason, /Never push/, "must state the push prohibition");
+	assert.match(reason, /turnBudget/, "must state the budget prohibition");
+	assert.match(reason, /open-review/, "must state when review is allowed");
+	assert.match(reason, new RegExp(WORKTREE), "must name the campaign worktree");
+});
+
+test("state refusals stay short, because the contract is not the fix", () => {
+	const stale = structure({ ...request(), now: 1_000 + 20 * 60_000, input: launch({ async: true }) });
+	assert.equal(stale.code, "CG008");
+	assert.doesNotMatch(stale.reason, /turnBudget/, "a stale status block is fixed by printing one, not by rewriting the dispatch");
+});
+
+test("a writer hidden in a script is told which call to make instead", () => {
+	const header = "ROUTE: s1 | class 1 | openai-codex/gpt-5.6-luna:high | mechanical edit";
+	const script = `runs.run('s1', {agent:'worker', model:'openai-codex/gpt-5.6-luna:high', task: \`${header}\`})`;
+	const { code, reason } = denyJudged(request({ input: { workflowScript: script, async: true } }), [verdict()]);
+	assert.equal(code, "CG010");
+	assert.match(reason, /one direct subagent call/, "must name the call that works");
+	assert.match(reason, /integrated/, "must say what unblocks the next writer");
+	assert.match(reason, /ROUTE:/, "must carry the contract, since the fix is a rewritten dispatch");
+});
+
+test("an unroutable model refusal names every model that would work", () => {
+	const task = implementTask("ROUTE: s1-parser | class 1 | openai-codex/gpt-9-nova:high | mechanical edit");
+	const { code, reason } = structure(request({ input: launch({ model: "openai-codex/gpt-9-nova:high", task }) }));
+	assert.equal(code, "CG004");
+	for (const listed of ["gpt-5.6-luna:high", "claude-sonnet:medium", "gpt-5.6-terra:medium", "claude-opus:low", "gpt-5.6-sol:medium", "claude-fable:high"]) {
+		assert.match(reason, new RegExp(listed.replace(/[.]/g, "\\.")), `must list ${listed}`);
+	}
 });

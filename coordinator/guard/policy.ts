@@ -45,6 +45,8 @@ export interface Lane {
 	runId?: string;
 	startedAt: number;
 	state: LaneState;
+	/** What the coordinator recorded when the lane returned, replayed if it tries to redispatch. */
+	note?: string;
 }
 
 export interface Campaign {
@@ -79,7 +81,7 @@ export interface GuardRequest {
 	config?: GuardConfig;
 }
 
-export type GuardDecision = { allow: true } | { allow: false; code: string; reason: string };
+export type GuardDecision = { allow: true } | { allow: false; code: string; reason: string; teach?: boolean };
 
 const STATUS_FIELDS = ["CAMPAIGN", "WORKTREE", "SLICES", "PR", "AGENTS", "DIRECT", "PARKED", "NEEDS YOU", "NEXT"] as const;
 
@@ -185,10 +187,13 @@ NOT AUTHORIZED  merge; close or reopen PRs; publish releases; touch production; 
 
 These are enforced at the tool boundary, not by your memory of them. A dispatch that breaks one fails:
 
-- Every launch pins provider/model:effort. A bare id inherits the role default; no model key inherits the session model.
-- Every launch opens with a routing header:
+- Every launch pins provider/model:effort, and only these pairs route. Anything else is refused:
+${tierTable()}
+- Every launch opens with a routing header, and its model must match what the call carries:
   ROUTE: <key> | class <1|2|3> | <provider/model:effort> | <why this class>
-  Class 1 luna or sonnet, class 2 terra or opus, class 3 sol or fable. Class 3 implementation needs a real justification.
+  Class 3 implementation needs a real justification, not the word "complex".
+- Every dispatched prompt names the worktree, the exact HEAD it must be at, that the agent stops if HEAD differs, and that it commits locally and never pushes, never runs gh, never touches a PR.
+- Writer work goes out as a direct subagent call with top-level agent, model, async, and task. Never inside a workflowScript: scripts are for independent read-only investigations.
 - No turnBudget, toolBudget, or maxTurns, ever. Bound liveness with elapsed time and serial milestones.
 - Committing, staging, rebasing, pushing, and PR state are yours alone and are never dispatched.
 - Reviewers only after every slice is done and you call coordinator_campaign action "open-review". One at a time.
@@ -231,14 +236,21 @@ export function parseModelPin(model: unknown): { id: string; effort: ThinkingLev
  * a class is a model at an effort, not a model. sol and fable also carry the review tier
  * at high, which is why they list two efforts.
  */
-const TIERS: Array<{ family: RegExp; efforts: Partial<Record<ThinkingLevel, ImplementationClass>> }> = [
-	{ family: /luna/, efforts: { high: 1 } },
-	{ family: /sonnet/, efforts: { medium: 1 } },
-	{ family: /terra/, efforts: { medium: 2 } },
-	{ family: /opus/, efforts: { low: 2, medium: 3 } },
-	{ family: /sol/, efforts: { medium: 3, high: 3 } },
-	{ family: /fable/, efforts: { high: 3 } },
+const TIERS: Array<{ family: RegExp; label: string; efforts: Partial<Record<ThinkingLevel, ImplementationClass>> }> = [
+	{ family: /luna/, label: "gpt-5.6-luna", efforts: { high: 1 } },
+	{ family: /sonnet/, label: "claude-sonnet", efforts: { medium: 1 } },
+	{ family: /terra/, label: "gpt-5.6-terra", efforts: { medium: 2 } },
+	{ family: /opus/, label: "claude-opus", efforts: { low: 2, medium: 3 } },
+	{ family: /sol/, label: "gpt-5.6-sol", efforts: { medium: 3, high: 3 } },
+	{ family: /fable/, label: "claude-fable", efforts: { high: 3 } },
 ];
+
+/** Every routable model and effort, so a refusal names the choices instead of implying them. */
+function tierTable(): string {
+	return TIERS.flatMap((tier) =>
+		Object.entries(tier.efforts).map(([effort, cls]) => `  class ${cls}  ${tier.label}:${effort}`),
+	).join("\n");
+}
 
 function tierFor(modelId: string) {
 	const id = modelId.toLowerCase();
@@ -314,8 +326,8 @@ function runIdOf(input: Record<string, unknown>): string {
 	return text(input.id) || text(input.runId) || text(input.dir);
 }
 
-function deny(code: string, reason: string): GuardDecision {
-	return { allow: false, code, reason };
+function deny(code: string, reason: string, teach = false): GuardDecision {
+	return { allow: false, code, reason, ...(teach ? { teach: true } : {}) };
 }
 
 /**
@@ -489,7 +501,7 @@ function checkRoute(route: RouteHeader): GuardDecision {
 		}
 		return deny(
 			"CG004",
-			`${pin.id} is not in the tier table, so its class cannot be checked. Add it to the table or route to a listed model.`,
+			`${pin.id} is not in the tier table, so its class cannot be checked. Route to one of these exactly, model and effort together:\n${tierTable()}\nThe provider prefix stays as your harness spells it, for example openai-codex/gpt-5.6-luna:high.`,
 		);
 	}
 	if (actualClass !== route.cls) {
@@ -530,14 +542,58 @@ export interface JudgeTarget {
 }
 
 export type StructureDecision =
-	| { allow: false; code: string; reason: string }
+	| { allow: false; code: string; reason: string; teach?: boolean }
 	| { allow: true; judge: JudgeTarget[] };
 
 /**
  * Phase one: everything decidable from the call itself. Runs before any model call, so a
  * malformed dispatch is refused without spending one.
  */
+/**
+ * Codes where the fix is to rewrite the dispatch itself. Those refusals carry the whole
+ * contract, because the guard checks shape before it reads the prompt, so an agent that
+ * fixes only what it was told still gets refused on the next phase for something it was
+ * never shown. State refusals are excluded: the fix there is to do something else first,
+ * and it is already named in the reason.
+ */
+const SHAPE_CODES = new Set(["CG002", "CG003", "CG004", "CG005", "CG009", "CG012", "CG013", "CG017"]);
+
+function dispatchContract(campaign: Campaign): string {
+	return [
+		"",
+		"A dispatch that passes every check looks like this. The guard checks shape first and reads the prompt second, so satisfy all of it at once:",
+		"",
+		"  model:  provider/model:effort            (a bare id or no model key is refused)",
+		"  async:  true or false, stated explicitly",
+		"  task:   ROUTE: <key> | class <1|2|3> | <provider/model:effort> | <why this class>",
+		"          Work in <worktree>. It must be at exact HEAD <sha>; stop and report if it differs.",
+		"          <what to do, and what done means>",
+		"          Commit locally. Never push, never run gh, never open or comment on a PR.",
+		"",
+		`  <worktree> is ${campaign.worktree} or a lane worktree beside it, never /tmp or $TMPDIR.`,
+		"  <sha> is a real sha you read before dispatching, not a placeholder. Any <angle-bracket> field left unrendered is refused.",
+		"",
+		"And it must not carry:",
+		"  turnBudget, toolBudget, or maxTurns          bound liveness with elapsed time and serial milestones instead",
+		"  an instruction to commit for you, push, rebase, cherry-pick, or touch PR state",
+		"  review work before every slice is done and you have called coordinator_campaign action \"open-review\"",
+		"  a class the model does not match: class 1 luna or sonnet, class 2 terra or opus, class 3 sol or fable",
+	].join("\n");
+}
+
+function withContract(decision: GuardDecision, campaign: Campaign | null): GuardDecision {
+	if (decision.allow || !campaign) return decision;
+	if (!SHAPE_CODES.has(decision.code) && !decision.teach) return decision;
+	return { ...decision, reason: `${decision.reason}\n${dispatchContract(campaign)}` };
+}
+
 export function evaluateStructure(request: GuardRequest): StructureDecision {
+	const campaign = request.campaign && request.campaign.status !== "closed" ? request.campaign : null;
+	const decision = evaluateStructureInner(request);
+	return decision.allow ? decision : (withContract(decision, campaign) as StructureDecision);
+}
+
+function evaluateStructureInner(request: GuardRequest): StructureDecision {
 	const config = request.config ?? DEFAULT_CONFIG;
 	const { input, now } = request;
 	// A closed campaign is history, not a live one: enforcement returns to inert so ordinary
@@ -718,7 +774,7 @@ function checkKey(key: string, seen: Set<string>, campaign: Campaign): GuardDeci
 	if (open) {
 		return deny(
 			"CG010",
-			`Lane ${key} is already open (${open.state}). Reusing the key would drop the first attempt from the accounting, so its partial work would stop holding capacity and stop blocking review. Integrate it with coordinator_lane, or mark it dead if the run failed, then dispatch again.`,
+			`You already dispatched ${key} and it is ${open.state}. Do not dispatch it again: you would redo work that has already happened.${open.note ? `\n\nWhat it returned: ${open.note}` : ""}\n\nReview what came back, then call coordinator_lane with action "integrated" and key "${key}" once it is on the campaign branch, or action "dead" if the run failed and you are abandoning it. Only then dispatch the next slice, under a new key.`,
 		);
 	}
 	return { allow: true };
@@ -729,6 +785,14 @@ function checkKey(key: string, seen: Set<string>, campaign: Campaign): GuardDeci
  * reading; the rules are still here, and still deterministic.
  */
 export function evaluateVerdicts(
+	request: GuardRequest,
+	judged: Array<{ target: JudgeTarget; verdict: PromptVerdict }>,
+): GuardDecision {
+	const active = request.campaign && request.campaign.status !== "closed" ? request.campaign : null;
+	return withContract(evaluateVerdictsInner(request, judged), active);
+}
+
+function evaluateVerdictsInner(
 	request: GuardRequest,
 	judged: Array<{ target: JudgeTarget; verdict: PromptVerdict }>,
 ): GuardDecision {
@@ -745,13 +809,15 @@ export function evaluateVerdicts(
 		if (isScript && kind === "implement") {
 			return deny(
 				"CG010",
-				`Child "${target.agent ?? target.routeKey}" is writer work. Writers go out one dispatch at a time so each becomes a tracked lane you integrate before the next: a script hides them behind a single call, which is how five of them once opened in one instant and none landed for hours. Scripts are for independent read-only investigations.`,
+				`Child "${target.agent ?? target.routeKey}" is writer work inside a workflow script. Do not use workflowScript for work that writes code.\n\nDrop the script and make one direct subagent call instead, passing agent, model, async, and task as top-level fields. Dispatch the next writer only after this one returns and you record it with coordinator_lane action "integrated".\n\nWriters go out one at a time so each becomes a tracked lane: a script hides them behind a single call, which is how five once opened in one instant and none landed for hours. Scripts are for independent read-only investigations.`,
+				true,
 			);
 		}
 		if (isScript && kind === "review") {
 			return deny(
 				"CG006",
-				`Child "${target.agent ?? target.routeKey}" is a review. Review is one dispatch, once, at the end, so it is never a child of a script.`,
+				`Child "${target.agent ?? target.routeKey}" is a review. Review is one dispatch, once, at the end, so it is never a child of a script. Drop the workflowScript and make one direct subagent call when the review phase opens.`,
+				true,
 			);
 		}
 
