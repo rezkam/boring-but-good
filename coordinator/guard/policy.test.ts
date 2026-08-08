@@ -4,6 +4,10 @@ import { test } from "node:test";
 import type { PromptVerdict } from "./judge.ts";
 import {
 	checkWriterCap,
+	DEFAULT_TIERS,
+	findTierClash,
+	parseTierEntries,
+	withTierList,
 	contractPrompt,
 	continuationPrompt,
 	DEFAULT_CONFIG,
@@ -753,4 +757,33 @@ test("CG012: the top of the review axis needs a reason too, not just class 3", (
 		[verdict({ kind: "review", stopsOnHeadMismatch: false, classJustification: "label" })],
 	);
 	assert.deepEqual(routine, { allow: true });
+});
+
+test("a pin may not sit in two classes on the same axis", () => {
+	const tiers = DEFAULT_TIERS;
+	assert.match(
+		findTierClash(tiers, "class", 3, ["openai-codex/gpt-5.6-luna:high"]) ?? "",
+		/already in class 1/,
+		"the same pin in two classes makes the enforced class ambiguous",
+	);
+	assert.equal(findTierClash(tiers, "class", 3, ["claude-bridge/claude-fable-5:high"]), null);
+	// The same model at a different effort is a different pin, so it is not a clash.
+	assert.equal(findTierClash(tiers, "class", 1, ["claude-bridge/claude-opus-5:xhigh"]), null);
+	// Axes are independent: opus:high is review 1 and may still be set on the class axis.
+	assert.equal(findTierClash(tiers, "class", 2, ["claude-bridge/claude-opus-5:high"]), null);
+});
+
+test("a shape refusal quotes the tiers actually enforced, not a hardcoded mapping", () => {
+	const custom = withTierList(DEFAULT_TIERS, "class", 3, ["claude-bridge/claude-fable-5:high"]);
+	const { reason } = structure(request({ tiers: custom, input: launch({ model: "gpt-5.6-luna" }) }));
+	assert.match(reason, /claude-fable-5:high/, "the override has to appear in the correction");
+	assert.doesNotMatch(reason, /class 3 sol or fable/, "and the old static mapping must not");
+});
+
+test("parseTierEntries refuses what the pin rule exists to prevent", () => {
+	assert.equal(parseTierEntries("openai-codex/gpt-5.6-luna").ok, false, "no effort");
+	assert.equal(parseTierEntries("gpt-5.6-luna:high").ok, false, "no provider");
+	assert.equal(parseTierEntries("").ok, false, "nothing at all");
+	const good = parseTierEntries("openai-codex/gpt-5.6-luna:high, claude-bridge/claude-sonnet-5:medium");
+	assert.deepEqual(good.ok && good.entries, ["openai-codex/gpt-5.6-luna:high", "claude-bridge/claude-sonnet-5:medium"]);
 });
