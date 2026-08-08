@@ -385,6 +385,7 @@ export interface ScriptChild {
 	agent: string;
 	model: string;
 	task: string;
+	context?: string;
 }
 
 /**
@@ -392,19 +393,155 @@ export interface ScriptChild {
  * a whole script cannot tell that child A declared what child B launched, so each child's
  * own object is read: its agent, its model, and its task with its routing header.
  */
-export function parseScriptChildren(script: string): { children: ScriptChild[]; agentKeys: number } {
+export function parseScriptChildren(script: string): { children: ScriptChild[]; agentKeys: number; defect?: string } {
 	const agentKeys = countAgentKeys(script);
 	const children: ScriptChild[] = [];
-	for (let index = 0; index < script.length; index++) {
-		if (script[index] !== "{") continue;
-		const body = readObjectLiteral(script, index);
-		if (!body) continue;
-		const agent = readField(body, "agent");
-		if (agent === undefined) continue;
-		children.push({ agent, model: readField(body, "model") ?? "", task: readField(body, "task") ?? "" });
-		index += body.length;
+
+	// Children are read from the runs.run and runs.all call sites, not from any object that
+	// happens to sit in the script: a compliant literal defined once and fanned out through
+	// spreads or variables would otherwise be judged once and executed many times. Every
+	// spec argument must be a literal object, or the script cannot be verified at all.
+	for (const site of findCallSites(script)) {
+		const args = site.args.trimStart();
+		if (site.callee === "runs.run") {
+			const spec = skipFirstArgument(args);
+			if (spec === null || spec[0] !== "{") {
+				return { children, agentKeys, defect: `runs.run's spec argument must be a literal object; "${truncate(args)}" cannot be verified.` };
+			}
+			const child = readChild(spec, children);
+			if (typeof child === "string") return { children, agentKeys, defect: child };
+		} else {
+			if (args[0] !== "[") {
+				return { children, agentKeys, defect: `runs.all takes a literal array of literal child objects; "${truncate(args)}" cannot be verified.` };
+			}
+			let index = 1;
+			while (index < args.length) {
+				while (index < args.length && /[\s,]/.test(args[index])) index++;
+				if (args[index] === "]" || index >= args.length) break;
+				if (args[index] !== "{") {
+					return { children, agentKeys, defect: `every runs.all element must be a literal object; "${truncate(args.slice(index))}" cannot be verified.` };
+				}
+				const body = readObjectLiteral(args, index);
+				if (!body) return { children, agentKeys, defect: "unterminated object literal in runs.all." };
+				const child = readChild(body, children);
+				if (typeof child === "string") return { children, agentKeys, defect: child };
+				index += body.length;
+			}
+		}
 	}
 	return { children, agentKeys };
+}
+
+/** Reads one child spec, or returns why it cannot be trusted. */
+function readChild(body: string, children: ScriptChild[]): ScriptChild | string {
+	if (hasTopLevelSpread(body)) {
+		return `a child spec uses spread syntax (${truncate(body)}), so what it launches cannot be read. Write every field literally.`;
+	}
+	const agent = readField(body, "agent");
+	if (agent === undefined) {
+		return `a child spec has no literal agent field (${truncate(body)}). Shorthand and computed fields cannot be verified; write agent, model, and task literally.`;
+	}
+	const child = { agent, model: readField(body, "model") ?? "", task: readField(body, "task") ?? "", context: readField(body, "context") };
+	children.push(child);
+	return child;
+}
+
+function truncate(value: string): string {
+	const flat = value.replace(/\s+/g, " ").trim();
+	return flat.length > 80 ? `${flat.slice(0, 77)}...` : flat;
+}
+
+/** Spread tokens at the top level of an object literal, ignoring nested strings and objects. */
+function hasTopLevelSpread(body: string): boolean {
+	let depth = 0;
+	let quote: string | null = null;
+	for (let index = 0; index < body.length; index++) {
+		const char = body[index];
+		if (quote) {
+			if (char === "\\") index++;
+			else if (char === quote) quote = null;
+			continue;
+		}
+		if (char === "'" || char === '"' || char === "`") quote = char;
+		else if (char === "{" || char === "[" || char === "(") depth++;
+		else if (char === "}" || char === "]" || char === ")") depth--;
+		else if (char === "." && depth === 1 && body.startsWith("...", index)) return true;
+	}
+	return false;
+}
+
+/** Every runs.run( and runs.all( call outside string literals, with its argument text. */
+function findCallSites(script: string): Array<{ callee: "runs.run" | "runs.all"; args: string }> {
+	const sites: Array<{ callee: "runs.run" | "runs.all"; args: string }> = [];
+	let quote: string | null = null;
+	for (let index = 0; index < script.length; index++) {
+		const char = script[index];
+		if (quote) {
+			if (char === "\\") index++;
+			else if (char === quote) quote = null;
+			continue;
+		}
+		if (char === "'" || char === '"' || char === "`") {
+			quote = char;
+			continue;
+		}
+		for (const callee of ["runs.run", "runs.all"] as const) {
+			if (!script.startsWith(callee, index)) continue;
+			if (index > 0 && /[\w$.]/.test(script[index - 1])) continue;
+			let cursor = index + callee.length;
+			while (cursor < script.length && /\s/.test(script[cursor])) cursor++;
+			if (script[cursor] !== "(") continue;
+			const args = readParenthesized(script, cursor);
+			if (args !== null) {
+				sites.push({ callee, args });
+				index = cursor;
+			}
+			break;
+		}
+	}
+	return sites;
+}
+
+/** The text between a paren and its match, string-aware. */
+function readParenthesized(source: string, start: number): string | null {
+	let depth = 0;
+	let quote: string | null = null;
+	for (let index = start; index < source.length; index++) {
+		const char = source[index];
+		if (quote) {
+			if (char === "\\") index++;
+			else if (char === quote) quote = null;
+			continue;
+		}
+		if (char === "'" || char === '"' || char === "`") quote = char;
+		else if (char === "(") depth++;
+		else if (char === ")") {
+			depth--;
+			if (depth === 0) return source.slice(start + 1, index);
+		}
+	}
+	return null;
+}
+
+/** Skips runs.run's key argument, returning the rest, or null when the key is not a literal. */
+function skipFirstArgument(args: string): string | null {
+	const quote = args[0];
+	if (quote !== "'" && quote !== '"' && quote !== "`") return null;
+	for (let index = 1; index < args.length; index++) {
+		if (args[index] === "\\") {
+			index++;
+			continue;
+		}
+		if (args[index] === quote) {
+			let cursor = index + 1;
+			while (cursor < args.length && /\s/.test(args[cursor])) cursor++;
+			if (args[cursor] !== ",") return null;
+			cursor++;
+			while (cursor < args.length && /\s/.test(args[cursor])) cursor++;
+			return args.slice(cursor);
+		}
+	}
+	return null;
 }
 
 /**
@@ -681,6 +818,22 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 	const budgets = checkBudgets(input, script);
 	if (!budgets.allow) return budgets;
 
+	// Knobs that swap what the child actually runs: an inline config or contract replaces
+	// the role definition, agentScope excludes the guard's own agents directory, a skill
+	// injects instructions the campaign never reviewed, and a forked or caught-up context
+	// hands the child the coordinator's conversation. Each recreates the exact behavior the
+	// campaign roles exist to prevent.
+	const swappers = ["config", "agentContract", "agentScope", "scope", "skill"].filter((key) => input[key] !== undefined);
+	if (text(input.context) === "fork") swappers.push("context: \"fork\"");
+	if (text(input.catchUp) === "latest") swappers.push("catchUp: \"latest\"");
+	if (swappers.length > 0) {
+		return deny(
+			"CG019",
+			`This launch carries ${swappers.join(", ")}, which ${swappers.length > 1 ? "replace" : "replaces"} what the dispatched agent runs with or sees. A campaign dispatch is a campaign role, a pinned model, and a task: fresh context, no inline config, no scope override, no injected skill. Remove ${swappers.length > 1 ? "them" : "it"} and redispatch.`,
+			true,
+		);
+	}
+
 	const agent = typeof input.agent === "string" ? input.agent : undefined;
 	if (agent && COORDINATOR_OWNED_AGENTS.has(agent.toLowerCase())) {
 		return deny(
@@ -702,7 +855,14 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 	const seenKeys = new Set<string>();
 
 	if (script) {
-		const { children, agentKeys } = parseScriptChildren(script);
+		const { children, agentKeys, defect } = parseScriptChildren(script);
+		if (defect) {
+			return deny(
+				"CG002",
+				`This script cannot be verified: ${defect} The guard reads what each child will launch from the literal call arguments, and a script it cannot read is a script it refuses.`,
+				true,
+			);
+		}
 		if (children.length === 0 || children.length !== agentKeys) {
 			return deny(
 				"CG002",
@@ -715,6 +875,12 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 			const problems: Array<{ code: string; reason: string }> = [];
 			const controlled = checkCampaignAgent(child.agent);
 			if (!controlled.allow) problems.push({ code: controlled.code, reason: controlled.reason });
+			if (child.context === "fork") {
+				problems.push({
+					code: "CG019",
+					reason: `Child "${child.agent}" asks for context: "fork", which copies the coordinator's whole conversation into the child. Campaign children run on fresh context with an explicit task.`,
+				});
+			}
 			if (parseModelPin(child.model) === null) {
 				problems.push({
 					code: "CG002",

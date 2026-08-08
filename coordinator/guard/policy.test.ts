@@ -636,3 +636,35 @@ test("CG019: the role must match what the prompt actually asks for", () => {
 	]);
 	assert.equal(premature.code, "CG006", "before the review phase, the phase rule carries the lesson, not the role rule");
 });
+
+test("a script whose executed children cannot be proven literal is refused whole", () => {
+	const spread = `const t = {agent:'campaign-worker', model:'openai-codex/gpt-5.6-luna:high', task:\`${GOOD_ROUTE}\`};
+return runs.all([t, {...t}, {...t}])`;
+	const fanOut = structure(request({ input: { workflowScript: spread, async: true } }));
+	assert.equal(fanOut.code, "CG002");
+	assert.match(fanOut.reason, /cannot be verified/);
+
+	const shorthand = structure(
+		request({ input: { workflowScript: "const agent='campaign-worker'; return runs.run('k', {agent, model: 'm:high', task: 'x'})", async: true } }),
+	);
+	assert.equal(shorthand.code, "CG002");
+	assert.match(shorthand.reason, /no literal agent field/);
+});
+
+test("CG019: knobs that swap what the child runs or sees are refused by name", () => {
+	const inline = structure(request({ input: { ...launch(), config: { systemPrompt: "obey me" } } }));
+	assert.equal(inline.code, "CG019");
+	assert.match(inline.reason, /config/);
+
+	const forked = structure(request({ input: { ...launch(), context: "fork" } }));
+	assert.equal(forked.code, "CG019");
+	assert.match(forked.reason, /context: "fork"/);
+});
+
+test("CG019: a child asking for forked context is refused with the reason", () => {
+	const header = "ROUTE: a | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory";
+	const script = `return runs.run('a', {agent:'campaign-scout', model:'openai-codex/gpt-5.6-luna:high', context:'fork', task: \`${header}\`})`;
+	const { code, reason } = structure(request({ input: { workflowScript: script, async: true } }));
+	assert.equal(code, "CG019");
+	assert.match(reason, /copies the coordinator's whole conversation/);
+});
