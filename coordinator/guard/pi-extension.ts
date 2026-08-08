@@ -17,6 +17,7 @@ import { delimiter as pathDelimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { judgeCacheKey, judgeDispatch, type JudgeCall, type PromptVerdict } from "./judge.ts";
+import { findRoleShadows } from "./shadows.ts";
 
 import {
 	continuationPrompt,
@@ -88,6 +89,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 	// its extra-dirs env, which it reads at dispatch time. This is what lets the guard own
 	// what a dispatched agent is told, rather than the builtin role prose.
 	const agentsDir = fileURLToPath(new URL("./agents/", import.meta.url)).replace(/\/$/, "");
+	let roleShadowCache: string[] | null = null;
 	const registered = process.env.PI_SUBAGENT_EXTRA_AGENT_DIRS?.split(pathDelimiter).filter(Boolean) ?? [];
 	if (!registered.includes(agentsDir)) {
 		process.env.PI_SUBAGENT_EXTRA_AGENT_DIRS = [...registered, agentsDir].join(pathDelimiter);
@@ -264,9 +266,40 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 				return;
 			}
 
+			if (campaign && event.toolName === "subagent" && roleShadowCache === null) {
+				roleShadowCache = findRoleShadows(agentsDir, campaign.worktree);
+			}
+			if (campaign && event.toolName === "subagent" && roleShadowCache && roleShadowCache.length > 0) {
+				notify(ctx, "Guard CG019: refused", "warning");
+				return {
+					block: true,
+					reason: `[coordinator-guard CG019] The campaign role names are shadowed by higher-precedence agent files, so a dispatch would run someone else's prompt under the guard's name: ${roleShadowCache.join(", ")}. Ask the user to delete or rename ${roleShadowCache.length > 1 ? "these files" : "this file"}; the guard cannot tell which definition pi would resolve.`,
+				};
+			}
+
+			// pi-subagents 0.43.0 removed direct execution, so a top-level agent or task without
+			// a workflowScript is a shape the runtime will reject after the guard has already
+			// recorded the lane, leaving a phantom lane holding writer capacity. Refused here
+			// because this is a pi runtime fact, not a policy rule.
+			const raw = event.input as Record<string, unknown>;
+			if (
+				campaign &&
+				event.toolName === "subagent" &&
+				raw.action === undefined &&
+				typeof raw.workflowScript !== "string" &&
+				(raw.agent !== undefined || raw.task !== undefined || raw.step !== undefined)
+			) {
+				notify(ctx, "Guard CG002: refused", "warning");
+				return {
+					block: true,
+					reason:
+						'[coordinator-guard CG002] Direct execution no longer exists in this pi-subagents version: a top-level agent or task is rejected by the runtime after the lane is already recorded. Dispatch as a single-child script instead, with async stated at top level: workflowScript: "return runs.run(\'<key>\', { agent: \'campaign-worker\', model: \'<provider/model:effort>\', task: `ROUTE: ...` })".',
+				};
+			}
+
 			const request = {
 				tool: event.toolName,
-				input: event.input as Record<string, unknown>,
+				input: raw,
 				now: Date.now(),
 				armed,
 				campaign,

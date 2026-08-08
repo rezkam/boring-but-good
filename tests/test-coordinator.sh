@@ -43,6 +43,20 @@ for f in "$COORD_DIR"/*.md; do
   else fail "$base: broken local links" "$broken"; fi
 done
 
+# The extension must actually load: a unit-green suite proved nothing the day a refactor
+# deleted three definitions and every pi session failed at startup. Skipped when pi or the
+# installed symlink is absent (CI), because this checks the live install, not the repo.
+GUARD_LINK="$HOME/.pi/agent/extensions/coordinator-guard"
+if command -v pi >/dev/null 2>&1 && [ -e "$GUARD_LINK" ]; then
+  if LOAD_OUT=$(timeout 120 pi -p --no-session --no-skills -t read --model openai-codex/gpt-5.6-luna --thinking low "reply with exactly: loaded" 2>&1) && ! printf '%s' "$LOAD_OUT" | grep -q 'Failed to load extension'; then
+    pass "pi loads the guard extension"
+  else
+    fail "pi loads the guard extension" "$(printf '%s' "$LOAD_OUT" | grep -m1 'Failed to load extension' || echo 'pi run failed')"
+  fi
+else
+  skip "pi loads the guard extension: pi or the installed extension link is absent"
+fi
+
 # The load-bearing dispatch rules must be in the skill body, not one pointer away.
 if grep -q 'runs.run.*runs.all. child carries its own literal' "$SKILLMD"; then
   pass "SKILL.md names the pi per-child pinning rule directly"
@@ -242,7 +256,7 @@ else
     if [ "$NODE_OK" != "1" ]; then
         skip "guard policy tests (node $(node -p 'process.versions.node') predates type stripping)"
     else
-        GUARD_OUT=$(cd "${COORD_DIR}/guard" && node --test policy.test.ts judge.test.ts templates.test.ts 2>&1)
+        GUARD_OUT=$(cd "${COORD_DIR}/guard" && node --test policy.test.ts judge.test.ts templates.test.ts shadows.test.ts 2>&1)
         GUARD_RC=$?
         GUARD_PASS=$(printf '%s' "$GUARD_OUT" | grep -oE '^. pass [0-9]+' | grep -oE '[0-9]+' | tail -1)
         if [ "$GUARD_RC" -eq 0 ]; then
