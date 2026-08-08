@@ -819,15 +819,22 @@ function readObjectLiteral(source: string, start: number): string | null {
 
 /** A field's literal string value, or undefined when it is absent or not a literal. */
 /**
- * Top-level properties of an object literal, as raw source slices.
+ * Top-level properties of an object literal, as raw source slices, or null when the whole
+ * body could not be consumed as written-out properties.
  *
  * The task is free-form text that routinely discusses this guard's own vocabulary, so a
  * field cannot be located by searching the body: a prompt saying "do not ask for
  * worktree: true" is not a request for a worktree. This walks the literal instead,
  * skipping strings, template substitutions and nested structures, so only properties of
  * the child object itself are returned.
+ *
+ * Anything it cannot read as a literal property, a shorthand, a spread, a computed key,
+ * makes the whole object unverifiable rather than partially clean: the runtime still acts
+ * on those properties, so stopping early and reporting the rest as absent is a bypass.
+ * Keys keep their exact case, because JavaScript property names are case-sensitive and a
+ * differently cased twin is a different property, not the same one.
  */
-function topLevelFields(rawBody: string): Map<string, string> {
+function topLevelFields(rawBody: string): Map<string, string> | null {
 	const trimmed = rawBody.trim();
 	const objectBody = trimmed.startsWith("{")
 		? trimmed.slice(1, trimmed.endsWith("}") ? -1 : undefined)
@@ -867,18 +874,19 @@ function topLevelFields(rawBody: string): Map<string, string> {
 	};
 	while (index < objectBody.length) {
 		while (index < objectBody.length && /[\s,]/.test(objectBody[index] as string)) index++;
+		if (index >= objectBody.length) break;
 		const key = /^["']?([A-Za-z_$][\w$]*)["']?\s*:/.exec(objectBody.slice(index));
-		if (!key) break;
+		if (!key) return null;
 		const valueStart = index + key[0].length;
 		const valueEnd = skipValue(valueStart);
-		fields.set((key[1] as string).toLowerCase(), objectBody.slice(valueStart, valueEnd).trim());
+		fields.set(key[1] as string, objectBody.slice(valueStart, valueEnd).trim());
 		index = valueEnd + 1;
 	}
 	return fields;
 }
 
 function readField(objectBody: string, field: string): string | undefined {
-	const raw = topLevelFields(objectBody).get(field.toLowerCase());
+	const raw = topLevelFields(objectBody)?.get(field);
 	if (raw === undefined) return undefined;
 	const quote = raw[0];
 	if (quote !== "'" && quote !== '"' && quote !== "`") return "";
@@ -898,7 +906,9 @@ function readField(objectBody: string, field: string): string | undefined {
 
 /** A boolean the guard must act on: anything not written as a literal cannot be read as absent. */
 function readFlag(objectBody: string, field: string): boolean | "unreadable" | undefined {
-	const raw = topLevelFields(objectBody).get(field.toLowerCase());
+	const fields = topLevelFields(objectBody);
+	if (!fields) return "unreadable";
+	const raw = fields.get(field);
 	if (raw === undefined) return undefined;
 	if (raw === "true") return true;
 	if (raw === "false") return false;
