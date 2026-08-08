@@ -535,3 +535,25 @@ test("the writer cap is one rule, so the judge-off path enforces it too", () => 
 	assert.equal(checkWriterCap(campaign(), 3).allow, true);
 	assert.equal(checkWriterCap(campaign(), 4).allow, false);
 });
+
+test("every structural problem with a launch is reported in one refusal", () => {
+	// A bare model and no routing header: both are wrong, and one retry should fix both.
+	const { code, reason } = structure(
+		request({ input: { agent: "worker", model: "gpt-5.6-luna", task: "Implement slice S1.", async: true } }),
+	);
+	assert.equal(code, "CG002");
+	assert.match(reason, /2 problems/);
+	assert.match(reason, /\[CG002\]/);
+	assert.match(reason, /\[CG003\]/);
+});
+
+test("every missing prompt boundary is reported in one refusal", () => {
+	const { reason } = denyJudged(request({ input: launch() }), [
+		verdict({ worktree: null, expectedHead: null, stopsOnHeadMismatch: false, forbidsPush: false }),
+	]);
+	assert.match(reason, /4 problems/);
+	assert.match(reason, /worktree path/);
+	assert.match(reason, /expected HEAD sha/);
+	assert.match(reason, /stop and report/);
+	assert.match(reason, /never pushes/);
+});
