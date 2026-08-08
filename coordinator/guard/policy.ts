@@ -317,6 +317,19 @@ export const GPT_DEFAULT_TIERS: TierLists = {
 	},
 };
 
+/** Claude's calibrated one-entry defaults, including its separate review axis. */
+export const CLAUDE_DEFAULT_TIERS: TierLists = {
+	class: {
+		1: ["claude-bridge/claude-sonnet-5:medium"],
+		2: ["claude-bridge/claude-opus-5:low"],
+		3: ["claude-bridge/claude-opus-5:medium"],
+	},
+	review: {
+		1: ["claude-bridge/claude-opus-5:high"],
+		2: ["claude-bridge/claude-opus-5:xhigh"],
+	},
+};
+
 /** A pin's bare model name, so a list entry matches whichever provider spells it locally. */
 function bareModel(id: string): string {
 	const slash = id.lastIndexOf("/");

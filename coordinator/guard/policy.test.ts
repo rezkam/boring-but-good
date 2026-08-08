@@ -931,3 +931,20 @@ test("the GPT preset is OpenAI-only and preserves every class's intended effort"
 		},
 	});
 });
+
+test("the Claude preset is Claude-only and preserves every class's intended effort", async () => {
+	// `/campaign models claude` is symmetric with gpt: it removes the other provider from
+	// every dispatch tier, but does not flatten the distinct class and review efforts.
+	const { CLAUDE_DEFAULT_TIERS } = await import("./policy.ts");
+	assert.deepEqual(CLAUDE_DEFAULT_TIERS, {
+		class: {
+			1: ["claude-bridge/claude-sonnet-5:medium"],
+			2: ["claude-bridge/claude-opus-5:low"],
+			3: ["claude-bridge/claude-opus-5:medium"],
+		},
+		review: {
+			1: ["claude-bridge/claude-opus-5:high"],
+			2: ["claude-bridge/claude-opus-5:xhigh"],
+		},
+	});
+});
