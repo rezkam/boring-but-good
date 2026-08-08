@@ -35,7 +35,7 @@ case "$tool" in
          # vim for 1022 seconds before the run was killed, then finished in 0.3s once the
          # editor was disabled. Not every harness sets GIT_EDITOR, so do not rely on it.
          if printf '%s' "$cmd" | grep -qE '(^|[;&|] *)git +(rebase +--continue|merge |cherry-pick |revert |commit +--amend)' \
-            && ! printf '%s' "$cmd" | grep -qE 'GIT_EDITOR=|--no-edit|-m |--message|--file|-F '; then
+            && ! printf '%s' "$cmd" | grep -qE 'GIT_EDITOR=|--no-edit|-m |--message|--file|-F |--abort|--quit|--skip'; then
            printf 'Blocked: this git command opens an editor and will hang.\nPrefix it with GIT_EDITOR=true, or pass --no-edit or -m.\n' >&2
            exit 2
          fi
@@ -44,16 +44,25 @@ case "$tool" in
            printf 'Blocked: stage by explicit path. git add -A / git add . / git commit -a sweep up unrelated work.\n' >&2
            exit 2
          fi
-         # Only inspect commands that author text: commits, PRs, issues, releases.
-         if printf '%s' "$cmd" | grep -qE 'git (commit|tag)|gh (pr|issue|release)'; then
-           text="$cmd"; path="commit-or-pr-text"
-           # Paths and host names are scanned only inside quoted segments, which is where
-           # the authored message lives. `cd /some/path && git commit` is plumbing, and
-           # blocking it made the guard refuse an ordinary commit the first time it ran.
-           authored=$(printf '%s' "$cmd" | grep -oE '"[^"]*"|'"'"'[^'"'"']*'"'"'' || true)
-         else
+         # Only inspect commands that author text: commits, tags, PRs, issues, releases.
+         # `gh pr view` and `gh issue list` publish nothing, so they are never inspected.
+         if ! printf '%s' "$cmd" | grep -qE '(^|[;&|] *)(git +(commit|tag)|gh +(pr|issue|release) +(create|edit|comment|review))'; then
            exit 0
-         fi ;;
+         fi
+         path="commit-or-pr-text"
+         # Scan the message itself, not the command that carries it. Everything else on
+         # the line is plumbing: a `cd` prefix, a `--repo "$(git remote get-url origin)"`,
+         # a `--jq` filter. Scanning those made the guard refuse read-only commands and an
+         # ordinary commit. Text produced by a substitution is invisible here and is left
+         # to the Write and Edit cases, which see the file being written.
+         text=$(printf '%s' "$cmd" | perl -0777 -ne '
+           my @found;
+           while (/(?:^|\s)(?:-m|-t|-b|-n|--message|--title|--body|--notes|--subject)(?:=|\s+)(?:'"'"'([^'"'"']*)'"'"'|"((?:[^"\\]|\\.)*)"|([^\s'"'"'"]+))/g) {
+             push @found, defined $1 ? $1 : defined $2 ? $2 : $3;
+           }
+           while (/<<-?\s*'"'"'?"?(\w+)"?'"'"'?\r?\n(.*?)\r?\n\s*\1/gs) { push @found, $2 }
+           for (@found) { s/\$(\((?:[^()]++|(?1))*\))//g; s/`[^`]*`//g; print "$_\n" }
+         ') ;;
   *) exit 0 ;;
 esac
 
@@ -120,9 +129,7 @@ if printf '%s' "$text" | grep -ohE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' \
 fi
 
 if [ "$local_only" = "0" ]; then
-  # For a Bash command this is the quoted portion only. For Write and Edit it is the whole
-  # content, since all of it is being written down.
-  scan=${authored-$text}
+  scan="$text"
   # A real path from this machine, as opposed to ~ or $HOME.
   if printf '%s' "$scan" | grep -qF "$HOME/"; then
     add "Absolute path from this machine found. Use ~, \$HOME, or a relative path."

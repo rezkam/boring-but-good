@@ -74,5 +74,31 @@ check 0 "tilde or \$HOME is fine"            "$(w 'see ~/Code/thing and $HOME/bi
 check 0 "cd prefix before a clean commit"    "$(b "cd $HOME/Code/repo && git commit -m \"fix(x): a clean message\"")"
 check 0 "path as an unquoted git argument"   "$(b "git add $HOME/Code/repo/a.md && git commit -m \"fix: y\"")"
 
+echo "only text the command actually authors is inspected"
+check 0 "gh pr view with a path in plumbing"   "$(b "gh pr view 296 --repo \"\$(git -C $HOME/Code/repo remote get-url origin)\"")"
+check 0 "gh issue list is read-only"           "$(b "gh issue list --repo x --json number > $HOME/out.json")"
+check 0 "gh pr checks is read-only"           "$(b "gh pr checks 296 --repo $HOME/Code/repo")"
+check 0 "message built by a substitution"     "$(b "git commit -m \"\$(cat $HOME/msg.txt)\"")"
+check 2 "path in a PR body"                   "$(b "gh pr create --title x --body \"see $HOME/Code/x\"")"
+check 2 "em dash in an issue comment"         "$(b "gh issue comment 5 --body \"one ${EM} two\"")"
+check 2 "identity in a release note"          "$(b 'gh release create v1 --notes "by reza.kamali"')"
+check 0 "path in a PR view json filter"       "$(b "gh pr view 296 --json files --jq '.files[].path' # $HOME/x")"
+
+# The usual way a PR body is written. It arrives as a substitution, so the heredoc body
+# is read directly.
+check 2 "heredoc PR body with a home path"    "$(b "gh pr create --title x --body \"\$(cat <<'EOF'
+see $HOME/Code/x for details
+EOF
+)\"")"
+check 0 "clean heredoc PR body"               "$(b "gh pr create --title x --body \"\$(cat <<'EOF'
+a clean body, nothing personal
+EOF
+)\"")"
+
+echo "git commands that abort rather than open an editor"
+check 0 "git merge --abort"                   "$(b 'git merge --abort')"
+check 0 "git cherry-pick --abort"             "$(b 'git cherry-pick --abort')"
+check 0 "git rebase --skip"                   "$(b 'git rebase --skip')"
+
 printf '\n  %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" = "0" ]
