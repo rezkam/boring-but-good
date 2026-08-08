@@ -31,17 +31,21 @@ are alternatives, not a requirement to have both providers. Use an available mod
 selected class, at its listed effort. Record the chosen model and the reason in the routing
 table.
 
-| Implementation class | Equivalent models | Use for |
+| Implementation class | Models, preferred first | Use for |
 | --- | --- | --- |
-| 1 | `gpt-luna` at `high`, or `claude-sonnet` at `medium` | Complete, mechanical slices |
-| 2 | `gpt-terra` at `medium`, or `claude-opus` at `low` | Prose-led implementation and integration work |
-| 3 | `gpt-sol` at `medium`, or `claude-opus` at `medium` | Complex cross-layer or long-horizon work |
+| 1 | `claude-sonnet-5:medium`, then `gpt-5.6-luna:high` | Complete, mechanical slices |
+| 2 | `claude-opus-5:low`, then `gpt-5.6-terra:medium` | Prose-led implementation and integration work |
+| 3 | `claude-opus-5:medium`, then `gpt-5.6-sol:medium` | Complex cross-layer or long-horizon work |
+
+These are defaults. The enforced lists are whatever `/campaign models` shows, which is the
+authority when the two differ.
 
 Each class is an ordered list, and position one is the default rather than a suggestion.
 Without that, a class of `[claude-sonnet-5:medium, gpt-5.6-luna:high]` treats both as
 equally acceptable, so a coordinator can take the second one forever and nothing notices.
 Reaching past the preferred model is still allowed, because a provider outage must not
-stall a campaign, but the routing row has to say why:
+stall a campaign, but the routing row has to say the model was unusable, not merely
+describe the work:
 
 ```text
 ROUTE: s7 | class 1 | openai-codex/gpt-5.6-luna:high | claude-bridge rate-limited at 14:02
@@ -50,11 +54,13 @@ ROUTE: s7 | class 1 | openai-codex/gpt-5.6-luna:high | claude-bridge rate-limite
 That is the same mechanism class 3 already uses: the reason is read, and a label is
 refused. The deviation costs one clause instead of silence.
 
-Choose the fastest available model in the selected class. Prefer observed throughput from
-this campaign, measured as returned tokens divided by elapsed seconds. A larger model may
-be the faster choice, so do not choose by model size or provider alone. When there is no
-campaign measurement, use the quickest successfully completed comparable dispatch, then
-record the assumption and revisit it after the first result.
+Throughput decides the order of a class, not which entry a single dispatch picks. A larger
+model may be the faster choice, so do not judge by model size or provider alone. When the
+measurements say the second entry is faster, reorder the class with `/campaign models auto`
+and it becomes the preferred one; do not route around the order on a dispatch and call the
+faster model an outage. Measurement is observed throughput from your own sessions, returned
+tokens divided by elapsed seconds, and a model with too few samples has no measurement
+rather than a slow one.
 
 Escalate exactly one class only when the task is complex or the selected class cannot make
 progress. Do not skip a class simply because a stronger model is available. Class 3 has no

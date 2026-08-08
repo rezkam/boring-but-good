@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { buildJudgeMessage, judgeCacheKey, judgeDispatch, JUDGE_SYSTEM_PROMPT, parseVerdict } from "./judge.ts";
+import { REQUIRED_KEYS, buildJudgeMessage, judgeCacheKey, judgeDispatch, JUDGE_SYSTEM_PROMPT, parseVerdict } from "./judge.ts";
 
 const COMPLETE = {
 	kind: "implement",
@@ -12,6 +12,7 @@ const COMPLETE = {
 	coordinatorGitWork: "none",
 	unrenderedPlaceholders: [],
 	classJustification: "substantive",
+	modelUnavailability: "absent",
 };
 
 function answer(overrides: Record<string, unknown> = {}): string {
@@ -41,6 +42,7 @@ test("parseVerdict fails closed on anything it cannot read whole", () => {
 		[answer({ kind: "refactor" }), "kind is not one of"],
 		[answer({ coordinatorGitWork: "merge" }), "coordinatorGitWork"],
 		[answer({ classJustification: "great" }), "classJustification"],
+		[answer({ modelUnavailability: "maybe" }), "modelUnavailability"],
 		[answer({ forbidsPush: "yes" }), "must be booleans"],
 		[answer({ unrenderedPlaceholders: "none" }), "must be an array"],
 		[answer({ worktree: 7 }), "worktree must be"],
@@ -115,4 +117,10 @@ test("parseVerdict refuses a placeholder array with non-string entries", () => {
 	assert.equal(parsed.ok, false);
 	if (parsed.ok) throw new Error("unreachable");
 	assert.match(parsed.error, /non-empty string/);
+});
+
+test("the required key list is sorted, because the parser compares sorted key lists", () => {
+	// An unsorted entry made every well-formed verdict fail the exact-key-set check.
+	const sorted = [...REQUIRED_KEYS].sort();
+	assert.deepEqual(REQUIRED_KEYS, sorted);
 });

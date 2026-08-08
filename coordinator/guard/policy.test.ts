@@ -29,7 +29,8 @@ import {
 
 const WORKTREE = "/Users/dev/.agents/worktrees/demo-20260101";
 const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
-const GOOD_ROUTE = "ROUTE: s1-parser | class 1 | openai-codex/gpt-5.6-luna:high | mechanical single-file transcription";
+// The preferred class 1 model, so the default fixture is a compliant dispatch under CG020.
+const GOOD_ROUTE = "ROUTE: s1-parser | class 1 | claude-bridge/claude-sonnet-5:medium | mechanical single-file transcription";
 
 function campaign(overrides: Partial<Campaign> = {}): Campaign {
 	return {
@@ -99,6 +100,7 @@ function verdict(overrides: Partial<PromptVerdict> = {}): PromptVerdict {
 		coordinatorGitWork: "none",
 		unrenderedPlaceholders: [],
 		classJustification: "substantive",
+		modelUnavailability: "absent",
 		...overrides,
 	};
 }
@@ -135,7 +137,7 @@ function denyJudged(req: GuardRequest, verdicts: PromptVerdict[]): { code: strin
 }
 
 function launch(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-	return { agent: "campaign-worker", model: "openai-codex/gpt-5.6-luna:high", task: implementTask(GOOD_ROUTE), ...overrides };
+	return { agent: "campaign-worker", model: "claude-bridge/claude-sonnet-5:medium", task: implementTask(GOOD_ROUTE), ...overrides };
 }
 
 // ── structural rules, decided without a model call ──────────────────────────────
@@ -163,7 +165,7 @@ test("parseRouteHeader reads the four declared fields", () => {
 		key: "s1-parser",
 		axis: "class",
 		cls: 1,
-		model: "openai-codex/gpt-5.6-luna:high",
+		model: "claude-bridge/claude-sonnet-5:medium",
 		reason: "mechanical single-file transcription",
 	});
 	assert.equal(parseRouteHeader("no header here"), null);
@@ -478,8 +480,8 @@ test("CG010: read-only lanes do not consume writer capacity", () => {
 });
 
 test("a multi-child script carries only investigations; a single-child script is the lane vehicle", () => {
-	const header = (key: string) => `ROUTE: ${key} | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory`;
-	const script = `runs.all([{key:'a', agent:'campaign-scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("a")}\`}, {key:'b', agent:'campaign-scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("b")}\`}])`;
+	const header = (key: string) => `ROUTE: ${key} | class 1 | claude-bridge/claude-sonnet-5:medium | read-only inventory`;
+	const script = `runs.all([{key:'a', agent:'campaign-scout', model:'claude-bridge/claude-sonnet-5:medium', task: \`${header("a")}\`}, {key:'b', agent:'campaign-scout', model:'claude-bridge/claude-sonnet-5:medium', task: \`${header("b")}\`}])`;
 	const req = request({ input: { workflowScript: script, async: true } });
 	const readOnly = verdict({ kind: "investigate", expectedHead: null, stopsOnHeadMismatch: false });
 
@@ -493,8 +495,8 @@ test("a multi-child script carries only investigations; a single-child script is
 });
 
 test("a single-child script carrying one writer is a legal lane, because direct execution no longer exists", () => {
-	const header = "ROUTE: s1 | class 1 | openai-codex/gpt-5.6-luna:high | mechanical edit";
-	const script = `return runs.run('s1', {agent:'campaign-worker', model:'openai-codex/gpt-5.6-luna:high', task: \`${header}\`})`;
+	const header = "ROUTE: s1 | class 1 | claude-bridge/claude-sonnet-5:medium | mechanical edit";
+	const script = `return runs.run('s1', {agent:'campaign-worker', model:'claude-bridge/claude-sonnet-5:medium', task: \`${header}\`})`;
 	assert.deepEqual(judged(request({ input: { workflowScript: script, async: true } }), [verdict()]), { allow: true });
 });
 
@@ -626,8 +628,8 @@ test("state refusals stay short, because the contract is not the fix", () => {
 });
 
 test("a writer fanned out beside another child is told the single-child script form that works", () => {
-	const header = (key: string) => `ROUTE: ${key} | class 1 | openai-codex/gpt-5.6-luna:high | mechanical edit`;
-	const script = `return runs.all([{key:'a', agent:'campaign-worker', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("a")}\`}, {key:'b', agent:'campaign-scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("b")}\`}])`;
+	const header = (key: string) => `ROUTE: ${key} | class 1 | claude-bridge/claude-sonnet-5:medium | mechanical edit`;
+	const script = `return runs.all([{key:'a', agent:'campaign-worker', model:'claude-bridge/claude-sonnet-5:medium', task: \`${header("a")}\`}, {key:'b', agent:'campaign-scout', model:'claude-bridge/claude-sonnet-5:medium', task: \`${header("b")}\`}])`;
 	const { code, reason } = denyJudged(request({ input: { workflowScript: script, async: true } }), [
 		verdict(),
 		verdict({ kind: "investigate", expectedHead: null, stopsOnHeadMismatch: false }),
@@ -813,12 +815,14 @@ test("a status block whose slice count contradicts the ledger is not a fresh blo
 	assert.equal(statusBlockDisagreement(block, recorded), null, "agreement is silence");
 });
 
-test("a block that states no slice count is not treated as a contradiction", () => {
+test("a block whose slice count cannot be read is not a fresh block either", () => {
 	const block = readStatusBlock(
 		["CAMPAIGN demo   WORKTREE /w", "SLICES in progress", "PR #1", "AGENTS none", "DIRECT none", "PARKED none", "NEEDS YOU nothing", "NEXT dispatch"].join("\n"),
 	);
 	assert.equal(block.claimedSlicesDone, null);
-	assert.equal(statusBlockDisagreement(block, campaign({ slicesDone: 3 })), null);
+	// Returning null here was the hole: "SLICES in progress" refreshed the ledger and
+	// skipped the comparison entirely.
+	assert.match(statusBlockDisagreement(block, campaign({ slicesDone: 3 })) ?? "", /does not state a count/);
 });
 
 test("CG020: reaching past the preferred model needs the routing reason to say why", () => {
@@ -826,13 +830,13 @@ test("CG020: reaching past the preferred model needs the routing reason to say w
 	// only when the reason explains it, so "preferred" is not silently ignorable.
 	const route = "ROUTE: s1 | class 1 | openai-codex/gpt-5.6-luna:high | mechanical single-file edit";
 	const req = request({ input: launch({ model: "openai-codex/gpt-5.6-luna:high", task: implementTask(route) }) });
-	const refused = denyJudged(req, [verdict({ classJustification: "label" })]);
-	assert.equal(refused.code, "CG020");
+	const refused = denyJudged(req, [verdict({ classJustification: "substantive" })]);
+	assert.equal(refused.code, "CG020", "a thorough description of the work is not a reason to skip the preferred model");
 	assert.match(refused.reason, /is a fallback for class 1/);
 	assert.match(refused.reason, /claude-bridge\/claude-sonnet-5:medium/, "the refusal names the preferred model");
 
-	// A reason the judge reads as substantive is the whole cost of deviating.
-	assert.deepEqual(judged(req, [verdict({ classJustification: "substantive" })]), { allow: true });
+	// Saying the preferred model was unusable is the whole cost of deviating.
+	assert.deepEqual(judged(req, [verdict({ modelUnavailability: "stated" })]), { allow: true });
 
 	// The preferred model never needs one.
 	const preferred = request({

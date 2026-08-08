@@ -30,6 +30,8 @@ export interface PromptVerdict {
 	coordinatorGitWork: CoordinatorGitWork;
 	unrenderedPlaceholders: string[];
 	classJustification: JustificationQuality;
+	/** Whether the reason says a preferred model was unusable, which is what a fallback costs. */
+	modelUnavailability: "stated" | "absent";
 }
 
 export interface JudgeRequest {
@@ -55,7 +57,8 @@ Answer with one JSON object and nothing else. It must have exactly these keys:
   "forbidsPush": boolean,
   "coordinatorGitWork": "rebase" | "cherry-pick" | "push" | "pr" | "none",
   "unrenderedPlaceholders": string[],
-  "classJustification": "substantive" | "label" | "absent"
+  "classJustification": "substantive" | "label" | "absent",
+  "modelUnavailability": "stated" | "absent"
 }
 
 Field meanings:
@@ -72,6 +75,7 @@ Field meanings:
 - coordinatorGitWork: branch-moving git work the prompt asks this subagent to perform. Committing locally is the agent's own job and is "none". Report "rebase", "cherry-pick", "push", or "pr" when the prompt asks for it, even alongside genuine implementation work. A prohibition is not a request: "never push" is "none".
 - unrenderedPlaceholders: template placeholders that were never filled in, such as "\${slice}", "{{path}}", "[SLICE NAME]", or a path with a segment left as the literal word undefined or null. Ordinary prose about null or undefined values in code is not a placeholder. Return [] when there are none.
 - classJustification: how well the routing header's reason justifies the class it declared. "substantive" when it names something concrete about the work, such as the layers, packages, contracts, or files involved. "label" when it only asserts difficulty, such as "hard" or "complex". "absent" when there is no reason.
+- modelUnavailability: whether the routing header's reason says a preferred, default, or first-choice model could not be used, for example that it was rate limited, erroring, over quota, down, or otherwise unavailable. "stated" only when the reason says something about a model being unusable. A reason that only describes the work, however detailed, is "absent". This is a separate question from classJustification: a thorough description of cross-layer work is substantive and still "absent" here.
 
 Return only the JSON object.`;
 
@@ -89,12 +93,14 @@ ${request.prompt}
 const KINDS = new Set<string>(["implement", "review", "investigate"]);
 const GIT_WORK = new Set<string>(["rebase", "cherry-pick", "push", "pr", "none"]);
 const QUALITIES = new Set<string>(["substantive", "label", "absent"]);
-const REQUIRED_KEYS = [
+/** Sorted, because the parser compares this against the answer's sorted key list. */
+export const REQUIRED_KEYS = [
 	"classJustification",
 	"coordinatorGitWork",
 	"expectedHead",
 	"forbidsPush",
 	"kind",
+	"modelUnavailability",
 	"stopsOnHeadMismatch",
 	"unrenderedPlaceholders",
 	"worktree",
@@ -127,6 +133,9 @@ export function parseVerdict(raw: string): { ok: true; verdict: PromptVerdict } 
 	if (typeof value.coordinatorGitWork !== "string" || !GIT_WORK.has(value.coordinatorGitWork)) {
 		return { ok: false, error: "coordinatorGitWork is not one of the listed values" };
 	}
+	if (value.modelUnavailability !== "stated" && value.modelUnavailability !== "absent") {
+		return { ok: false, error: `modelUnavailability must be "stated" or "absent", got ${JSON.stringify(value.modelUnavailability)}` };
+	}
 	if (typeof value.classJustification !== "string" || !QUALITIES.has(value.classJustification)) {
 		return { ok: false, error: "classJustification is not one of the listed values" };
 	}
@@ -154,6 +163,7 @@ export function parseVerdict(raw: string): { ok: true; verdict: PromptVerdict } 
 			coordinatorGitWork: value.coordinatorGitWork as CoordinatorGitWork,
 			unrenderedPlaceholders: value.unrenderedPlaceholders as string[],
 			classJustification: value.classJustification as JustificationQuality,
+			modelUnavailability: value.modelUnavailability as "stated" | "absent",
 		},
 	};
 }
