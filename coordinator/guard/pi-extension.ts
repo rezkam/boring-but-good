@@ -596,6 +596,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 				campaign.lanes = campaign.lanes.filter((candidate) => candidate !== lane);
 			} else {
 				lane.state = params.action === "done" ? "integrated" : params.action;
+				if (params.note) lane.note = params.note;
 			}
 			recordProgress();
 			persist();
