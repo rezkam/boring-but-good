@@ -300,6 +300,23 @@ export const DEFAULT_TIERS: TierLists = {
 	},
 };
 
+/**
+ * OpenAI's calibrated one-entry defaults. `/campaign models gpt` selects these all at
+ * once, including review tiers, instead of making the coordinator repeat five changes
+ * and accidentally leave an old Claude fallback behind.
+ */
+export const GPT_DEFAULT_TIERS: TierLists = {
+	class: {
+		1: ["openai-codex/gpt-5.6-luna:high"],
+		2: ["openai-codex/gpt-5.6-terra:medium"],
+		3: ["openai-codex/gpt-5.6-sol:medium"],
+	},
+	review: {
+		1: ["openai-codex/gpt-5.6-terra:xhigh"],
+		2: ["openai-codex/gpt-5.6-sol:xhigh"],
+	},
+};
+
 /** A pin's bare model name, so a list entry matches whichever provider spells it locally. */
 function bareModel(id: string): string {
 	const slash = id.lastIndexOf("/");

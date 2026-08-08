@@ -105,8 +105,11 @@ The declared model must be the model the call carries, and the declared class mu
 class its own table gives that model: implementation classes for `campaign-worker` and
 `campaign-scout`, review classes for `campaign-reviewer`.
 
-Each class lists its models in order and the first is the default. Taking a later one is
-allowed when the preferred model is unavailable, and the row's reason is where you say so
+Each class lists its models in order and the first is the default. Use `/campaign models gpt`
+to set every dispatched-agent and review tier, plus the judge, to its calibrated OpenAI
+default in one command. It does not change the continuing coordinator session, which is pi's
+separate `/model` control. Taking a later one is allowed when the preferred model is
+unavailable, and the row's reason is where you say so
 ("claude-bridge rate-limited at 14:02"). A reason that does not explain the choice is
 refused, the same way a class 3 label is. Class 3 implementation carries a written reason for
 what makes the slice cross-layer or long-horizon, not the word "hard". If you have not

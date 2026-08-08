@@ -914,3 +914,20 @@ test("a child object the scanner cannot consume whole is unverifiable, not clean
 	const collided = structure(request({ input: { workflowScript: `return runs.run('s1', {${pins}, worktree: true, Worktree: false})`, async: true } }));
 	assert.equal(collided.code, "CG021");
 });
+
+test("the GPT preset is OpenAI-only and preserves every class's intended effort", async () => {
+	// This is the single user intent behind `/campaign models gpt`: a single provider across
+	// implementation, review, and judge, while retaining the calibrated effort for each job.
+	const { GPT_DEFAULT_TIERS } = await import("./policy.ts");
+	assert.deepEqual(GPT_DEFAULT_TIERS, {
+		class: {
+			1: ["openai-codex/gpt-5.6-luna:high"],
+			2: ["openai-codex/gpt-5.6-terra:medium"],
+			3: ["openai-codex/gpt-5.6-sol:medium"],
+		},
+		review: {
+			1: ["openai-codex/gpt-5.6-terra:xhigh"],
+			2: ["openai-codex/gpt-5.6-sol:xhigh"],
+		},
+	});
+});

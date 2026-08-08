@@ -32,6 +32,7 @@ import {
 	newCampaign,
 	openReview,
 	DEFAULT_TIERS,
+	GPT_DEFAULT_TIERS,
 	parseModelPin,
 	findTierClash,
 	parseTierEntries,
@@ -291,8 +292,9 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			"",
 			"Set:   /campaign models class <1|2|3> <provider/model:effort>[, ...]",
 			"       /campaign models review <1|2> <provider/model:effort>[, ...]",
-			"Auto:  /campaign models auto      reorder each class by measured throughput, leaving unmeasured entries in place",
-			"Reset: /campaign models reset",
+			"GPT:    /campaign models gpt       set every tier and the judge to its OpenAI calibrated default",
+			"Auto:   /campaign models auto      reorder each class by measured throughput, leaving unmeasured entries in place",
+			"Reset:  /campaign models reset",
 		);
 		return lines.join("\n");
 	}
@@ -304,6 +306,13 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			tiers = DEFAULT_TIERS;
 			persist();
 			return `Tiers reset to the defaults.\n\n${renderTiers(tiers)}`;
+		}
+
+		if (["gpt", "openai", "openai-codex"].includes(argument.toLowerCase())) {
+			tiers = GPT_DEFAULT_TIERS;
+			judgeModel = DEFAULT_JUDGE_MODEL;
+			persist();
+			return `OpenAI GPT defaults selected for every implementation and review tier, and the judge is now ${judgeModel}. The current coordinator session model is unchanged: use /model to select it separately.\n\n${renderTiers(tiers)}`;
 		}
 
 		if (argument === "auto") {
@@ -319,7 +328,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 
 		const match = /^(class|review)\s+([123])\s+(.+)$/i.exec(argument);
 		if (!match) {
-			return 'Usage: /campaign models [class <1|2|3> <pins> | review <1|2> <pins> | auto | reset]. Pins are comma separated, as provider/model:effort.';
+			return 'Usage: /campaign models [gpt | class <1|2|3> <pins> | review <1|2> <pins> | auto | reset]. GPT selects all OpenAI calibrated defaults, including the judge. Pins are comma separated, as provider/model:effort.';
 		}
 		const axis = match[1].toLowerCase() as "class" | "review";
 		const cls = Number(match[2]);
@@ -910,6 +919,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 
 			if (head === "models" && rest.length > 0) {
 				const tierOptions = [
+					{ value: "models gpt", label: "models gpt", description: "OpenAI defaults for all tiers and the judge" },
 					{ value: "models auto", label: "models auto", description: "reorder each class fastest-measured first" },
 					{ value: "models reset", label: "models reset", description: "back to the defaults" },
 				];
