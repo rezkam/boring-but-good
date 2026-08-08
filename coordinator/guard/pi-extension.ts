@@ -12,6 +12,7 @@ import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import { complete, completeSimple } from "@earendil-works/pi-ai/compat";
 import type { Model, ThinkingLevel, UserMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { delimiter as pathDelimiter } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +30,7 @@ import {
 	laneSummary,
 	newCampaign,
 	openReview,
+	parseModelPin,
 	parseRouteHeader,
 	readStatusBlock,
 	type Campaign,
@@ -36,6 +38,23 @@ import {
 } from "./policy.ts";
 
 const STATE_TYPE = "coordinator-guard";
+/** The judge's own transcript card: what it read, what it answered, and what that cost. */
+const JUDGE_ENTRY_TYPE = "coordinator-guard-judge";
+
+interface JudgeCard {
+	model: string;
+	effort: string;
+	elapsedMs: number;
+	cached: number;
+	outcome: { allowed: true } | { allowed: false; code: string; reason: string };
+	targets: Array<{
+		routeKey: string;
+		agent?: string;
+		declaredClass: number;
+		fromCache: boolean;
+		verdict: PromptVerdict;
+	}>;
+}
 const NOTICE_TYPE = "coordinator-guard-notice";
 const CONTINUATION_TYPE = "coordinator-guard-continuation";
 
@@ -83,6 +102,25 @@ const LaneParams = Type.Object({
 	key: Type.String({ description: "The ROUTE key of the lane." }),
 	note: Type.Optional(Type.String()),
 });
+
+/** The verdict as display rows, in the order the judge is asked. */
+function verdictRows(verdict: PromptVerdict): Array<[string, string]> {
+	return [
+		["kind", verdict.kind],
+		["worktree", verdict.worktree ?? "not stated"],
+		["expected HEAD", verdict.expectedHead ?? "not stated"],
+		["stops on mismatch", verdict.stopsOnHeadMismatch ? "yes" : "no"],
+		["forbids push", verdict.forbidsPush ? "yes" : "no"],
+		["coordinator git work", verdict.coordinatorGitWork],
+		["placeholders", verdict.unrenderedPlaceholders.length > 0 ? verdict.unrenderedPlaceholders.join(", ") : "none"],
+		["class justification", verdict.classJustification],
+	];
+}
+
+function firstLine(reason: string): string {
+	const line = reason.split("\n").find((entry) => entry.trim().length > 0) ?? "";
+	return line.length > 90 ? `${line.slice(0, 87)}...` : line;
+}
 
 export default function coordinatorGuard(pi: ExtensionAPI) {
 	// The campaign roles live beside the guard and are registered with pi-subagents through
@@ -139,11 +177,11 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 	async function judgePrompt(
 		ctx: ExtensionContext,
 		target: { prompt: string; agent?: string; declaredClass: 1 | 2 | 3 },
-	): Promise<{ ok: true; verdict: PromptVerdict } | { ok: false; error: string }> {
+	): Promise<{ ok: true; verdict: PromptVerdict; fromCache: boolean } | { ok: false; error: string }> {
 		const request = { prompt: target.prompt, agent: target.agent, declaredClass: target.declaredClass };
 		const key = judgeCacheKey(request);
 		const cached = verdictCache.get(key);
-		if (cached) return { ok: true, verdict: cached };
+		if (cached) return { ok: true, verdict: cached, fromCache: true };
 
 		const resolved = resolveJudgeModel(ctx);
 		if (!resolved) {
@@ -175,7 +213,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		const outcome = await judgeDispatch(call, request);
 		if (!outcome.ok) return { ok: false, error: outcome.error };
 		verdictCache.set(key, outcome.verdict);
-		return { ok: true, verdict: outcome.verdict };
+		return { ok: true, verdict: outcome.verdict, fromCache: false };
 	}
 
 	/** `provider/model` with an optional `:effort` suffix, resolved against the live registry. */
@@ -197,6 +235,29 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 
 	function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "info"): void {
 		if (ctx.hasUI) ctx.ui.notify(message, level);
+	}
+
+	function showJudgeCard(
+		judgements: Array<{ target: JudgeTarget; verdict: PromptVerdict }>,
+		cacheFlags: boolean[],
+		elapsedMs: number,
+		decision: { allow: true } | { allow: false; code: string; reason: string },
+	): void {
+		const pin = parseModelPin(judgeModel);
+		pi.appendEntry<JudgeCard>(JUDGE_ENTRY_TYPE, {
+			model: pin?.id ?? judgeModel,
+			effort: pin?.effort ?? "unpinned",
+			elapsedMs,
+			cached: cacheFlags.filter(Boolean).length,
+			outcome: decision.allow ? { allowed: true } : { allowed: false, code: decision.code, reason: decision.reason },
+			targets: judgements.map(({ target, verdict }, index) => ({
+				routeKey: target.routeKey,
+				...(target.agent === undefined ? {} : { agent: target.agent }),
+				declaredClass: target.declaredClass,
+				fromCache: cacheFlags[index] === true,
+				verdict,
+			})),
+		});
 	}
 
 	function updateStatusLine(ctx: ExtensionContext): void {
@@ -252,6 +313,46 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		const contract = contractPrompt(campaign, armed, Date.now());
 		if (!contract) return;
 		return { systemPrompt: `${event.systemPrompt}\n\n${contract}` };
+	});
+
+	// The judge is the one part of the guard that spends a model call and reaches a
+	// conclusion the transcript never showed. Collapsed it states model, effort, and the
+	// verdict; expanded it shows every answer the verdict is made of, per dispatch.
+	// The judge is the one part of the guard that spends a model call and reaches a
+	// conclusion the transcript never showed. Collapsed it states model, effort, and the
+	// verdict; expanded it shows every answer the verdict is made of, per dispatch. One Text
+	// with newlines rather than a child per line: a child per line renders a blank between
+	// each, which pi's own tool cards do not have.
+	pi.registerEntryRenderer<JudgeCard>(JUDGE_ENTRY_TYPE, (entry, { expanded }, theme) => {
+		const card = entry.data;
+		if (!card || !Array.isArray(card.targets)) return undefined;
+
+		const keys = card.targets.map((target) => target.routeKey).join(", ");
+		const noun = card.targets.length === 1 ? "dispatch" : "dispatches";
+		const dot = theme.fg("muted", "·");
+		const lines = [
+			`${theme.fg("toolTitle", "guard judge")} ${dot} ${theme.fg("accent", `${card.model}:${card.effort}`)} ${dot} ${card.targets.length} ${noun}: ${keys}`,
+		];
+
+		const verdict = card.outcome.allowed ? theme.fg("success", "passed") : theme.fg("error", `refused ${card.outcome.code}`);
+		const cost = card.cached > 0 ? `${card.elapsedMs}ms, ${card.cached} from cache` : `${card.elapsedMs}ms`;
+		const detail = card.outcome.allowed ? "" : ` ${dot} ${firstLine(card.outcome.reason)}`;
+		lines.push(`  ${verdict} ${dot} ${theme.fg("dim", cost)}${detail}`);
+
+		if (!expanded) {
+			lines.push(theme.fg("dim", `  ${card.targets.length * 8} lines of verdict, press ctrl+o for full output`));
+			return new Text(lines.join("\n"));
+		}
+
+		for (const target of card.targets) {
+			const axis = target.agent === "campaign-reviewer" ? "review" : "class";
+			const from = target.fromCache ? ", cached" : "";
+			lines.push(`  ${theme.bold(target.routeKey)} ${theme.fg("dim", `${target.agent ?? "no role"}, declared ${axis} ${target.declaredClass}${from}`)}`);
+			for (const [label, value] of verdictRows(target.verdict)) {
+				lines.push(`    ${theme.fg("muted", label.padEnd(21))} ${value}`);
+			}
+		}
+		return new Text(lines.join("\n"));
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
@@ -338,6 +439,8 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			// Phase two reads the prompts. An unread prompt is an unchecked one, so a judge that
 			// cannot answer refuses the dispatch rather than waving it through.
 			const judgements: Array<{ target: (typeof structure.judge)[number]; verdict: PromptVerdict }> = [];
+			const cacheFlags: boolean[] = [];
+			const judgeStartedAt = Date.now();
 			for (const target of structure.judge) {
 				const outcome = await judgePrompt(ctx, target);
 				if (!outcome.ok) {
@@ -348,9 +451,12 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 					};
 				}
 				judgements.push({ target, verdict: outcome.verdict });
+				cacheFlags.push(outcome.fromCache);
 			}
+			const judgeElapsedMs = Date.now() - judgeStartedAt;
 
 			const judged = evaluateVerdicts(request, judgements);
+			showJudgeCard(judgements, cacheFlags, judgeElapsedMs, judged);
 			if (!judged.allow) {
 				notify(ctx, `Guard ${judged.code}: refused`, "warning");
 				return { block: true, reason: `[coordinator-guard ${judged.code}] ${judged.reason}` };

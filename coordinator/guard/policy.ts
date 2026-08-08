@@ -85,7 +85,9 @@ export interface GuardRequest {
 	config?: GuardConfig;
 }
 
-export type GuardDecision = { allow: true } | { allow: false; code: string; reason: string; teach?: boolean };
+/** The denial half, so a refusal stays assignable wherever a richer allow shape is expected. */
+export type GuardDenial = { allow: false; code: string; reason: string; teach?: boolean };
+export type GuardDecision = { allow: true } | GuardDenial;
 
 const STATUS_FIELDS = ["CAMPAIGN", "WORKTREE", "SLICES", "PR", "AGENTS", "DIRECT", "PARKED", "NEEDS YOU", "NEXT"] as const;
 
@@ -371,7 +373,7 @@ function runIdOf(input: Record<string, unknown>): string {
 	return text(input.id) || text(input.runId) || text(input.dir);
 }
 
-function deny(code: string, reason: string, teach = false): GuardDecision {
+function deny(code: string, reason: string, teach = false): GuardDenial {
 	return { allow: false, code, reason, ...(teach ? { teach: true } : {}) };
 }
 
@@ -380,7 +382,7 @@ function deny(code: string, reason: string, teach = false): GuardDecision {
  * round trip each. A real campaign spent five attempts and two minutes on its first
  * dispatch, learning one rule per refusal.
  */
-function denyAll(problems: Array<{ code: string; reason: string }>): GuardDecision {
+function denyAll(problems: Array<{ code: string; reason: string }>): GuardDenial {
 	if (problems.length === 1) return deny(problems[0].code, problems[0].reason);
 	const list = problems.map((problem, index) => `${index + 1}. [${problem.code}] ${problem.reason}`).join("\n\n");
 	return deny(problems[0].code, `This launch has ${problems.length} problems. Fix them together and retry once:\n\n${list}`);
