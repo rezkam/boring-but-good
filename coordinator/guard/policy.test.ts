@@ -894,3 +894,23 @@ test("child fields are read as top-level properties, not found anywhere in the t
 	const quotesAModel = `return runs.run('s1', {agent:'campaign-worker', model:'claude-bridge/claude-sonnet-5:medium', task: \`${header}\nThe earlier lane ran model:'openai-codex/gpt-5.6-sol:high' and stalled.\`})`;
 	assert.equal(evaluateStructure(request({ input: { workflowScript: quotesAModel, async: true } })).allow, true);
 });
+
+test("a child object the scanner cannot consume whole is unverifiable, not clean", () => {
+	const header = "ROUTE: s1 | class 1 | claude-bridge/claude-sonnet-5:medium | mechanical edit";
+	const pins = `agent:'campaign-worker', model:'claude-bridge/claude-sonnet-5:medium', task: \`${header}\``;
+
+	// Shorthand after the literal fields: the runtime reads whatever the variable holds, so
+	// stopping at the first unreadable property and calling the rest absent is a bypass.
+	// structure() asserts the launch is refused; the code says why it could not be cleared.
+	const shorthand = structure(request({ input: { workflowScript: `const worktree = true; return runs.run('s1', {${pins}, worktree})`, async: true } }));
+	assert.equal(shorthand.code, "CG002");
+	assert.match(shorthand.reason, /cannot be verified/);
+
+	// A spread can carry the same flag and is equally unreadable.
+	assert.equal(structure(request({ input: { workflowScript: `return runs.run('s1', {${pins}, ...defaults})`, async: true } })).code, "CG002");
+
+	// JavaScript property names are case-sensitive: Worktree is a different property and
+	// must not overwrite the worktree the runtime actually reads.
+	const collided = structure(request({ input: { workflowScript: `return runs.run('s1', {${pins}, worktree: true, Worktree: false})`, async: true } }));
+	assert.equal(collided.code, "CG021");
+});
