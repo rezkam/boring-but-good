@@ -490,7 +490,11 @@ export function readStatusBlock(text: string): StatusBlock {
  * count opens review at the wrong time or never.
  */
 export function statusBlockDisagreement(block: StatusBlock, campaign: Campaign): string | null {
-	if (block.claimedSlicesDone === null || block.claimedSlicesTotal === null) return null;
+	// A SLICES line the guard cannot read is not agreement. Returning null here let
+	// "SLICES in progress" refresh the ledger and skip the comparison entirely.
+	if (block.claimedSlicesDone === null || block.claimedSlicesTotal === null) {
+		return `its SLICES line does not state a count the guard can read. Write it as "SLICES <n> done / <n> total", so the printed number can be checked against the recorded one.`;
+	}
 	if (block.claimedSlicesDone === campaign.slicesDone && block.claimedSlicesTotal === campaign.slicesTotal) return null;
 	return `the block says ${block.claimedSlicesDone} done of ${block.claimedSlicesTotal}, the campaign records ${campaign.slicesDone} of ${campaign.slicesTotal}. Record the real count with coordinator_campaign action "set-slices", or correct the block. Review opens on the recorded number, not the printed one.`;
 }
@@ -1290,8 +1294,11 @@ function evaluateVerdictsInner(
 		// provider outage must not stall a campaign, but it costs the same sentence that
 		// escalation does: otherwise "preferred" is silently ignorable, which is the shape of
 		// rule this whole guard exists to replace.
+		// Asked as its own question, because "why this class" and "why not the preferred model"
+		// are different claims: a thorough cross-layer rationale is substantive and says
+		// nothing at all about availability.
 		const fallback = fallbackUsed(target, kind, tiers);
-		if (fallback && verdict.classJustification !== "substantive") {
+		if (fallback && verdict.modelUnavailability !== "stated") {
 			return deny(
 				"CG020",
 				`${fallback.used} is a fallback for ${fallback.axis} ${fallback.cls}; the preferred model is ${fallback.preferred}. Reach past the preferred model only when it is unavailable, and say so in the routing reason, for example "claude-bridge rate-limited at 14:02". The reason on route ${target.routeKey} does not explain the choice.`,
