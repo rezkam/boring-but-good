@@ -33,6 +33,7 @@ import {
 	openReview,
 	DEFAULT_TIERS,
 	GPT_DEFAULT_TIERS,
+	CLAUDE_DEFAULT_TIERS,
 	parseModelPin,
 	findTierClash,
 	parseTierEntries,
@@ -77,6 +78,7 @@ const MAX_NO_PROGRESS_CONTINUATIONS = 10;
  * overridable because model availability is a local fact, not something this can assume.
  */
 const DEFAULT_JUDGE_MODEL = "openai-codex/gpt-5.6-luna:low";
+const CLAUDE_JUDGE_MODEL = "claude-bridge/claude-sonnet-5:low";
 const JUDGE_MAX_TOKENS = 700;
 
 /** Mirrors the policy's correction actions, for counting what the guard already allowed. */
@@ -293,6 +295,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			"Set:   /campaign models class <1|2|3> <provider/model:effort>[, ...]",
 			"       /campaign models review <1|2> <provider/model:effort>[, ...]",
 			"GPT:    /campaign models gpt       set every tier and the judge to its OpenAI calibrated default",
+			"Claude: /campaign models claude    set every tier and the judge to its Claude calibrated default",
 			"Auto:   /campaign models auto      reorder each class by measured throughput, leaving unmeasured entries in place",
 			"Reset:  /campaign models reset",
 		);
@@ -315,6 +318,13 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			return `OpenAI GPT defaults selected for every implementation and review tier, and the judge is now ${judgeModel}. The current coordinator session model is unchanged: use /model to select it separately.\n\n${renderTiers(tiers)}`;
 		}
 
+		if (["claude", "anthropic", "claude-bridge"].includes(argument.toLowerCase())) {
+			tiers = CLAUDE_DEFAULT_TIERS;
+			judgeModel = CLAUDE_JUDGE_MODEL;
+			persist();
+			return `Claude defaults selected for every implementation and review tier, and the judge is now ${judgeModel}. The current coordinator session model is unchanged: use /model to select it separately.\n\n${renderTiers(tiers)}`;
+		}
+
 		if (argument === "auto") {
 			const measured = readThroughput();
 			const reordered = reorderByThroughput(tiers, measured);
@@ -328,7 +338,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 
 		const match = /^(class|review)\s+([123])\s+(.+)$/i.exec(argument);
 		if (!match) {
-			return 'Usage: /campaign models [gpt | class <1|2|3> <pins> | review <1|2> <pins> | auto | reset]. GPT selects all OpenAI calibrated defaults, including the judge. Pins are comma separated, as provider/model:effort.';
+			return 'Usage: /campaign models [gpt | claude | class <1|2|3> <pins> | review <1|2> <pins> | auto | reset]. GPT or Claude selects all calibrated defaults for that provider, including the judge. Pins are comma separated, as provider/model:effort.';
 		}
 		const axis = match[1].toLowerCase() as "class" | "review";
 		const cls = Number(match[2]);
@@ -920,6 +930,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			if (head === "models" && rest.length > 0) {
 				const tierOptions = [
 					{ value: "models gpt", label: "models gpt", description: "OpenAI defaults for all tiers and the judge" },
+					{ value: "models claude", label: "models claude", description: "Claude defaults for all tiers and the judge" },
 					{ value: "models auto", label: "models auto", description: "reorder each class fastest-measured first" },
 					{ value: "models reset", label: "models reset", description: "back to the defaults" },
 				];

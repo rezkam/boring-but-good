@@ -108,6 +108,7 @@ are accepted, so one provider outage does not stall a campaign on refusals.
 ```
 /campaign models                                    show both tables with measured tok/s
 /campaign models gpt                                select every OpenAI default, including the judge
+/campaign models claude                             select every Claude default, including the judge
 /campaign models class <1|2|3> <pin>[, <pin>]       replace an implementation class
 /campaign models review <1|2> <pin>[, <pin>]        replace a review class
 /campaign models auto                               reorder each class fastest-measured first
@@ -118,10 +119,11 @@ Throughput comes from pi's own session files, as output tokens over the gap to t
 previous entry. That gap also holds tool and queue time, so it ranks rather than
 benchmarks, and a model with fewer than five samples reports nothing rather than noise.
 `auto` therefore leaves unmeasured entries where they are: no samples means unknown, not
-slow. `gpt` is the one-command provider choice: Luna high for class 1, Terra medium for
-class 2, Sol medium for class 3, Terra and Sol xhigh for the review axis, and Luna low for
-the judge. It changes dispatched agents and the judge, not the current coordinator session;
-choose that session's model with pi's `/model` command.
+slow. `gpt` and `claude` are the one-command provider choices. GPT selects Luna high,
+Terra medium, Sol medium, Terra and Sol xhigh for review, and Luna low for the judge.
+Claude selects Sonnet medium, Opus low, Opus medium, Opus high and xhigh for review, and
+Sonnet low for the judge. They change dispatched agents and the judge, not the current
+coordinator session; choose that session's model with pi's `/model` command.
 
 Position one is enforced rather than suggested: a dispatch may take any entry in the list,
 but reaching past the first one requires the routing reason to say why, the same sentence
