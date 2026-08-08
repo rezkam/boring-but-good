@@ -67,7 +67,9 @@ export interface Campaign {
 
 export interface RouteHeader {
 	key: string;
-	cls: ImplementationClass;
+	/** Which table the number belongs to: implementation classes or review classes. */
+	axis: "class" | "review";
+	cls: number;
 	model: string;
 	reason: string;
 }
@@ -192,6 +194,11 @@ ${tierTable()}
 - Every launch opens with a routing header, and its model must match what the call carries:
   ROUTE: <key> | class <1|2|3> | <provider/model:effort> | <why this class>
   Class 3 implementation needs a real justification, not the word "complex".
+- Review is a separate table with its own two classes, declared as "review 1" or "review 2",
+  never an implementation class:
+${reviewTable()}
+  Review runs once at the end, so the class is the risk of the whole branch. The same model
+  at a different effort is a different class.
 - Every dispatched prompt names the worktree, the exact HEAD it must be at, that the agent stops if HEAD differs, and that it commits locally and never pushes, never runs gh, never touches a PR.
 - Every dispatch is a workflowScript with literal children, and top-level async stated. A writer or a reviewer is the only child of its own script: return runs.run('<key>', { agent: 'campaign-worker', model: '<provider/model:effort>', task: \`ROUTE: ...\` }). Only independent read-only investigations share a script.
 - Every dispatch uses a campaign role, and the role must match the work: campaign-worker implements, campaign-reviewer reviews, campaign-scout investigates. Builtin roles (worker, reviewer, delegate, oracle) are refused: their prompts are not the campaign's.
@@ -246,6 +253,29 @@ const TIERS: Array<{ family: RegExp; label: string; efforts: Partial<Record<Thin
 	{ family: /fable/, label: "claude-fable", efforts: { high: 3 } },
 ];
 
+/**
+ * Review is its own axis. It was checked against the implementation table until now, which
+ * put the two models the review doc calls equivalent floors into different classes, and
+ * left the mandatory final pass enforceable only by coincidence. Review runs once, at the
+ * end, so these two classes differ by branch risk rather than by stage.
+ */
+const REVIEW_TIERS: Array<{ family: RegExp; label: string; efforts: Partial<Record<ThinkingLevel, number>> }> = [
+	{ family: /opus/, label: "claude-opus-5", efforts: { high: 1, xhigh: 2 } },
+	{ family: /terra/, label: "gpt-5.6-terra", efforts: { xhigh: 1 } },
+	{ family: /sol/, label: "gpt-5.6-sol", efforts: { xhigh: 2 } },
+];
+
+export function reviewClass(modelId: string, effort: ThinkingLevel): number | null {
+	const id = modelId.toLowerCase();
+	return REVIEW_TIERS.find((tier) => tier.family.test(id))?.efforts[effort] ?? null;
+}
+
+function reviewTable(): string {
+	return REVIEW_TIERS.flatMap((tier) =>
+		Object.entries(tier.efforts).map(([effort, cls]) => `  review ${cls}  ${tier.label}:${effort}`),
+	).sort().join("\n");
+}
+
 /** Every routable model and effort, so a refusal names the choices instead of implying them. */
 function tierTable(): string {
 	return TIERS.flatMap((tier) =>
@@ -263,6 +293,12 @@ export function modelClass(modelId: string, effort: ThinkingLevel): Implementati
 }
 
 /** The efforts the table lists for a model, for the refusal to quote back. */
+export function listedReviewEfforts(modelId: string): ThinkingLevel[] {
+	const id = modelId.toLowerCase();
+	const tier = REVIEW_TIERS.find((entry) => entry.family.test(id));
+	return tier ? (Object.keys(tier.efforts) as ThinkingLevel[]) : [];
+}
+
 export function listedEfforts(modelId: string): ThinkingLevel[] {
 	const tier = tierFor(modelId);
 	return tier ? (Object.keys(tier.efforts) as ThinkingLevel[]) : [];
@@ -274,11 +310,15 @@ export function parseRouteHeader(text: string): RouteHeader | null {
 	if (!match) return null;
 	const parts = match[1].split("|").map((part) => part.trim());
 	if (parts.length < 4) return null;
-	const classMatch = /^class\s*([123])$/i.exec(parts[1]);
-	if (!classMatch) return null;
+	const tier = /^(class|review)\s*([123])$/i.exec(parts[1]);
+	if (!tier) return null;
+	const axis = tier[1].toLowerCase() as "class" | "review";
+	const cls = Number(tier[2]);
+	if (axis === "review" && cls > 2) return null;
 	return {
 		key: parts[0],
-		cls: Number(classMatch[1]) as ImplementationClass,
+		axis,
+		cls,
 		model: parts[2],
 		reason: parts.slice(3).join(" | ").trim(),
 	};
@@ -625,27 +665,49 @@ function readField(objectBody: string, field: string): string | undefined {
 }
 
 /** Model pin and declared class, checked the same way for a lone dispatch and for a child. */
-function checkRoute(route: RouteHeader): GuardDecision {
+function checkRoute(route: RouteHeader, agent: string | undefined): GuardDecision {
 	const pin = parseModelPin(route.model);
 	if (!pin) return deny("CG004", `The routing header model ${route.model} is not pinned as provider/model:effort.`);
-	const actualClass = modelClass(pin.id, pin.effort);
+
+	// The role decides which table applies, so a reviewer can never be graded against the
+	// implementation tiers and a writer can never claim a review class.
+	const wantsReview = agent === "campaign-reviewer";
+	if (wantsReview && route.axis !== "review") {
+		return deny(
+			"CG004",
+			`Route ${route.key} is dispatched as campaign-reviewer, so its header declares a review class, not an implementation class:\nROUTE: ${route.key} | review <1|2> | <provider/model:effort> | <why this class>\n${reviewTable()}`,
+			true,
+		);
+	}
+	if (!wantsReview && route.axis === "review") {
+		return deny(
+			"CG004",
+			`Route ${route.key} declares a review class but is dispatched as ${agent ?? "a non-reviewer"}. Review classes belong to campaign-reviewer dispatches; implementation and investigation use class 1, 2, or 3.`,
+			true,
+		);
+	}
+
+	const actualClass = wantsReview ? reviewClass(pin.id, pin.effort) : modelClass(pin.id, pin.effort);
+	const table = wantsReview ? reviewTable() : tierTable();
+	const axis = wantsReview ? "review" : "class";
+
 	if (actualClass === null) {
-		const listed = listedEfforts(pin.id);
+		const listed = wantsReview ? listedReviewEfforts(pin.id) : listedEfforts(pin.id);
 		if (listed.length > 0) {
 			return deny(
 				"CG004",
-				`The tier table lists ${pin.id} at ${listed.join(" or ")} effort, not ${pin.effort}. A class is a model at an effort, so running a listed model at an unlisted effort is not the tier you declared.`,
+				`The ${axis} table lists ${pin.id} at ${listed.join(" or ")} effort, not ${pin.effort}. A ${axis} is a model at an effort, so running a listed model at an unlisted effort is not the tier you declared.`,
 			);
 		}
 		return deny(
 			"CG004",
-			`${pin.id} is not in the tier table, so its class cannot be checked. Route to one of these exactly, model and effort together:\n${tierTable()}\nThe provider prefix stays as your harness spells it, for example openai-codex/gpt-5.6-luna:high.`,
+			`${pin.id} is not in the ${axis} table, so its ${axis} cannot be checked. Route to one of these exactly, model and effort together:\n${table}\nThe provider prefix stays as your harness spells it, for example openai-codex/gpt-5.6-terra:xhigh.`,
 		);
 	}
 	if (actualClass !== route.cls) {
 		return deny(
 			"CG004",
-			`Route ${route.key} declares class ${route.cls} but ${pin.id} at ${pin.effort} is class ${actualClass} in the tier table. Fix whichever is wrong: choosing a class is choosing a model, not a label.`,
+			`Route ${route.key} declares ${axis} ${route.cls} but ${pin.id} at ${pin.effort} is ${axis} ${actualClass} in the ${axis} table. Fix whichever is wrong: choosing a ${axis} is choosing a model, not a label.`,
 		);
 	}
 	return { allow: true };
@@ -726,6 +788,7 @@ function dispatchContract(campaign: Campaign): string {
 		"",
 		"  workflowScript: return runs.run('<key>', { agent: <role>, model: <pin>, task: <task> })  with async stated at top level",
 		"  role:   campaign-worker | campaign-reviewer | campaign-scout, matching the work; a writer or reviewer is the only child of its script",
+		"  tier:   class <1|2|3> for campaign-worker and campaign-scout, review <1|2> for campaign-reviewer",
 		"  pin:    provider/model:effort            (a bare id or no model key is refused)",
 		"  task:   ROUTE: <key> | class <1|2|3> | <provider/model:effort> | <why this class>",
 		"          Work in <worktree>. Writers and reviewers name the exact HEAD <sha> and stop if it differs; read-only investigations may omit it.",
@@ -900,7 +963,7 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 						reason: `Child "${child.agent}" declares ${route.model} in its routing header but launches with ${child.model}. Each child's header must describe that child's own launch.`,
 					});
 				}
-				const routeCheck = checkRoute(route);
+				const routeCheck = checkRoute(route, child.agent);
 				if (!routeCheck.allow) problems.push({ code: routeCheck.code, reason: routeCheck.reason });
 			}
 			if (problems.length > 0) return denyAll(problems);
@@ -938,7 +1001,7 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 					reason: `The routing header declares ${route.model} but the launch carries ${text(input.model)}. The table and the call must agree, or the table proves nothing.`,
 				});
 			}
-			const routeCheck = checkRoute(route);
+			const routeCheck = checkRoute(route, agent);
 			if (!routeCheck.allow) problems.push({ code: routeCheck.code, reason: routeCheck.reason });
 		}
 		if (problems.length > 0) return denyAll(problems);

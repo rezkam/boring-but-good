@@ -41,6 +41,18 @@ function campaign(overrides: Partial<Campaign> = {}): Campaign {
 	};
 }
 
+const GOOD_REVIEW_ROUTE = "ROUTE: final-review | review 2 | claude-bridge/claude-opus-5:xhigh | cross-layer branch, broad blast radius";
+
+function reviewLaunch(overrides: Record<string, unknown> = {}) {
+	return {
+		agent: "campaign-reviewer",
+		model: "claude-bridge/claude-opus-5:xhigh",
+		async: true,
+		task: implementTask(GOOD_REVIEW_ROUTE),
+		...overrides,
+	};
+}
+
 function implementTask(routeLine: string): string {
 	return [
 		routeLine,
@@ -139,11 +151,21 @@ test("modelClass reads the tier table as model-and-effort pairs", () => {
 test("parseRouteHeader reads the four declared fields", () => {
 	assert.deepEqual(parseRouteHeader(GOOD_ROUTE), {
 		key: "s1-parser",
+		axis: "class",
 		cls: 1,
 		model: "openai-codex/gpt-5.6-luna:high",
 		reason: "mechanical single-file transcription",
 	});
 	assert.equal(parseRouteHeader("no header here"), null);
+
+	assert.deepEqual(parseRouteHeader("ROUTE: final | review 2 | claude-bridge/claude-opus-5:xhigh | cross-layer branch"), {
+		key: "final",
+		axis: "review",
+		cls: 2,
+		model: "claude-bridge/claude-opus-5:xhigh",
+		reason: "cross-layer branch",
+	});
+	assert.equal(parseRouteHeader("ROUTE: k | review 3 | m:high | there is no third review class"), null);
 });
 
 test("readStatusBlock reads the block, not the prose around it", () => {
@@ -356,7 +378,7 @@ test("CG006: a review before the review phase is refused however the prompt is l
 
 	const reviewing = campaign({ status: "review", slicesDone: 4 });
 	assert.deepEqual(
-		judged(request({ campaign: reviewing, input: launch({ agent: "campaign-reviewer" }) }), [verdict({ kind: "review", stopsOnHeadMismatch: false })]),
+		judged(request({ campaign: reviewing, input: reviewLaunch() }), [verdict({ kind: "review", stopsOnHeadMismatch: false })]),
 		{ allow: true },
 	);
 });
@@ -631,7 +653,7 @@ test("CG019: the role must match what the prompt actually asks for", () => {
 	assert.equal(asWorker.code, "CG019");
 	assert.match(asWorker.reason, /Dispatch it as campaign-reviewer/);
 
-	const premature = denyJudged(request({ input: launch({ agent: "campaign-reviewer" }) }), [
+	const premature = denyJudged(request({ input: reviewLaunch() }), [
 		verdict({ kind: "review", stopsOnHeadMismatch: false }),
 	]);
 	assert.equal(premature.code, "CG006", "before the review phase, the phase rule carries the lesson, not the role rule");
@@ -667,4 +689,37 @@ test("CG019: a child asking for forked context is refused with the reason", () =
 	const { code, reason } = structure(request({ input: { workflowScript: script, async: true } }));
 	assert.equal(code, "CG019");
 	assert.match(reason, /copies the coordinator's whole conversation/);
+});
+
+test("CG004: review and implementation are separate tables, never checked against each other", () => {
+	// The bug this replaces: reviewers were graded on the implementation tiers, so the two
+	// models the review doc calls equivalent landed in different classes.
+	const asClass = structure(
+		request({ input: reviewLaunch({ task: implementTask("ROUTE: final | class 3 | claude-bridge/claude-opus-5:xhigh | broad") }) }),
+	);
+	assert.equal(asClass.code, "CG004");
+	assert.match(asClass.reason, /declares a review class|review <1\|2>/);
+
+	const workerClaimingReview = structure(
+		request({ input: launch({ task: implementTask("ROUTE: s1 | review 1 | openai-codex/gpt-5.6-luna:high | nope") }) }),
+	);
+	assert.equal(workerClaimingReview.code, "CG004");
+	assert.match(workerClaimingReview.reason, /Review classes belong to campaign-reviewer/);
+});
+
+test("CG004: the review table is opus by effort, terra and sol at xhigh", () => {
+	const ok = (model: string, cls: number) =>
+		evaluateStructure(
+			request({ input: reviewLaunch({ model, task: implementTask(`ROUTE: r | review ${cls} | ${model} | why`) }) }),
+		).allow;
+
+	assert.equal(ok("claude-bridge/claude-opus-5:high", 1), true);
+	assert.equal(ok("openai-codex/gpt-5.6-terra:xhigh", 1), true);
+	assert.equal(ok("claude-bridge/claude-opus-5:xhigh", 2), true);
+	assert.equal(ok("openai-codex/gpt-5.6-sol:xhigh", 2), true);
+
+	// Same model, different effort, different class: the likeliest real refusal.
+	assert.equal(ok("claude-bridge/claude-opus-5:high", 2), false);
+	// A model with no review row at all.
+	assert.equal(ok("openai-codex/gpt-5.6-luna:high", 1), false);
 });

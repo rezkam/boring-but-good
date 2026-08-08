@@ -47,9 +47,18 @@ Escalate exactly one class only when the task is complex or the selected class c
 progress. Do not skip a class simply because a stronger model is available. Class 3 has no
 higher implementation class.
 
-Final whole-branch review uses `claude-fable` or `gpt-sol` at `high` effort. Reviewer effort
-scales with risk, and the final review always names its model explicitly, even when that
-model equals the session default.
+Review has its own two classes, checked against their own table. Review runs once, at the
+end, so the class is chosen by the risk of the whole branch rather than by stage:
+
+| Review class | Equivalent models | Use for |
+| --- | --- | --- |
+| 1 | `claude-opus-5` at `high`, or `gpt-5.6-terra` at `xhigh` | Narrow or mechanical branch, low blast radius |
+| 2 | `claude-opus-5` at `xhigh`, or `gpt-5.6-sol` at `xhigh` | Subtle, risky, broad, or cross-layer branch |
+
+A review dispatch declares `review 1` or `review 2` in its routing row, never an
+implementation class, and the review always names its model explicitly, even when that
+model equals the session default. The same model at a different effort is a different
+class: `claude-opus-5` is review 1 at `high` and review 2 at `xhigh`.
 
 This table is policy, not proof of availability. Resolve the model before launch and
 report an unavailable tier rather than silently substituting one. Write the ID in the form

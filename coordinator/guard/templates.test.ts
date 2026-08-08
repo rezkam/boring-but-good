@@ -46,7 +46,7 @@ test("the implementer template carries every boundary the guard asks the judge a
 test("the review template carries every boundary the guard asks the judge about", () => {
 	const prompt = promptSection(read("review-agent.md"));
 
-	assert.match(prompt, /ROUTE: \[REVIEW KEY\] \| class/, "the routing row must open the prompt");
+	assert.match(prompt, /ROUTE: \[REVIEW KEY\] \| review \[1\|2\]/, "the review row must declare a review class, not an implementation class");
 	assert.match(prompt, /exact HEAD/i, "the reviewed head must appear in the prompt, not only in dispatch metadata");
 	assert.match(prompt, /\bstop\b/i, "the prompt must tell the reviewer to stop when the tree moved");
 	assert.match(prompt, /push/i, "the prompt must forbid pushing");

@@ -8,11 +8,11 @@ Perform a read-only, defect-first review of a specified code change and return e
 
 - **Agent:** `[RUNTIME-VERIFIED READ-ONLY REVIEWER]`
 - **Description:** `Review [TARGET DESCRIPTION]`
-- **Model:** `[REQUIRED: choose under dispatch.md Model selection]`
-  - `gpt-terra` or `claude-sonnet` is the reviewer floor
-  - scale to `gpt-sol`, `claude-opus`, or `claude-fable` for subtle, risky, or broad changes
-  - use `gpt-sol` or `claude-fable` explicitly for the final whole-branch review
-- **Effort:** `[SCALE WITH RISK; HIGH FOR FINAL WHOLE-BRANCH REVIEW]`
+- **Model:** `[REQUIRED: pick from the review table in dispatch.md]`
+  - review 1: `claude-opus-5` at `high`, or `gpt-5.6-terra` at `xhigh`
+  - review 2: `claude-opus-5` at `xhigh`, or `gpt-5.6-sol` at `xhigh`
+  - scale to review 2 for a subtle, risky, broad, or cross-layer branch
+- **Effort:** `[THE EFFORT THE REVIEW TABLE GIVES THAT MODEL; IT IS PART OF THE CLASS]`
 - **Working directory:** `[FULL REVIEW WORKTREE PATH]`
 - **Target:** `[UNCOMMITTED | BASE BRANCH | COMMIT | CUSTOM]`
 - **Expected HEAD:** `[EXACT SHA THE WORKTREE SHOULD BE AT]`
@@ -22,7 +22,7 @@ Perform a read-only, defect-first review of a specified code change and return e
 ## Prompt
 
 Open with the routing row for this dispatch, naming the model the call actually carries:
-`ROUTE: [REVIEW KEY] | class [1|2|3] | [PROVIDER/MODEL:EFFORT] | [WHY THIS CLASS]`
+`ROUTE: [REVIEW KEY] | review [1|2] | [PROVIDER/MODEL:EFFORT] | [WHY THIS CLASS]`
 
 Inspect the requested target directly and return every finding that the author would likely fix. Do not modify files, create commits, push branches, run `gh`, open or modify a pull request, post review comments, or delegate the review to another agent.
 
