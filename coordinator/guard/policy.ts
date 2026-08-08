@@ -354,6 +354,26 @@ export function parseTierEntries(raw: string): { ok: true; entries: string[] } |
 	return { ok: true, entries };
 }
 
+/**
+ * Whether these entries already belong to another class on the same axis. classFrom returns
+ * the first match, so a duplicate would make the command report one class while dispatches
+ * are graded as another.
+ */
+export function findTierClash(tiers: TierLists, axis: "class" | "review", cls: number, entries: string[]): string | null {
+	const lists: Record<number, string[]> = axis === "review" ? tiers.review : tiers.class;
+	for (const entry of entries) {
+		const pin = parseModelPin(entry);
+		if (!pin) continue;
+		for (const [other, existing] of Object.entries(lists)) {
+			if (Number(other) === cls) continue;
+			if (existing.some((candidate) => entryMatches(candidate, pin))) {
+				return `${entry} is already in ${axis} ${other}.`;
+			}
+		}
+	}
+	return null;
+}
+
 /** The tiers with one class replaced, leaving the rest as they were. */
 export function withTierList(tiers: TierLists, axis: "class" | "review", cls: number, entries: string[]): TierLists {
 	const next: TierLists = { class: { ...tiers.class }, review: { ...tiers.review } };
@@ -873,7 +893,7 @@ function checkCampaignAgent(agent: string | undefined): GuardDecision {
  */
 const SHAPE_CODES = new Set(["CG002", "CG003", "CG004", "CG005", "CG009", "CG012", "CG013", "CG017", "CG019"]);
 
-function dispatchContract(campaign: Campaign, agent?: string): string {
+function dispatchContract(campaign: Campaign, agent: string | undefined, tiers: TierLists): string {
 	return [
 		"",
 		"A dispatch that passes every check looks like this. The guard checks shape first and reads the prompt second, so satisfy all of it at once:",
@@ -881,6 +901,9 @@ function dispatchContract(campaign: Campaign, agent?: string): string {
 		"  workflowScript: return runs.run('<key>', { agent: <role>, model: <pin>, task: <task> })  with async stated at top level",
 		"  role:   campaign-worker | campaign-reviewer | campaign-scout, matching the work; a writer or reviewer is the only child of its script",
 		"  tier:   class <1|2|3> for campaign-worker and campaign-scout, review <1|2> for campaign-reviewer",
+		"",
+		"  The tiers actually enforced right now, first entry preferred:",
+		renderTiers(tiers),
 		"  pin:    provider/model:effort            (a bare id or no model key is refused)",
 		`  task:   ${routeShapeFor(agent)}`,
 		"          Work in <worktree>. Writers and reviewers name the exact HEAD <sha> and stop if it differs; read-only investigations may omit it.",
@@ -894,7 +917,7 @@ function dispatchContract(campaign: Campaign, agent?: string): string {
 		"  turnBudget, toolBudget, or maxTurns          bound liveness with elapsed time and serial milestones instead",
 		"  an instruction to commit for you, push, rebase, cherry-pick, or touch PR state",
 		"  review work before every slice is done and you have called coordinator_campaign action \"open-review\"",
-		"  a class the model does not match: class 1 luna or sonnet, class 2 terra or opus, class 3 sol or fable",
+		"  a model and effort outside the tier list for the class it declares",
 	].join("\n");
 }
 
@@ -908,16 +931,16 @@ function contractRole(request: GuardRequest): string | undefined {
 	return children.length === 1 ? children[0].agent : undefined;
 }
 
-function withContract(decision: GuardDecision, campaign: Campaign | null, agent?: string): GuardDecision {
+function withContract(decision: GuardDecision, campaign: Campaign | null, agent: string | undefined, tiers: TierLists): GuardDecision {
 	if (decision.allow || !campaign) return decision;
 	if (!SHAPE_CODES.has(decision.code) && !decision.teach) return decision;
-	return { ...decision, reason: `${decision.reason}\n${dispatchContract(campaign, agent)}` };
+	return { ...decision, reason: `${decision.reason}\n${dispatchContract(campaign, agent, tiers)}` };
 }
 
 export function evaluateStructure(request: GuardRequest): StructureDecision {
 	const campaign = request.campaign && request.campaign.status !== "closed" ? request.campaign : null;
 	const decision = evaluateStructureInner(request);
-	return decision.allow ? decision : (withContract(decision, campaign, contractRole(request)) as StructureDecision);
+	return decision.allow ? decision : (withContract(decision, campaign, contractRole(request), request.tiers ?? DEFAULT_TIERS) as StructureDecision);
 }
 
 function evaluateStructureInner(request: GuardRequest): StructureDecision {
@@ -1150,7 +1173,7 @@ export function evaluateVerdicts(
 	judged: Array<{ target: JudgeTarget; verdict: PromptVerdict }>,
 ): GuardDecision {
 	const active = request.campaign && request.campaign.status !== "closed" ? request.campaign : null;
-	return withContract(evaluateVerdictsInner(request, judged), active, judged.length === 1 ? judged[0].target.agent : undefined);
+	return withContract(evaluateVerdictsInner(request, judged), active, judged.length === 1 ? judged[0].target.agent : undefined, request.tiers ?? DEFAULT_TIERS);
 }
 
 function evaluateVerdictsInner(

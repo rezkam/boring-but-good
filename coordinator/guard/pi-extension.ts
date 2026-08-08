@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 
 import { judgeCacheKey, judgeDispatch, type JudgeCall, type PromptVerdict } from "./judge.ts";
 import { findRoleShadows } from "./shadows.ts";
-import { rateFor, readThroughput, type Throughput } from "./throughput.ts";
+import { rateFor, readThroughput, reorderByThroughput, type Throughput } from "./throughput.ts";
 
 import {
 	continuationPrompt,
@@ -33,6 +33,7 @@ import {
 	openReview,
 	DEFAULT_TIERS,
 	parseModelPin,
+	findTierClash,
 	parseTierEntries,
 	renderTiers,
 	withTierList,
@@ -112,39 +113,6 @@ const LaneParams = Type.Object({
 });
 
 /** The verdict as display rows, in the order the judge is asked. */
-/**
- * Each class reordered so the fastest measured entry leads. Entries with no measurement
- * keep their relative position behind the measured ones rather than being guessed at: a
- * model with no samples is unknown, not slow.
- */
-export function reorderByThroughput(
-	tiers: TierLists,
-	measured: Map<string, Throughput>,
-): { tiers: TierLists; changed: string[] } {
-	const next: TierLists = { class: { ...tiers.class }, review: { ...tiers.review } };
-	const changed: string[] = [];
-	for (const [axis, lists] of [
-		["class", next.class],
-		["review", next.review],
-	] as const) {
-		for (const [cls, entries] of Object.entries(lists) as Array<[string, string[]]>) {
-			const ranked = [...entries].sort((left, right) => {
-				const leftRate = rateFor(measured, left);
-				const rightRate = rateFor(measured, right);
-				if (leftRate && rightRate) return rightRate.tokensPerSecond - leftRate.tokensPerSecond;
-				if (leftRate) return -1;
-				if (rightRate) return 1;
-				return 0;
-			});
-			if (ranked.join("|") !== entries.join("|")) {
-				changed.push(`${axis} ${cls}`);
-				(lists as Record<string, string[]>)[cls] = ranked;
-			}
-		}
-	}
-	return { tiers: next, changed };
-}
-
 /** Restored state is data from disk, so its shape is checked before it becomes policy. */
 function isTierLists(value: unknown): value is TierLists {
 	if (!value || typeof value !== "object") return false;
@@ -358,6 +326,11 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 
 		const parsed = parseTierEntries(match[3]);
 		if (!parsed.ok) return `Not applied: ${parsed.error}`;
+
+		const clash = findTierClash(tiers, axis, cls, parsed.entries);
+		if (clash) {
+			return `Not applied: ${clash} A pin in two classes makes the table ambiguous, and the class actually enforced would be whichever is found first.`;
+		}
 
 		tiers = withTierList(tiers, axis, cls, parsed.entries);
 		persist();
