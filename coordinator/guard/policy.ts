@@ -87,6 +87,28 @@ export interface GuardRequest {
 	tiers?: TierLists;
 }
 
+/** Which entry a dispatch took, when it was not the class's first. */
+function fallbackUsed(
+	target: JudgeTarget,
+	kind: JudgedKind,
+	tiers: TierLists,
+): { used: string; preferred: string; axis: "class" | "review"; cls: number } | null {
+	const pin = parseModelPin(target.model);
+	if (!pin) return null;
+	const axis: "class" | "review" = kind === "review" ? "review" : "class";
+	// The review axis has two classes, so a declared 3 belongs to no review list at all.
+	const entries =
+		axis === "review"
+			? target.declaredClass === 3
+				? undefined
+				: tiers.review[target.declaredClass]
+			: tiers.class[target.declaredClass];
+	if (!entries || entries.length < 2) return null;
+	const index = entries.findIndex((entry: string) => entryMatches(entry, pin));
+	if (index <= 0) return null;
+	return { used: entries[index], preferred: entries[0], axis, cls: target.declaredClass };
+}
+
 /** The denial half, so a refusal stays assignable wherever a richer allow shape is expected. */
 export type GuardDenial = { allow: false; code: string; reason: string; teach?: boolean };
 export type GuardDecision = { allow: true } | GuardDenial;
@@ -199,6 +221,8 @@ NOT AUTHORIZED  merge; close or reopen PRs; publish releases; touch production; 
 
 These are enforced at the tool boundary, not by your memory of them. A dispatch that breaks one fails:
 
+- Reaching past the first model in a class is allowed only when the routing reason says why
+  the preferred one was not usable, for example "claude-bridge rate-limited at 14:02".
 - Every launch pins provider/model:effort, and only these route. Position one is what to reach
   for; the rest are accepted fallbacks. Anything else is refused:
 ${tierTable(tiers)}
@@ -429,18 +453,46 @@ export function parseRouteHeader(text: string): RouteHeader | null {
 	};
 }
 
-export function readStatusBlock(text: string): { ok: boolean; missing: string[] } {
+export interface StatusBlock {
+	ok: boolean;
+	missing: string[];
+	/** What the block claims, when it states it in the documented shape. */
+	claimedSlicesDone: number | null;
+	claimedSlicesTotal: number | null;
+}
+
+export function readStatusBlock(text: string): StatusBlock {
 	// Validate the block itself, not the prose around it: a message that happens to mention a
 	// PR elsewhere must not make an incomplete block look fresh. Fields share lines in the real
 	// layout (CAMPAIGN sits beside WORKTREE), so labels are matched within the block region.
 	const lines = text.split("\n");
 	const start = lines.findIndex((line) => /^[ \t>*-]*CAMPAIGN\b/i.test(line));
-	if (start === -1) return { ok: false, missing: [...STATUS_FIELDS] };
+	if (start === -1) return { ok: false, missing: [...STATUS_FIELDS], claimedSlicesDone: null, claimedSlicesTotal: null };
 	let end = lines.findIndex((line, index) => index >= start && /^[ \t>*-]*NEXT\b/i.test(line));
 	if (end === -1) end = Math.min(lines.length - 1, start + STATUS_FIELDS.length + 4);
 	const block = lines.slice(start, end + 1).join("\n");
 	const missing = STATUS_FIELDS.filter((field) => !new RegExp(`\\b${field}\\b`, "i").test(block));
-	return { ok: missing.length === 0, missing };
+	const claimed = /^[ \t>*-]*SLICES\D*(\d+)\s*done\s*\/\s*(\d+)\s*total/im.exec(block);
+	return {
+		ok: missing.length === 0,
+		missing,
+		claimedSlicesDone: claimed ? Number(claimed[1]) : null,
+		claimedSlicesTotal: claimed ? Number(claimed[2]) : null,
+	};
+}
+
+/**
+ * Whether a printed block's slice count matches the ledger that actually gates review.
+ *
+ * The block was validated for freshness and its numbers ignored, so a campaign could print
+ * "6 done / 31 total" every turn while the recorded count stayed at zero, and did. That
+ * number is not decoration: open-review refuses until done equals total, so an unrecorded
+ * count opens review at the wrong time or never.
+ */
+export function statusBlockDisagreement(block: StatusBlock, campaign: Campaign): string | null {
+	if (block.claimedSlicesDone === null || block.claimedSlicesTotal === null) return null;
+	if (block.claimedSlicesDone === campaign.slicesDone && block.claimedSlicesTotal === campaign.slicesTotal) return null;
+	return `the block says ${block.claimedSlicesDone} done of ${block.claimedSlicesTotal}, the campaign records ${campaign.slicesDone} of ${campaign.slicesTotal}. Record the real count with coordinator_campaign action "set-slices", or correct the block. Review opens on the recorded number, not the printed one.`;
 }
 
 
@@ -1142,7 +1194,7 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 		const minutes = Math.floor((now - campaign.lastStatusAt) / 60_000);
 		return deny(
 			"CG008",
-			`The last status block was ${minutes} minutes ago. Print the status block, then retry this launch in the same turn. Required fields: ${STATUS_FIELDS.join(", ")}.`,
+			`The last status block was ${minutes} minutes ago, or the last one was not counted because its numbers disagreed with the recorded campaign. Print the status block, then retry this launch in the same turn. Required fields: ${STATUS_FIELDS.join(", ")}.`,
 		);
 	}
 
@@ -1181,6 +1233,7 @@ function evaluateVerdictsInner(
 	judged: Array<{ target: JudgeTarget; verdict: PromptVerdict }>,
 ): GuardDecision {
 	const config = request.config ?? DEFAULT_CONFIG;
+	const tiers = request.tiers ?? DEFAULT_TIERS;
 	const campaign = request.campaign && request.campaign.status !== "closed" ? request.campaign : null;
 	if (!campaign) return { allow: true };
 
@@ -1229,6 +1282,19 @@ function evaluateVerdictsInner(
 			return deny(
 				"CG019",
 				`This prompt reads as ${kind} work, but it is dispatched as ${target.agent}, whose role is to ${expectedKind}. The role's own instructions would fight the prompt. Dispatch it as ${Object.entries(CAMPAIGN_AGENTS).find(([, mapped]) => mapped === kind)?.[0] ?? "the matching role"} instead.`,
+				true,
+			);
+		}
+
+		// Position one is the default, not a suggestion. Reaching past it is allowed, because a
+		// provider outage must not stall a campaign, but it costs the same sentence that
+		// escalation does: otherwise "preferred" is silently ignorable, which is the shape of
+		// rule this whole guard exists to replace.
+		const fallback = fallbackUsed(target, kind, tiers);
+		if (fallback && verdict.classJustification !== "substantive") {
+			return deny(
+				"CG020",
+				`${fallback.used} is a fallback for ${fallback.axis} ${fallback.cls}; the preferred model is ${fallback.preferred}. Reach past the preferred model only when it is unavailable, and say so in the routing reason, for example "claude-bridge rate-limited at 14:02". The reason on route ${target.routeKey} does not explain the choice.`,
 				true,
 			);
 		}
