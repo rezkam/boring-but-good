@@ -13,6 +13,8 @@ import { complete, completeSimple } from "@earendil-works/pi-ai/compat";
 import type { Model, ThinkingLevel, UserMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { delimiter as pathDelimiter } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { judgeCacheKey, judgeDispatch, type JudgeCall, type PromptVerdict } from "./judge.ts";
 
@@ -82,6 +84,15 @@ const LaneParams = Type.Object({
 });
 
 export default function coordinatorGuard(pi: ExtensionAPI) {
+	// The campaign roles live beside the guard and are registered with pi-subagents through
+	// its extra-dirs env, which it reads at dispatch time. This is what lets the guard own
+	// what a dispatched agent is told, rather than the builtin role prose.
+	const agentsDir = fileURLToPath(new URL("./agents/", import.meta.url)).replace(/\/$/, "");
+	const registered = process.env.PI_SUBAGENT_EXTRA_AGENT_DIRS?.split(pathDelimiter).filter(Boolean) ?? [];
+	if (!registered.includes(agentsDir)) {
+		process.env.PI_SUBAGENT_EXTRA_AGENT_DIRS = [...registered, agentsDir].join(pathDelimiter);
+	}
+
 	let campaign: Campaign | null = null;
 	let armed = false;
 	let judgeModel = DEFAULT_JUDGE_MODEL;

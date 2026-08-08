@@ -113,7 +113,7 @@ function denyJudged(req: GuardRequest, verdicts: PromptVerdict[]): { code: strin
 }
 
 function launch(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-	return { agent: "worker", model: "openai-codex/gpt-5.6-luna:high", task: implementTask(GOOD_ROUTE), ...overrides };
+	return { agent: "campaign-worker", model: "openai-codex/gpt-5.6-luna:high", task: implementTask(GOOD_ROUTE), ...overrides };
 }
 
 // ── structural rules, decided without a model call ──────────────────────────────
@@ -215,7 +215,7 @@ test("CG005: hard turn and tool budgets are refused, in arguments or inside a sc
 	assert.equal(structure(request({ input: launch({ toolBudget: { soft: 60, hard: 90 } }) })).code, "CG005");
 	assert.equal(targets(request({ input: launch({ usageBudget: { tokens: { soft: 200_000 } } }) })).length, 1);
 
-	const script = `const r = await runs.run('s1', {agent:'worker', model:'openai-codex/gpt-5.6-luna:high', maxTurns: 30, task: 'x'}); return r`;
+	const script = `const r = await runs.run('s1', {agent:'campaign-worker', model:'openai-codex/gpt-5.6-luna:high', maxTurns: 30, task: 'x'}); return r`;
 	assert.equal(structure(request({ input: { workflowScript: script, async: true } })).code, "CG005");
 });
 
@@ -300,14 +300,14 @@ test("CG017: a launch must say whether it runs in the foreground", () => {
 // ── workflow scripts ────────────────────────────────────────────────────────────
 
 test("parseScriptChildren keeps each child's fields together, quoted or not", () => {
-	const script = `runs.all([{key:'a', agent:'scout', model:'m:high', task: \`ROUTE: a | class 1 | m:high | why\`}, {"key":"b","agent":"worker","model":"n:high","task":"t"}])`;
+	const script = `runs.all([{key:'a', agent:'campaign-scout', model:'m:high', task: \`ROUTE: a | class 1 | m:high | why\`}, {"key":"b","agent":"campaign-worker","model":"n:high","task":"t"}])`;
 	const { children, agentKeys } = parseScriptChildren(script);
 	assert.equal(agentKeys, 2);
 	assert.deepEqual(
 		children.map((child) => [child.agent, child.model]),
 		[
-			["scout", "m:high"],
-			["worker", "n:high"],
+			["campaign-scout", "m:high"],
+			["campaign-worker", "n:high"],
 		],
 	);
 });
@@ -321,17 +321,17 @@ test("CG002: a script whose child fields are not literals cannot be verified", (
 
 test("every child of a script needs its own pinned model and routing header", () => {
 	const header = (key: string) => `ROUTE: ${key} | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory`;
-	const noModel = `runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("a")}\`}, {key:'b', agent:'scout', task: \`${header("b")}\`}])`;
+	const noModel = `runs.all([{key:'a', agent:'campaign-scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("a")}\`}, {key:'b', agent:'campaign-scout', task: \`${header("b")}\`}])`;
 	assert.match(structure(request({ input: { workflowScript: noModel, async: true } })).reason, /no literal model/);
 
-	const noRoute = `runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("a")}\`}, {key:'b', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: 'just do it'}])`;
+	const noRoute = `runs.all([{key:'a', agent:'campaign-scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("a")}\`}, {key:'b', agent:'campaign-scout', model:'openai-codex/gpt-5.6-luna:high', task: 'just do it'}])`;
 	assert.equal(structure(request({ input: { workflowScript: noRoute, async: true } })).code, "CG003");
 });
 
 test("CG004: a child's header must name the model that child launches with", () => {
 	const good = `ROUTE: a | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory`;
 	const wrong = `ROUTE: b | class 1 | claude-bridge/claude-sonnet-5:medium | read-only inventory`;
-	const script = `runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${good}\`}, {key:'b', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${wrong}\`}])`;
+	const script = `runs.all([{key:'a', agent:'campaign-scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${good}\`}, {key:'b', agent:'campaign-scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${wrong}\`}])`;
 	const { code, reason } = structure(request({ input: { workflowScript: script, async: true } }));
 	assert.equal(code, "CG004");
 	assert.match(reason, /declares/i);
@@ -339,7 +339,7 @@ test("CG004: a child's header must name the model that child launches with", () 
 
 test("CG010: two children of one script cannot share a route key", () => {
 	const header = `ROUTE: same | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory`;
-	const script = `runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header}\`}, {key:'b', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header}\`}])`;
+	const script = `runs.all([{key:'a', agent:'campaign-scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header}\`}, {key:'b', agent:'campaign-scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header}\`}])`;
 	assert.equal(structure(request({ input: { workflowScript: script, async: true } })).code, "CG010");
 });
 
@@ -355,9 +355,10 @@ test("CG006: a review before the review phase is refused however the prompt is l
 	assert.match(reason, /0 of 4/);
 
 	const reviewing = campaign({ status: "review", slicesDone: 4 });
-	assert.deepEqual(judged(request({ campaign: reviewing, input: launch() }), [verdict({ kind: "review", stopsOnHeadMismatch: false })]), {
-		allow: true,
-	});
+	assert.deepEqual(
+		judged(request({ campaign: reviewing, input: launch({ agent: "campaign-reviewer" }) }), [verdict({ kind: "review", stopsOnHeadMismatch: false })]),
+		{ allow: true },
+	);
 });
 
 test("CG006: only one reviewer runs at a time", () => {
@@ -392,9 +393,10 @@ test("CG009: the prompt's boundaries are enforced from what it actually says", (
 });
 
 test("CG009: an investigation needs no HEAD, a writer does", () => {
-	assert.deepEqual(judged(request({ input: launch() }), [verdict({ kind: "investigate", expectedHead: null, stopsOnHeadMismatch: false })]), {
-		allow: true,
-	});
+	assert.deepEqual(
+		judged(request({ input: launch({ agent: "campaign-scout" }) }), [verdict({ kind: "investigate", expectedHead: null, stopsOnHeadMismatch: false })]),
+		{ allow: true },
+	);
 });
 
 test("CG009: unrendered placeholders the judge found are refused", () => {
@@ -435,14 +437,16 @@ test("CG010: read-only lanes do not consume writer capacity", () => {
 		{ key: "s3", kind: "implement" as const, model: "m:high", startedAt: 1, state: "running" as const },
 	];
 	assert.deepEqual(
-		judged(request({ campaign: campaign({ lanes }), input: launch() }), [verdict({ kind: "investigate", expectedHead: null, stopsOnHeadMismatch: false })]),
+		judged(request({ campaign: campaign({ lanes }), input: launch({ agent: "campaign-scout" }) }), [
+			verdict({ kind: "investigate", expectedHead: null, stopsOnHeadMismatch: false }),
+		]),
 		{ allow: true },
 	);
 });
 
-test("a script may carry investigations, but never writers or reviewers", () => {
+test("a multi-child script carries only investigations; a single-child script is the lane vehicle", () => {
 	const header = (key: string) => `ROUTE: ${key} | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory`;
-	const script = `runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("a")}\`}, {key:'b', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("b")}\`}])`;
+	const script = `runs.all([{key:'a', agent:'campaign-scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("a")}\`}, {key:'b', agent:'campaign-scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("b")}\`}])`;
 	const req = request({ input: { workflowScript: script, async: true } });
 	const readOnly = verdict({ kind: "investigate", expectedHead: null, stopsOnHeadMismatch: false });
 
@@ -450,9 +454,15 @@ test("a script may carry investigations, but never writers or reviewers", () => 
 
 	const { code, reason } = denyJudged(req, [readOnly, verdict()]);
 	assert.equal(code, "CG010");
-	assert.match(reason, /one at a time/);
+	assert.match(reason, /only child of its own script/);
 
 	assert.equal(denyJudged(req, [readOnly, verdict({ kind: "review" })]).code, "CG006");
+});
+
+test("a single-child script carrying one writer is a legal lane, because direct execution no longer exists", () => {
+	const header = "ROUTE: s1 | class 1 | openai-codex/gpt-5.6-luna:high | mechanical edit";
+	const script = `return runs.run('s1', {agent:'campaign-worker', model:'openai-codex/gpt-5.6-luna:high', task: \`${header}\`})`;
+	assert.deepEqual(judged(request({ input: { workflowScript: script, async: true } }), [verdict()]), { allow: true });
 });
 
 // ── campaign lifecycle and prompts ──────────────────────────────────────────────
@@ -516,7 +526,7 @@ test("the automatic continuation names the lanes and orders liveness before new 
 
 test("agent keys inside prompt text are not counted as children", () => {
 	const task = "ROUTE: a | class 1 | openai-codex/gpt-5.6-luna:high | read-only inventory. The assigned agent: scout should read only. Never push.";
-	const script = `runs.all([{key:'a', agent:'scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${task}\`}])`;
+	const script = `runs.all([{key:'a', agent:'campaign-scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${task}\`}])`;
 	const { children, agentKeys } = parseScriptChildren(script);
 	assert.equal(agentKeys, 1);
 	assert.equal(children.length, 1);
@@ -524,7 +534,9 @@ test("agent keys inside prompt text are not counted as children", () => {
 
 test("batch and chain inputs are treated as launches rather than slipping past", () => {
 	assert.equal(structure(request({ input: { tasks: [{ agent: "worker", task: "x" }] } })).code, "CG017");
-	assert.equal(structure(request({ input: { chain: "legacy", async: true } })).code, "CG002");
+	const chain = structure(request({ input: { chain: "legacy", async: true } }));
+	assert.equal(chain.code, "CG019");
+	assert.match(chain.reason, /\[CG002\]/, "the unpinned model still has to be named in the same refusal");
 });
 
 test("the writer cap is one rule, so the judge-off path enforces it too", () => {
@@ -545,8 +557,9 @@ test("every structural problem with a launch is reported in one refusal", () => 
 	const { code, reason } = structure(
 		request({ input: { agent: "worker", model: "gpt-5.6-luna", task: "Implement slice S1.", async: true } }),
 	);
-	assert.equal(code, "CG002");
-	assert.match(reason, /2 problems/);
+	assert.equal(code, "CG019");
+	assert.match(reason, /3 problems/);
+	assert.match(reason, /\[CG019\]/);
 	assert.match(reason, /\[CG002\]/);
 	assert.match(reason, /\[CG003\]/);
 });
@@ -579,12 +592,15 @@ test("state refusals stay short, because the contract is not the fix", () => {
 	assert.doesNotMatch(stale.reason, /turnBudget/, "a stale status block is fixed by printing one, not by rewriting the dispatch");
 });
 
-test("a writer hidden in a script is told which call to make instead", () => {
-	const header = "ROUTE: s1 | class 1 | openai-codex/gpt-5.6-luna:high | mechanical edit";
-	const script = `runs.run('s1', {agent:'worker', model:'openai-codex/gpt-5.6-luna:high', task: \`${header}\`})`;
-	const { code, reason } = denyJudged(request({ input: { workflowScript: script, async: true } }), [verdict()]);
+test("a writer fanned out beside another child is told the single-child script form that works", () => {
+	const header = (key: string) => `ROUTE: ${key} | class 1 | openai-codex/gpt-5.6-luna:high | mechanical edit`;
+	const script = `return runs.all([{key:'a', agent:'campaign-worker', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("a")}\`}, {key:'b', agent:'campaign-scout', model:'openai-codex/gpt-5.6-luna:high', task: \`${header("b")}\`}])`;
+	const { code, reason } = denyJudged(request({ input: { workflowScript: script, async: true } }), [
+		verdict(),
+		verdict({ kind: "investigate", expectedHead: null, stopsOnHeadMismatch: false }),
+	]);
 	assert.equal(code, "CG010");
-	assert.match(reason, /one direct subagent call/, "must name the call that works");
+	assert.match(reason, /runs\.run\('<key>'/, "must show the single-child script form");
 	assert.match(reason, /integrated/, "must say what unblocks the next writer");
 	assert.match(reason, /ROUTE:/, "must carry the contract, since the fix is a rewritten dispatch");
 });
@@ -596,4 +612,27 @@ test("an unroutable model refusal names every model that would work", () => {
 	for (const listed of ["gpt-5.6-luna:high", "claude-sonnet:medium", "gpt-5.6-terra:medium", "claude-opus:low", "gpt-5.6-sol:medium", "claude-fable:high"]) {
 		assert.match(reason, new RegExp(listed.replace(/[.]/g, "\\.")), `must list ${listed}`);
 	}
+});
+
+test("CG019: a campaign dispatch runs only with a campaign-owned role", () => {
+	const builtin = structure(request({ input: launch({ agent: "reviewer" }) }));
+	assert.equal(builtin.code, "CG019");
+	assert.match(builtin.reason, /campaign-worker to implement/);
+	assert.match(builtin.reason, /builtin reviewer will happily edit/);
+
+	assert.equal(evaluateStructure(request({ input: launch({ agent: "campaign-worker" }) })).allow, true);
+});
+
+test("CG019: the role must match what the prompt actually asks for", () => {
+	const reviewing = campaign({ status: "review", slicesDone: 4 });
+	const asWorker = denyJudged(request({ campaign: reviewing, input: launch() }), [
+		verdict({ kind: "review", stopsOnHeadMismatch: false }),
+	]);
+	assert.equal(asWorker.code, "CG019");
+	assert.match(asWorker.reason, /Dispatch it as campaign-reviewer/);
+
+	const premature = denyJudged(request({ input: launch({ agent: "campaign-reviewer" }) }), [
+		verdict({ kind: "review", stopsOnHeadMismatch: false }),
+	]);
+	assert.equal(premature.code, "CG006", "before the review phase, the phase rule carries the lesson, not the role rule");
 });

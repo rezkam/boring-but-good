@@ -70,3 +70,22 @@ test("the judge is asked about exactly the boundaries the templates promise", ()
 		assert.match(JUDGE_SYSTEM_PROMPT, new RegExp(`"${field}"`), `the judge contract must define ${field}`);
 	}
 });
+
+test("the campaign roles never grant what their boundaries forbid", () => {
+	// The builtin reviewer carries edit and write and is told to apply fixes; these roles
+	// exist so a campaign never dispatches that. The frontmatter is the enforceable half.
+	const files = ["agents/campaign-worker.md", "agents/campaign-reviewer.md", "agents/campaign-scout.md"];
+	for (const file of files) {
+		const body = readFileSync(join(dirname(fileURLToPath(import.meta.url)), file), "utf8");
+		assert.match(body, /systemPromptMode: replace/, `${file} must replace the parent prompt, not append to it`);
+		assert.match(body, /inheritSkills: false/, `${file} must not inherit skills`);
+		assert.doesNotMatch(body, /defaultContext: fork/, `${file} must not fork the coordinator's conversation`);
+		assert.match(body, /[Nn]ever push/, `${file} must forbid pushing`);
+		assert.match(body, /gh/, `${file} must forbid gh`);
+		assert.match(body, /[Nn]ever spawn subagents/, `${file} must forbid delegation`);
+	}
+	for (const readOnly of ["agents/campaign-reviewer.md", "agents/campaign-scout.md"]) {
+		const tools = readFileSync(join(dirname(fileURLToPath(import.meta.url)), readOnly), "utf8").match(/^tools: (.*)$/m)?.[1] ?? "";
+		assert.doesNotMatch(tools, /edit|write/, `${readOnly} must not carry edit or write tools`);
+	}
+});

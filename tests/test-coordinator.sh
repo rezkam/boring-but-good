@@ -44,10 +44,10 @@ for f in "$COORD_DIR"/*.md; do
 done
 
 # The load-bearing dispatch rules must be in the skill body, not one pointer away.
-if grep -q 'tasks: \[\.\.\.\]' "$SKILLMD"; then
-  pass "SKILL.md names the pi batch-form trap directly"
+if grep -q 'runs.run.*runs.all. child carries its own literal' "$SKILLMD"; then
+  pass "SKILL.md names the pi per-child pinning rule directly"
 else
-  fail "SKILL.md names the pi batch-form trap directly" "the tasks[] form takes no per-task model"
+  fail "SKILL.md names the pi per-child pinning rule directly" "every workflowScript child carries its own literal model and agent"
 fi
 if grep -qi 'hard turn or tool-call budget' "$SKILLMD"; then
   pass "SKILL.md carries the turn-budget ban"

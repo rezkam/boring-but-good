@@ -119,51 +119,49 @@ that the audit would reject.
 
 ## pi
 
-**The guard enforces this skill mechanically here.** `guard/` blocks tool
-calls that break the dispatch rules, so a rule you forget fails the call instead of
-silently degrading the campaign. Register the campaign before the first dispatch:
-`coordinator_campaign` action `start` with slug, worktree, plan path, slice count, and
-the authorization scope. Record slices with `set-slices`, lanes with `coordinator_lane`,
-and open the single review pass with `open-review`. See [guard/README.md](guard/README.md)
-for the refusal codes. When a call is blocked, the refusal names the fix: correct it and
-retry in the same turn. Never work around a refusal by routing through bash.
+**The guard extension enforces this skill mechanically here, and it owns the pi
+mechanics.** `guard/` blocks tool calls that break the dispatch rules, and once a
+campaign is registered it re-injects the full contract into the system prompt every
+turn, so the mechanics survive compaction without this file. If the
+`coordinator_campaign` tool is absent, the guard is not installed: stop and tell the
+user, because nothing below is enforced without it.
 
-Structural rules are checked mechanically; the rules that depend on what a prompt says are
-checked by a small model that reads it and answers a fixed set of questions. That judge
-fails closed, so a dispatch it cannot read is refused rather than assumed compliant.
+Register the campaign before the first dispatch: `coordinator_campaign` action `start`
+with slug, worktree, plan path, slice count, and the authorization scope. Record slices
+with `set-slices`, lanes with `coordinator_lane`, and open the single review pass with
+`open-review`. See [guard/README.md](guard/README.md) for the refusal codes. When a call
+is blocked, the refusal names the fix: correct it and retry in the same turn. Never work
+around a refusal by routing through bash.
 
-**Re-read this skill and the notes file at the start of every campaign turn.** A 19 hour
-campaign quoted these rules correctly in hour one and had lost them by hour three, for
-roughly seventy dispatches. The conversation is not the campaign's memory: the notes file
-is, and compaction is not a reason to be surprised by your own contract.
+Structural rules are checked mechanically; the rules that depend on what a prompt says
+are checked by a small model that reads it and answers a fixed set of questions. That
+judge fails closed, so a dispatch it cannot read is refused rather than assumed
+compliant.
 
-**pi's builtin roles are transport, not roles.** `worker`, `reviewer`, `oracle`, `scout`
-carry tools, nothing else: they choose no model, and their own defaults fill in the effort
-you did not pin (`worker` resolves to `high`). Use one only to carry a prompt rendered from
-[implementer-prompt.md](implementer-prompt.md) or [review-agent.md](review-agent.md), with
-the tier and model chosen first. pi's `commit` builtin is on the never-dispatch list by
-name: committing is yours.
+**Campaign dispatches use the guard's own roles, never pi's builtins.** The guard ships
+`campaign-worker`, `campaign-reviewer`, and `campaign-scout` in `guard/agents/` and
+registers them with pi-subagents at load. Their prompts are versioned with this skill,
+so what a dispatched agent is told is part of what the guard guarantees. The builtins
+are refused during a campaign for cause: pi's `reviewer` carries edit and write tools
+and is told to apply fixes, `worker` forks your whole conversation into the child, and
+`delegate` appends your system prompt, campaign contract included. The task prompt is
+still rendered from [implementer-prompt.md](implementer-prompt.md) or
+[review-agent.md](review-agent.md); the role carries the standing boundaries. Since
+pi-subagents 0.43.0 the only dispatch form is a `workflowScript`: a writer or reviewer
+is the only child of its own script (`return runs.run('<key>', { agent, model, task })`),
+and only independent read-only investigations share one.
 
-**pi ships its own subagent registry and it competes with this skill.** `subagent
-action:"list"` shows builtin roles (`scout`, `advisor`, `oracle`, `worker`, `reviewer`,
-`planner`, `researcher`, `delegate`, `context-builder`) interleaved with your own skills,
-and `action:"models"` reports every one of them as "inherits current session model". They
-are pi's roles, not the roles in [dispatch.md](dispatch.md)'s tier table, and choosing one
-chooses no model at all.
-
-**Resolution.** Pick the tier from the table first, then whichever pi agent type carries
-the right tools for it, then pin the model on the call. SKILL.md section 2 has the string
-format and the batch-form trap. An unpinned pi dispatch is an inherited one, every time.
+**Re-read the notes file at the start of every campaign turn.** The conversation is not
+the campaign's memory: the notes file is. The guard re-injects the contract, but not
+your plan, your lane state reasoning, or what you parked.
 
 `subagent` also takes `action` values (`list`, `status`, `get`) for inspecting running
-agents. Use `status` for the liveness check instead of assuming a quiet agent is working.
+agents. Use `status` for the liveness check instead of assuming a quiet agent is
+working.
 
-A dispatch that returns nothing inside its liveness bound is a failed dispatch, not a slow
-one. One review dispatch in a real campaign timed out at three minutes with no result and
-was never retried; in another, the last dispatch of the session was launched and the
-session ended before it returned, leaving an empty run directory and no report. Retry once
-with a longer bound, or take the unit back and do it directly, and say which you did.
-
-Confirm at campaign start that the goal or loop command exists before planning around it,
-and write what you found into the notes file. Whatever genuinely cannot be pinned is
-reported as inherited. Never describe an inherited setting as pinned.
+A dispatch that returns nothing inside its liveness bound is a failed dispatch, not a
+slow one. One review dispatch in a real campaign timed out at three minutes with no
+result and was never retried; in another, the last dispatch of the session was launched
+and the session ended before it returned, leaving an empty run directory and no report.
+Retry once with a longer bound, or take the unit back and do it directly, and say which
+you did.
