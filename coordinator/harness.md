@@ -151,6 +151,14 @@ pi-subagents 0.43.0 the only dispatch form is a `workflowScript`: a writer or re
 is the only child of its own script (`return runs.run('<key>', { agent, model, task })`),
 and only independent read-only investigations share one.
 
+**Never ask the harness for a managed worktree.** `worktree: true` on a dispatch or a
+script child branches the child's tree from the pi session's working directory, not from
+the campaign worktree, and places it under `$TMPDIR` at a path that does not exist when
+you write the prompt. Measured, not theoretical: in one campaign three writers woke up on
+the session's `main` and refused to work because HEAD did not match the sha they were
+given. Create the lane worktree yourself, `git worktree add` beside the campaign
+worktree, and pass `cwd`. The guard refuses the flag (CG021).
+
 **Re-read the notes file at the start of every campaign turn.** The conversation is not
 the campaign's memory: the notes file is. The guard re-injects the contract, but not
 your plan, your lane state reasoning, or what you parked.
