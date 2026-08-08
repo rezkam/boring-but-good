@@ -28,6 +28,8 @@ Inspect the requested target directly and return every finding that the author w
 
 ### Review context
 
+State the exact commit the worktree should be at, and tell the reviewer to stop and report rather than continue if it differs: `The worktree [FULL REVIEW WORKTREE PATH] must be at exact HEAD [EXACT SHA]. Stop and report if HEAD differs.`
+
 - Repository root: `[FULL REVIEW WORKTREE PATH]`
 - Review target: `[TARGET TYPE AND REFERENCE]`
 - Change goal: `[APPROVED GOAL]`

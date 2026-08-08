@@ -773,22 +773,29 @@ export function evaluateVerdicts(
 		if (kind === "implement") newWriters += 1;
 	}
 
-	if (newWriters > 0) {
-		const open = campaign.lanes.filter((lane) => lane.kind === "implement" && lane.state !== "integrated");
-		if (open.length + newWriters > config.laneCap) {
-			const awaiting = open.filter((lane) => lane.state === "returned").map((lane) => lane.key);
-			return deny(
-				"CG010",
-				`${open.length} writer lanes are already open and the cap is ${config.laneCap}. ${
-					awaiting.length > 0
-						? `These returned but are not integrated yet: ${awaiting.join(", ")}. Integrate one into the campaign branch and record it with coordinator_lane action "integrated".`
-						: "Wait for one to return and integrate it."
-				} Parallel lanes that never integrate are integration debt, not progress.`,
-			);
-		}
-	}
+	const cap = checkWriterCap(campaign, newWriters, config);
+	if (!cap.allow) return cap;
 
 	return { allow: true };
+}
+
+/**
+ * The writer cap, shared by the judged path and the judge-off path. Turning the judge off
+ * stops prompt rules; it does not hand back unlimited parallelism.
+ */
+export function checkWriterCap(campaign: Campaign, newWriters: number, config: GuardConfig = DEFAULT_CONFIG): GuardDecision {
+	if (newWriters <= 0) return { allow: true };
+	const open = campaign.lanes.filter((lane) => lane.kind === "implement" && lane.state !== "integrated");
+	if (open.length + newWriters <= config.laneCap) return { allow: true };
+	const awaiting = open.filter((lane) => lane.state === "returned").map((lane) => lane.key);
+	return deny(
+		"CG010",
+		`${open.length} writer lanes are already open and the cap is ${config.laneCap}. ${
+			awaiting.length > 0
+				? `These returned but are not integrated yet: ${awaiting.join(", ")}. Integrate one into the campaign branch and record it with coordinator_lane action "integrated".`
+				: "Wait for one to return and integrate it."
+		} Parallel lanes that never integrate are integration debt, not progress.`,
+	);
 }
 
 /** The boundaries every dispatched prompt has to carry, read out of the verdict. */

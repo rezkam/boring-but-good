@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import type { PromptVerdict } from "./judge.ts";
 import {
+	checkWriterCap,
 	contractPrompt,
 	continuationPrompt,
 	DEFAULT_CONFIG,
@@ -520,4 +521,17 @@ test("agent keys inside prompt text are not counted as children", () => {
 test("batch and chain inputs are treated as launches rather than slipping past", () => {
 	assert.equal(structure(request({ input: { tasks: [{ agent: "worker", task: "x" }] } })).code, "CG017");
 	assert.equal(structure(request({ input: { chain: "legacy", async: true } })).code, "CG002");
+});
+
+test("the writer cap is one rule, so the judge-off path enforces it too", () => {
+	const lanes = [
+		{ key: "s1", kind: "implement" as const, model: "m:high", startedAt: 1, state: "running" as const },
+		{ key: "s2", kind: "implement" as const, model: "m:high", startedAt: 1, state: "returned" as const },
+		{ key: "s3", kind: "implement" as const, model: "m:high", startedAt: 1, state: "running" as const },
+	];
+	const full = campaign({ lanes });
+	assert.equal(checkWriterCap(full, 1).allow, false);
+	assert.equal(checkWriterCap(full, 0).allow, true);
+	assert.equal(checkWriterCap(campaign(), 3).allow, true);
+	assert.equal(checkWriterCap(campaign(), 4).allow, false);
 });

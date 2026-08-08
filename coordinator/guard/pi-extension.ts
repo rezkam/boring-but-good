@@ -19,6 +19,7 @@ import { judgeCacheKey, judgeDispatch, type JudgeCall, type PromptVerdict } from
 import {
 	continuationPrompt,
 	contractPrompt,
+	checkWriterCap,
 	evaluateStructure,
 	evaluateVerdicts,
 	isManagementAction,
@@ -275,6 +276,15 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			// With the judge off, the prompt rules are not enforced at all: the user asked for
 			// that, and inventing a verdict would either refuse everything or fake a pass.
 			if (!judgeEnabled) {
+				// Structural rules still apply, and the writer cap is one of them: with nothing
+				// reading the prompts, every launch counts as a writer, which is the safe reading.
+				if (campaign) {
+					const cap = checkWriterCap(campaign, structure.judge.length);
+					if (!cap.allow) {
+						notify(ctx, `Guard ${cap.code}: refused`, "warning");
+						return { block: true, reason: `[coordinator-guard ${cap.code}] ${cap.reason}` };
+					}
+				}
 				if (event.toolName === "subagent") {
 					recordLaunchUnjudged(event.toolCallId, event.input as Record<string, unknown>, ctx, structure.judge);
 				}
