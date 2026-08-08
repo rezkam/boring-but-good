@@ -337,9 +337,9 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		return `${axis} ${cls} is now ${parsed.entries.join(", ")}. Enforced from the next dispatch.\n\n${renderTiers(tiers)}`;
 	}
 
-	/** A guard notice in the transcript, outside a command handler. */
+	/** A guard notice in the transcript: shown now, and not sent to the model. */
 	function notice(text: string): void {
-		pi.sendMessage({ customType: NOTICE_TYPE, content: text, display: true }, { triggerTurn: false });
+		pi.appendEntry<{ text: string }>(NOTICE_TYPE, { text });
 	}
 
 	function showJudgeCard(
@@ -430,6 +430,15 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 	// verdict; expanded it shows every answer the verdict is made of, per dispatch. One Text
 	// with newlines rather than a child per line: a child per line renders a blank between
 	// each, which pi's own tool cards do not have.
+	// Notices render the moment they are appended, and never reach the model. sendMessage
+	// would do neither: it queues a session message, which is why command output arrived a
+	// turn late, and it would spend context on text written for the user.
+	pi.registerEntryRenderer<{ text: string }>(NOTICE_TYPE, (entry, _options, theme) => {
+		const text = entry.data?.text;
+		if (typeof text !== "string") return undefined;
+		return new Text(theme.fg("muted", text));
+	});
+
 	pi.registerEntryRenderer<JudgeCard>(JUDGE_ENTRY_TYPE, (entry, { expanded }, theme) => {
 		const card = entry.data;
 		if (!card || !Array.isArray(card.targets)) return undefined;
@@ -744,6 +753,8 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		continuationTimer.unref?.();
 	});
 
+	// Sessions started before notices became entries still carry them as messages, and those
+	// would otherwise be replayed into context on resume.
 	pi.on("context", async (event) => ({
 		messages: event.messages.filter((message) => {
 			const custom = message as { customType?: string };
@@ -871,9 +882,57 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 
 	pi.registerCommand("campaign", {
 		description: "Inspect or control the guarded coordinator campaign",
+		getArgumentCompletions: (prefix: string) => {
+			const trimmed = prefix.trimStart();
+			const [head, ...rest] = trimmed.split(/\s+/);
+			const suggest = (items: Array<{ value: string; label: string; description?: string }>) => {
+				const matched = items.filter((item) => item.value.startsWith(trimmed));
+				return matched.length > 0 ? matched : null;
+			};
+
+			if (head === "judge" && rest.length > 0) {
+				return suggest([
+					{ value: "judge on", label: "judge on", description: "enforce the rules that need a prompt read" },
+					{ value: "judge off", label: "judge off", description: "structural rules only" },
+					{ value: `judge ${DEFAULT_JUDGE_MODEL}`, label: `judge ${DEFAULT_JUDGE_MODEL}`, description: "set the judge model" },
+				]);
+			}
+
+			if (head === "models" && rest.length > 0) {
+				const tierOptions = [
+					{ value: "models auto", label: "models auto", description: "reorder each class fastest-measured first" },
+					{ value: "models reset", label: "models reset", description: "back to the defaults" },
+				];
+				for (const cls of [1, 2, 3] as const) {
+					tierOptions.push({
+						value: `models class ${cls} ${tiers.class[cls][0]}`,
+						label: `models class ${cls}`,
+						description: `currently ${tiers.class[cls].join(", ")}`,
+					});
+				}
+				for (const cls of [1, 2] as const) {
+					tierOptions.push({
+						value: `models review ${cls} ${tiers.review[cls][0]}`,
+						label: `models review ${cls}`,
+						description: `currently ${tiers.review[cls].join(", ")}`,
+					});
+				}
+				return suggest(tierOptions);
+			}
+
+			return suggest([
+				{ value: "", label: "campaign", description: "show the contract, or the armed state" },
+				{ value: "models", label: "models", description: "show or set the tier lists" },
+				{ value: "judge", label: "judge", description: "show or set the prompt judge" },
+				{ value: "arm", label: "arm", description: "turn enforcement on" },
+				{ value: "disarm", label: "disarm", description: "turn enforcement off, once no campaign is active" },
+				{ value: "close", label: "close", description: "end the campaign and disarm" },
+				{ value: "resume", label: "resume", description: "reactivate a closed campaign" },
+			]);
+		},
 		handler: async (args, ctx) => {
 			const command = args.trim().toLowerCase();
-			const show = (text: string) => pi.sendMessage({ customType: NOTICE_TYPE, content: text, display: true }, { triggerTurn: false });
+			const show = (text: string) => notice(text);
 			switch (command) {
 				case "":
 					show(
