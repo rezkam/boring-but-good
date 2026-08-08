@@ -84,6 +84,21 @@ Commands:
 Closing is the way out: a closed campaign is treated as no campaign, so ordinary dispatches
 work again immediately.
 
+## Campaign roles
+
+`agents/` holds the only roles a campaign may dispatch: `campaign-worker`,
+`campaign-reviewer`, and `campaign-scout`. The extension registers the directory with
+pi-subagents at load through `PI_SUBAGENT_EXTRA_AGENT_DIRS`, so installing the extension
+installs the roles. What a dispatched agent is told is part of what the guard
+guarantees, and the builtins guarantee the opposite: pi's `reviewer` carries edit and
+write tools and is told to apply fixes, `worker` forks the coordinator's conversation
+into the child, and `delegate` appends the parent system prompt, campaign contract
+included. `templates.test.ts` pins the role files to their boundaries.
+
+Since pi-subagents 0.43.0 the only execution surface is `workflowScript`. A writer or
+reviewer is dispatched as the only child of its own script; multi-child scripts are for
+independent read-only investigations.
+
 ## What fails, and why
 
 | Code | Refuses | The incident behind it |
@@ -104,6 +119,7 @@ work again immediately.
 | CG014 | Spawning an agent through bash (`codex exec`, `claude -p`, `pi -p`) | Otherwise the guard only guards the polite path |
 | CG016 | An action the guard cannot classify, and work deferred to a scheduler | A read-only action belongs in the guard's management list, named there rather than assumed; a scheduled run starts with no tool call, so no rule can see it |
 | CG018 | A dispatch the judge could not read, including an unavailable judge model | An unread prompt is an unchecked one, so it fails rather than passing by default |
+| CG019 | A dispatch through a role the campaign does not own, or through the wrong campaign role for the work | The role's prompt is part of what the guard guarantees: pi's builtin reviewer edits the tree it reviews, its worker forks the coordinator's conversation, its delegate inherits the campaign contract |
 | CG017 | A launch that does not state `async` | Whether a run is foreground depends on configuration and per-agent defaults, so a guessed mode either closes a lane while its agent works or leaves it open forever |
 | CG015 | `git reset --hard`, `git stash`, `git restore`, `git checkout -- <path>`, force push | A campaign created a backup branch, ran `git reset --hard`, and destroyed a pending dependency override |
 

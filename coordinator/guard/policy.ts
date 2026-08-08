@@ -193,7 +193,8 @@ ${tierTable()}
   ROUTE: <key> | class <1|2|3> | <provider/model:effort> | <why this class>
   Class 3 implementation needs a real justification, not the word "complex".
 - Every dispatched prompt names the worktree, the exact HEAD it must be at, that the agent stops if HEAD differs, and that it commits locally and never pushes, never runs gh, never touches a PR.
-- Writer work goes out as a direct subagent call with top-level agent, model, async, and task. Never inside a workflowScript: scripts are for independent read-only investigations.
+- Every dispatch is a workflowScript with literal children, and top-level async stated. A writer or a reviewer is the only child of its own script: return runs.run('<key>', { agent: 'campaign-worker', model: '<provider/model:effort>', task: \`ROUTE: ...\` }). Only independent read-only investigations share a script.
+- Every dispatch uses a campaign role, and the role must match the work: campaign-worker implements, campaign-reviewer reviews, campaign-scout investigates. Builtin roles (worker, reviewer, delegate, oracle) are refused: their prompts are not the campaign's.
 - No turnBudget, toolBudget, or maxTurns, ever. Bound liveness with elapsed time and serial milestones.
 - Committing, staging, rebasing, pushing, and PR state are yours alone and are never dispatched.
 - Reviewers only after every slice is done and you call coordinator_campaign action "open-review". One at a time.
@@ -550,23 +551,47 @@ export type StructureDecision =
  * malformed dispatch is refused without spending one.
  */
 /**
+ * The only roles a campaign may dispatch. Their prompts live beside the guard in agents/
+ * and are registered with pi-subagents at load. The builtin roles are not usable here:
+ * the builtin reviewer carries edit and write tools and is told to apply fixes, the
+ * builtin worker forks the coordinator's whole conversation into the child, and the
+ * builtin delegate appends the parent system prompt, campaign contract included. What a
+ * dispatched agent is told is part of what the guard guarantees, so the guard owns it.
+ */
+export const CAMPAIGN_AGENTS: Record<string, JudgedKind> = {
+	"campaign-worker": "implement",
+	"campaign-reviewer": "review",
+	"campaign-scout": "investigate",
+};
+
+function checkCampaignAgent(agent: string | undefined): GuardDecision {
+	if (agent && agent in CAMPAIGN_AGENTS) return { allow: true };
+	return deny(
+		"CG019",
+		`${agent ? `Agent "${agent}"` : "A dispatch without an agent"} runs with a prompt the campaign does not control. Campaign dispatches use exactly these roles: campaign-worker to implement, campaign-reviewer to review, campaign-scout to investigate. Their prompts are owned and versioned with the guard; a builtin role's prompt is not, and the builtin reviewer will happily edit the tree it reviews.`,
+		true,
+	);
+}
+
+/**
  * Codes where the fix is to rewrite the dispatch itself. Those refusals carry the whole
  * contract, because the guard checks shape before it reads the prompt, so an agent that
  * fixes only what it was told still gets refused on the next phase for something it was
  * never shown. State refusals are excluded: the fix there is to do something else first,
  * and it is already named in the reason.
  */
-const SHAPE_CODES = new Set(["CG002", "CG003", "CG004", "CG005", "CG009", "CG012", "CG013", "CG017"]);
+const SHAPE_CODES = new Set(["CG002", "CG003", "CG004", "CG005", "CG009", "CG012", "CG013", "CG017", "CG019"]);
 
 function dispatchContract(campaign: Campaign): string {
 	return [
 		"",
 		"A dispatch that passes every check looks like this. The guard checks shape first and reads the prompt second, so satisfy all of it at once:",
 		"",
-		"  model:  provider/model:effort            (a bare id or no model key is refused)",
-		"  async:  true or false, stated explicitly",
+		"  workflowScript: return runs.run('<key>', { agent: <role>, model: <pin>, task: <task> })  with async stated at top level",
+		"  role:   campaign-worker | campaign-reviewer | campaign-scout, matching the work; a writer or reviewer is the only child of its script",
+		"  pin:    provider/model:effort            (a bare id or no model key is refused)",
 		"  task:   ROUTE: <key> | class <1|2|3> | <provider/model:effort> | <why this class>",
-		"          Work in <worktree>. It must be at exact HEAD <sha>; stop and report if it differs.",
+		"          Work in <worktree>. Writers and reviewers name the exact HEAD <sha> and stop if it differs; read-only investigations may omit it.",
 		"          <what to do, and what done means>",
 		"          Commit locally. Never push, never run gh, never open or comment on a PR.",
 		"",
@@ -688,6 +713,8 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 			// Same reason as the single-dispatch path: one refusal per problem is one round trip
 			// per problem.
 			const problems: Array<{ code: string; reason: string }> = [];
+			const controlled = checkCampaignAgent(child.agent);
+			if (!controlled.allow) problems.push({ code: controlled.code, reason: controlled.reason });
 			if (parseModelPin(child.model) === null) {
 				problems.push({
 					code: "CG002",
@@ -721,6 +748,8 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 		// Collected rather than returned one at a time: each separate refusal costs the
 		// coordinator a round trip, and a real campaign spent five of them on one dispatch.
 		const problems: Array<{ code: string; reason: string }> = [];
+		const controlled = checkCampaignAgent(agent);
+		if (!controlled.allow) problems.push({ code: controlled.code, reason: controlled.reason });
 		const pin = parseModelPin(input.model);
 		if (!pin) {
 			const seen = typeof input.model === "string" && input.model ? `"${input.model}"` : "nothing";
@@ -800,23 +829,26 @@ function evaluateVerdictsInner(
 	const campaign = request.campaign && request.campaign.status !== "closed" ? request.campaign : null;
 	if (!campaign) return { allow: true };
 
-	const isScript = judged.length > 1 || text(request.input.workflowScript) !== "";
+	// pi-subagents 0.43.0 removed direct execution, so a single-child script is the lane
+	// vehicle, not a hidden fan-out. Only multi-child scripts are restricted to read-only
+	// work: the one-writer-at-a-time rule lives in the lane cap and key accounting.
+	const multiChild = judged.length > 1;
 	let newWriters = 0;
 
 	for (const { target, verdict } of judged) {
 		const { kind } = verdict;
 
-		if (isScript && kind === "implement") {
+		if (multiChild && kind === "implement") {
 			return deny(
 				"CG010",
-				`Child "${target.agent ?? target.routeKey}" is writer work inside a workflow script. Do not use workflowScript for work that writes code.\n\nDrop the script and make one direct subagent call instead, passing agent, model, async, and task as top-level fields. Dispatch the next writer only after this one returns and you record it with coordinator_lane action "integrated".\n\nWriters go out one at a time so each becomes a tracked lane: a script hides them behind a single call, which is how five once opened in one instant and none landed for hours. Scripts are for independent read-only investigations.`,
+				`Child "${target.agent ?? target.routeKey}" is writer work inside a multi-child script. Writers go out one per dispatch, as the only child of its own script:\n\nworkflowScript: "return runs.run('<key>', { agent: 'campaign-worker', model: '<provider/model:effort>', task: ... })"\n\nDispatch the next writer only after this one returns and you record it with coordinator_lane action "integrated". A fan-out of writers is how five once opened in one instant and none landed for hours. Multi-child scripts are for independent read-only investigations.`,
 				true,
 			);
 		}
-		if (isScript && kind === "review") {
+		if (multiChild && kind === "review") {
 			return deny(
 				"CG006",
-				`Child "${target.agent ?? target.routeKey}" is a review. Review is one dispatch, once, at the end, so it is never a child of a script. Drop the workflowScript and make one direct subagent call when the review phase opens.`,
+				`Child "${target.agent ?? target.routeKey}" is a review inside a multi-child script. Review is one dispatch, once, at the end: a single-child script dispatched as campaign-reviewer when the review phase opens.`,
 				true,
 			);
 		}
@@ -835,6 +867,15 @@ function evaluateVerdictsInner(
 					`Reviewer "${running.key}" is still running. One reviewer at a time: parallel reviewers produce overlapping findings and a reconciliation you cannot audit.`,
 				);
 			}
+		}
+
+		const expectedKind = target.agent ? CAMPAIGN_AGENTS[target.agent] : undefined;
+		if (expectedKind && expectedKind !== kind) {
+			return deny(
+				"CG019",
+				`This prompt reads as ${kind} work, but it is dispatched as ${target.agent}, whose role is to ${expectedKind}. The role's own instructions would fight the prompt. Dispatch it as ${Object.entries(CAMPAIGN_AGENTS).find(([, mapped]) => mapped === kind)?.[0] ?? "the matching role"} instead.`,
+				true,
+			);
 		}
 
 		if (kind === "implement" && target.declaredClass === 3 && verdict.classJustification !== "substantive") {

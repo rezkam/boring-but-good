@@ -63,12 +63,14 @@ session's reasoning effort whatever the plan said. Two ways to pin it:
    `~/.claude/agents/`, dispatched by name.
 
 **pi.** `subagent` pins both inside one string: `model: "<provider>/<model>:<effort>"`, as
-in `openai-codex/gpt-sol:high`. **The batch form takes no per-task model.** In
-`subagent({tasks: [...]})` the `model` key sits on the call, not inside a task, so a fan-out
-of mixed roles either shares one model or goes out as one call per task. Leaving it off
-inherits silently, and every builtin pi agent inherits the session model by default: a real
-campaign fanned out three read-only investigations with no `model` key anywhere and two of
-them ran at thinking `low`.
+in `openai-codex/gpt-sol:high`. Since pi-subagents 0.43.0 every dispatch is a
+`workflowScript`, and each `runs.run`/`runs.all` child carries its own literal `model`
+and `agent`. A writer or reviewer is the only child of its script; only independent
+read-only investigations share one. Leaving `model` off a child inherits silently, and
+every builtin pi agent inherits the session model by default: a real campaign fanned out
+three read-only investigations with no `model` key anywhere and two of them ran at
+thinking `low`. The guard's injected contract carries the exact form; the campaign roles
+are `campaign-worker`, `campaign-reviewer`, `campaign-scout`, never pi's builtins.
 
 **Codex.** Pin what the local spawn mechanism supports, read it back off the launched
 process rather than off the flag you passed, and never call an inherited effort pinned.
