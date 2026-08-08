@@ -119,6 +119,11 @@ benchmarks, and a model with fewer than five samples reports nothing rather than
 `auto` therefore leaves unmeasured entries where they are: no samples means unknown, not
 slow.
 
+Position one is enforced rather than suggested: a dispatch may take any entry in the list,
+but reaching past the first one requires the routing reason to say why, the same sentence
+class-3 escalation already costs (CG020). An outage stays survivable, and a silent
+downgrade does not.
+
 Overrides persist with the campaign and are printed whenever the guard arms, so the
 enforced table is never something you have to remember.
 
@@ -142,6 +147,7 @@ enforced table is never something you have to remember.
 | CG014 | Spawning an agent through bash (`codex exec`, `claude -p`, `pi -p`) | Otherwise the guard only guards the polite path |
 | CG016 | An action the guard cannot classify, and work deferred to a scheduler | A read-only action belongs in the guard's management list, named there rather than assumed; a scheduled run starts with no tool call, so no rule can see it |
 | CG018 | A dispatch the judge could not read, including an unavailable judge model | An unread prompt is an unchecked one, so it fails rather than passing by default |
+| CG020 | A dispatch that reached past the preferred model for its class without a routing reason that explains why | Position one is the default, not a suggestion; a fallback stays available for outages, but silently ignorable preference is the shape of rule this guard replaces |
 | CG019 | A dispatch through a role the campaign does not own, or through the wrong campaign role for the work | The role's prompt is part of what the guard guarantees: pi's builtin reviewer edits the tree it reviews, its worker forks the coordinator's conversation, its delegate inherits the campaign contract |
 | CG017 | A launch that does not state `async` | Whether a run is foreground depends on configuration and per-agent defaults, so a guessed mode either closes a lane while its agent works or leaves it open forever |
 | CG015 | `git reset --hard`, `git stash`, `git restore`, `git checkout -- <path>`, force push | A campaign created a backup branch, ran `git reset --hard`, and destroyed a pending dependency override |

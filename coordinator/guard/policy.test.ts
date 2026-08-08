@@ -21,6 +21,7 @@ import {
 	parseRouteHeader,
 	parseScriptChildren,
 	readStatusBlock,
+	statusBlockDisagreement,
 	type Campaign,
 	type GuardRequest,
 	type JudgeTarget,
@@ -55,6 +56,11 @@ function reviewLaunch(overrides: Record<string, unknown> = {}) {
 		task: implementTask(GOOD_REVIEW_ROUTE),
 		...overrides,
 	};
+}
+
+function assertBlock(actual: ReturnType<typeof readStatusBlock>, ok: boolean, missing: string[]): void {
+	assert.equal(actual.ok, ok);
+	assert.deepEqual(actual.missing, missing);
 }
 
 function implementTask(routeLine: string): string {
@@ -183,7 +189,7 @@ test("readStatusBlock reads the block, not the prose around it", () => {
 		"NEEDS YOU nothing",
 		"NEXT      integrate lane S2",
 	].join("\n");
-	assert.deepEqual(readStatusBlock(complete), { ok: true, missing: [] });
+	assertBlock(readStatusBlock(complete), true, []);
 
 	const chatty = ["I checked the PR and the AGENTS file and the DIRECT dependencies.", "", "CAMPAIGN demo", "NEXT integrate"].join("\n");
 	const result = readStatusBlock(chatty);
@@ -432,8 +438,9 @@ test("CG009: unrendered placeholders the judge found are refused", () => {
 });
 
 test("CG012: class 3 implementation needs a justification, not a label", () => {
-	const route = "ROUTE: s1 | class 3 | openai-codex/gpt-5.6-sol:medium | hard";
-	const req = request({ input: launch({ model: "openai-codex/gpt-5.6-sol:medium", task: implementTask(route) }) });
+	// The preferred class-3 model, so this isolates the justification rule from the fallback one.
+	const route = "ROUTE: s1 | class 3 | claude-bridge/claude-opus-5:medium | hard";
+	const req = request({ input: launch({ model: "claude-bridge/claude-opus-5:medium", task: implementTask(route) }) });
 	assert.equal(denyJudged(req, [verdict({ classJustification: "label" })]).code, "CG012");
 	assert.deepEqual(judged(req, [verdict({ classJustification: "substantive" })]), { allow: true });
 });
@@ -786,4 +793,59 @@ test("parseTierEntries refuses what the pin rule exists to prevent", () => {
 	assert.equal(parseTierEntries("").ok, false, "nothing at all");
 	const good = parseTierEntries("openai-codex/gpt-5.6-luna:high, claude-bridge/claude-sonnet-5:medium");
 	assert.deepEqual(good.ok && good.entries, ["openai-codex/gpt-5.6-luna:high", "claude-bridge/claude-sonnet-5:medium"]);
+});
+
+test("a status block whose slice count contradicts the ledger is not a fresh block", () => {
+	// The real case: a campaign printed "6 done / 31 total" every turn while the recorded
+	// count stayed at zero, and review opens on the recorded number.
+	const block = readStatusBlock(
+		["CAMPAIGN demo   WORKTREE /w", "SLICES    6 done / 31 total     NOW: task 7", "PR #1", "AGENTS none", "DIRECT none", "PARKED none", "NEEDS YOU nothing", "NEXT dispatch"].join("\n"),
+	);
+	assert.equal(block.ok, true);
+	assert.equal(block.claimedSlicesDone, 6);
+	assert.equal(block.claimedSlicesTotal, 31);
+
+	const behind = campaign({ slicesDone: 0, slicesTotal: 31 });
+	assert.match(statusBlockDisagreement(block, behind) ?? "", /6 done of 31, the campaign records 0 of 31/);
+	assert.match(statusBlockDisagreement(block, behind) ?? "", /set-slices/);
+
+	const recorded = campaign({ slicesDone: 6, slicesTotal: 31 });
+	assert.equal(statusBlockDisagreement(block, recorded), null, "agreement is silence");
+});
+
+test("a block that states no slice count is not treated as a contradiction", () => {
+	const block = readStatusBlock(
+		["CAMPAIGN demo   WORKTREE /w", "SLICES in progress", "PR #1", "AGENTS none", "DIRECT none", "PARKED none", "NEEDS YOU nothing", "NEXT dispatch"].join("\n"),
+	);
+	assert.equal(block.claimedSlicesDone, null);
+	assert.equal(statusBlockDisagreement(block, campaign({ slicesDone: 3 })), null);
+});
+
+test("CG020: reaching past the preferred model needs the routing reason to say why", () => {
+	// luna is the class 1 fallback; sonnet is preferred. Taking the fallback is allowed, but
+	// only when the reason explains it, so "preferred" is not silently ignorable.
+	const route = "ROUTE: s1 | class 1 | openai-codex/gpt-5.6-luna:high | mechanical single-file edit";
+	const req = request({ input: launch({ model: "openai-codex/gpt-5.6-luna:high", task: implementTask(route) }) });
+	const refused = denyJudged(req, [verdict({ classJustification: "label" })]);
+	assert.equal(refused.code, "CG020");
+	assert.match(refused.reason, /is a fallback for class 1/);
+	assert.match(refused.reason, /claude-bridge\/claude-sonnet-5:medium/, "the refusal names the preferred model");
+
+	// A reason the judge reads as substantive is the whole cost of deviating.
+	assert.deepEqual(judged(req, [verdict({ classJustification: "substantive" })]), { allow: true });
+
+	// The preferred model never needs one.
+	const preferred = request({
+		input: launch({ model: "claude-bridge/claude-sonnet-5:medium", task: implementTask("ROUTE: s1 | class 1 | claude-bridge/claude-sonnet-5:medium | mechanical") }),
+	});
+	assert.deepEqual(judged(preferred, [verdict({ classJustification: "label" })]), { allow: true });
+});
+
+test("CG020: a single-entry class has no fallback to justify", () => {
+	const only = withTierList(DEFAULT_TIERS, "class", 1, ["claude-bridge/claude-sonnet-5:medium"]);
+	const req = request({
+		tiers: only,
+		input: launch({ model: "claude-bridge/claude-sonnet-5:medium", task: implementTask("ROUTE: s1 | class 1 | claude-bridge/claude-sonnet-5:medium | mechanical") }),
+	});
+	assert.deepEqual(judged(req, [verdict({ classJustification: "label" })]), { allow: true });
 });

@@ -39,6 +39,7 @@ import {
 	withTierList,
 	parseRouteHeader,
 	readStatusBlock,
+	statusBlockDisagreement,
 	type Campaign,
 	type JudgeTarget,
 	type TierLists,
@@ -707,6 +708,15 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		const block = readStatusBlock(assistantText);
 		if (!block.ok) {
 			notify(ctx, `Status block missing ${block.missing.join(", ")}, not counted as fresh`, "warning");
+			return;
+		}
+		// A block that contradicts the ledger does not refresh it. The next launch then fails
+		// CG008, which is the existing path back: the alternative, believing the prose, would
+		// let narration write the state that gates review.
+		const disagreement = statusBlockDisagreement(block, campaign);
+		if (disagreement) {
+			notify(ctx, `Status block not counted as fresh: ${disagreement}`, "warning");
+			notice(`Coordinator guard: status block not counted, because ${disagreement}`);
 			return;
 		}
 		campaign.lastStatusAt = Date.now();
