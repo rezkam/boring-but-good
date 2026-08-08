@@ -587,7 +587,7 @@ export interface ScriptChild {
 	model: string;
 	task: string;
 	context?: string;
-	worktree?: boolean;
+	worktree?: boolean | "unreadable";
 }
 
 /**
@@ -648,8 +648,7 @@ function readChild(body: string, children: ScriptChild[]): ScriptChild | string 
 		model: readField(body, "model") ?? "",
 		task: readField(body, "task") ?? "",
 		context: readField(body, "context"),
-		// A bare boolean is not a quoted field, so it is read from the literal text.
-		worktree: /(?:^|[{,\s])["']?worktree["']?\s*:\s*true\b/i.test(body),
+		worktree: readFlag(body, "worktree"),
 	};
 	children.push(child);
 	return child;
@@ -819,18 +818,75 @@ function readObjectLiteral(source: string, start: number): string | null {
 }
 
 /** A field's literal string value, or undefined when it is absent or not a literal. */
+/**
+ * Top-level properties of an object literal, as raw source slices.
+ *
+ * The task is free-form text that routinely discusses this guard's own vocabulary, so a
+ * field cannot be located by searching the body: a prompt saying "do not ask for
+ * worktree: true" is not a request for a worktree. This walks the literal instead,
+ * skipping strings, template substitutions and nested structures, so only properties of
+ * the child object itself are returned.
+ */
+function topLevelFields(rawBody: string): Map<string, string> {
+	const trimmed = rawBody.trim();
+	const objectBody = trimmed.startsWith("{")
+		? trimmed.slice(1, trimmed.endsWith("}") ? -1 : undefined)
+		: trimmed;
+	const fields = new Map<string, string>();
+	let index = 0;
+	const skipValue = (from: number): number => {
+		let depth = 0;
+		const templates: number[] = [];
+		for (let at = from; at < objectBody.length; at++) {
+			const char = objectBody[at];
+			if (char === "'" || char === '"' || char === "`") {
+				for (let scan = at + 1; scan < objectBody.length; scan++) {
+					if (objectBody[scan] === "\\") { scan++; continue; }
+					if (char === "`" && objectBody[scan] === "$" && objectBody[scan + 1] === "{") {
+						templates.push(depth);
+						depth++;
+						scan++;
+						continue;
+					}
+					if (char === "`" && objectBody[scan] === "}" && templates.length > 0) {
+						depth = templates.pop() as number;
+						continue;
+					}
+					if (objectBody[scan] === char && templates.length === 0) { at = scan; break; }
+					if (scan === objectBody.length - 1) at = scan;
+				}
+				continue;
+			}
+			if (char === "{" || char === "[" || char === "(") depth++;
+			else if (char === "}" || char === "]" || char === ")") {
+				if (depth === 0) return at;
+				depth--;
+			} else if (char === "," && depth === 0) return at;
+		}
+		return objectBody.length;
+	};
+	while (index < objectBody.length) {
+		while (index < objectBody.length && /[\s,]/.test(objectBody[index] as string)) index++;
+		const key = /^["']?([A-Za-z_$][\w$]*)["']?\s*:/.exec(objectBody.slice(index));
+		if (!key) break;
+		const valueStart = index + key[0].length;
+		const valueEnd = skipValue(valueStart);
+		fields.set((key[1] as string).toLowerCase(), objectBody.slice(valueStart, valueEnd).trim());
+		index = valueEnd + 1;
+	}
+	return fields;
+}
+
 function readField(objectBody: string, field: string): string | undefined {
-	const key = new RegExp(`(?:^|[{,\\s])["']?${field}["']?\\s*:`, "i");
-	const found = key.exec(objectBody);
-	if (!found) return undefined;
-	const rest = objectBody.slice(found.index + found[0].length).trimStart();
-	const quote = rest[0];
+	const raw = topLevelFields(objectBody).get(field.toLowerCase());
+	if (raw === undefined) return undefined;
+	const quote = raw[0];
 	if (quote !== "'" && quote !== '"' && quote !== "`") return "";
 	let value = "";
-	for (let index = 1; index < rest.length; index++) {
-		const char = rest[index];
+	for (let index = 1; index < raw.length; index++) {
+		const char = raw[index];
 		if (char === "\\") {
-			value += rest[index + 1] === "n" ? "\n" : rest[index + 1];
+			value += raw[index + 1] === "n" ? "\n" : raw[index + 1];
 			index++;
 			continue;
 		}
@@ -838,6 +894,15 @@ function readField(objectBody: string, field: string): string | undefined {
 		value += char;
 	}
 	return undefined;
+}
+
+/** A boolean the guard must act on: anything not written as a literal cannot be read as absent. */
+function readFlag(objectBody: string, field: string): boolean | "unreadable" | undefined {
+	const raw = topLevelFields(objectBody).get(field.toLowerCase());
+	if (raw === undefined) return undefined;
+	if (raw === "true") return true;
+	if (raw === "false") return false;
+	return "unreadable";
 }
 
 /** Model pin and declared class, checked the same way for a lone dispatch and for a child. */
@@ -1080,7 +1145,7 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 	if (input.worktree === true) {
 		return deny(
 			"CG021",
-			`This launch asks the harness for a managed worktree. Managed isolation branches from the session's working directory, not from ${campaign.worktree}, and puts the child under $TMPDIR at a path that does not exist when you write the prompt. The named worktree and the expected HEAD then describe somewhere the child never goes.\n\nCreate the lane worktree yourself and name it:\n  git worktree add ${campaign.worktree.slice(0, campaign.worktree.lastIndexOf("/"))}/<lane>-<date> -b <branch> <base>\nthen dispatch with cwd set to that path and no worktree flag.`,
+			`This launch asks the harness for a managed worktree. Managed isolation branches from the session's working directory, not from ${campaign.worktree}, and puts the child under $TMPDIR at a path that does not exist when you write the prompt. The named worktree and the expected HEAD then describe somewhere the child never goes.\n\nCreate the lane worktree yourself and name it:\n  git -C ${campaign.worktree} worktree add ${campaign.worktree.slice(0, campaign.worktree.lastIndexOf("/"))}/<lane>-<date> -b <branch> <base>\nthen dispatch with cwd set to that path and no worktree flag.`,
 			true,
 		);
 	}
@@ -1142,7 +1207,7 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 			const problems: Array<{ code: string; reason: string }> = [];
 			const controlled = checkCampaignAgent(child.agent);
 			if (!controlled.allow) problems.push({ code: controlled.code, reason: controlled.reason });
-			if (child.worktree === true) {
+			if (child.worktree === true || child.worktree === "unreadable") {
 				problems.push({
 					code: "CG021",
 					reason: `Child "${child.agent}" asks for a managed worktree, which branches from the session's working directory rather than ${campaign.worktree} and lands under $TMPDIR. Create the lane worktree yourself and pass cwd instead.`,

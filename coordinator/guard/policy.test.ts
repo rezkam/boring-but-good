@@ -861,7 +861,9 @@ test("CG021: managed worktree isolation is refused, because it moves the child o
 	const direct = structure(request({ input: { ...launch(), worktree: true } }));
 	assert.equal(direct.code, "CG021");
 	assert.match(direct.reason, /branches from the session/);
-	assert.match(direct.reason, /git worktree add/, "the refusal names the way that works");
+	// -C anchors the command to the campaign repository; without it the remedy runs wherever
+	// the session happens to sit, which is the same wrong-repository bug CG021 exists for.
+	assert.match(direct.reason, new RegExp(`git -C ${WORKTREE} worktree add`), "the refusal names the way that works");
 
 	const header = "ROUTE: s1 | class 1 | claude-bridge/claude-sonnet-5:medium | mechanical edit";
 	const script = `return runs.run('s1', {agent:'campaign-worker', model:'claude-bridge/claude-sonnet-5:medium', worktree: true, task: \`${header}\`})`;
@@ -871,4 +873,24 @@ test("CG021: managed worktree isolation is refused, because it moves the child o
 
 	// worktree:false is not a request for isolation and is left alone.
 	assert.equal(evaluateStructure(request({ input: { ...launch(), worktree: false } })).allow, true);
+});
+
+test("child fields are read as top-level properties, not found anywhere in the text", () => {
+	// The prompt is free-form text that discusses this guard's own vocabulary. Scanning the
+	// whole object body for `worktree: true` refused a legal dispatch for quoting the rule.
+	const header = "ROUTE: s1 | class 1 | claude-bridge/claude-sonnet-5:medium | mechanical edit";
+	const talksAboutIt = `return runs.run('s1', {agent:'campaign-worker', model:'claude-bridge/claude-sonnet-5:medium', task: \`${header}\nDo not ask for worktree: true; the lane worktree already exists.\`})`;
+	assert.equal(
+		evaluateStructure(request({ input: { workflowScript: talksAboutIt, async: true } })).allow,
+		true,
+		"a prompt that names the flag is not a request for the flag",
+	);
+
+	// And the mirror: a value that is not a literal cannot be read as absent, so it fails closed.
+	const computed = `const on = true; return runs.run('s1', {agent:'campaign-worker', model:'claude-bridge/claude-sonnet-5:medium', worktree: on, task: \`${header}\`})`;
+	assert.equal(structure(request({ input: { workflowScript: computed, async: true } })).code, "CG021");
+
+	// A model named only inside the prompt is not the child's pin.
+	const quotesAModel = `return runs.run('s1', {agent:'campaign-worker', model:'claude-bridge/claude-sonnet-5:medium', task: \`${header}\nThe earlier lane ran model:'openai-codex/gpt-5.6-sol:high' and stalled.\`})`;
+	assert.equal(evaluateStructure(request({ input: { workflowScript: quotesAModel, async: true } })).allow, true);
 });
