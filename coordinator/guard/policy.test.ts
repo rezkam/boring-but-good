@@ -853,3 +853,22 @@ test("CG020: a single-entry class has no fallback to justify", () => {
 	});
 	assert.deepEqual(judged(req, [verdict({ classJustification: "label" })]), { allow: true });
 });
+
+test("CG021: managed worktree isolation is refused, because it moves the child off the named path", () => {
+	// Measured, not theoretical: worktree:true branches from the session cwd and lands the
+	// child in $TMPDIR, so the prompt's worktree and expected HEAD describe somewhere it
+	// never goes. Three writers once woke on the session's main branch and refused to work.
+	const direct = structure(request({ input: { ...launch(), worktree: true } }));
+	assert.equal(direct.code, "CG021");
+	assert.match(direct.reason, /branches from the session/);
+	assert.match(direct.reason, /git worktree add/, "the refusal names the way that works");
+
+	const header = "ROUTE: s1 | class 1 | claude-bridge/claude-sonnet-5:medium | mechanical edit";
+	const script = `return runs.run('s1', {agent:'campaign-worker', model:'claude-bridge/claude-sonnet-5:medium', worktree: true, task: \`${header}\`})`;
+	const child = structure(request({ input: { workflowScript: script, async: true } }));
+	assert.equal(child.code, "CG021");
+	assert.match(child.reason, /Create the lane worktree yourself and pass cwd/);
+
+	// worktree:false is not a request for isolation and is left alone.
+	assert.equal(evaluateStructure(request({ input: { ...launch(), worktree: false } })).allow, true);
+});

@@ -587,6 +587,7 @@ export interface ScriptChild {
 	model: string;
 	task: string;
 	context?: string;
+	worktree?: boolean;
 }
 
 /**
@@ -642,7 +643,14 @@ function readChild(body: string, children: ScriptChild[]): ScriptChild | string 
 	if (agent === undefined) {
 		return `a child spec has no literal agent field (${truncate(body)}). Shorthand and computed fields cannot be verified; write agent, model, and task literally.`;
 	}
-	const child = { agent, model: readField(body, "model") ?? "", task: readField(body, "task") ?? "", context: readField(body, "context") };
+	const child = {
+		agent,
+		model: readField(body, "model") ?? "",
+		task: readField(body, "task") ?? "",
+		context: readField(body, "context"),
+		// A bare boolean is not a quoted field, so it is read from the literal text.
+		worktree: /(?:^|[{,\s])["']?worktree["']?\s*:\s*true\b/i.test(body),
+	};
 	children.push(child);
 	return child;
 }
@@ -947,7 +955,7 @@ function checkCampaignAgent(agent: string | undefined): GuardDecision {
  * never shown. State refusals are excluded: the fix there is to do something else first,
  * and it is already named in the reason.
  */
-const SHAPE_CODES = new Set(["CG002", "CG003", "CG004", "CG005", "CG009", "CG012", "CG013", "CG017", "CG019"]);
+const SHAPE_CODES = new Set(["CG002", "CG003", "CG004", "CG005", "CG009", "CG012", "CG013", "CG017", "CG019", "CG021"]);
 
 function dispatchContract(campaign: Campaign, agent: string | undefined, tiers: TierLists): string {
 	return [
@@ -1063,6 +1071,20 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 	const budgets = checkBudgets(input, script);
 	if (!budgets.allow) return budgets;
 
+	// Managed isolation is refused for a reason measured in this campaign: it branches the
+	// child's worktree from the session cwd rather than the campaign worktree, and drops the
+	// child in $TMPDIR under a path nobody knows at dispatch time. Both boundaries the guard
+	// enforces then become unverifiable, because the prompt's named worktree is not where the
+	// child wakes up and its expected HEAD is not what it finds. The one time it was used
+	// here, three writers woke up on the session's main branch and correctly refused to work.
+	if (input.worktree === true) {
+		return deny(
+			"CG021",
+			`This launch asks the harness for a managed worktree. Managed isolation branches from the session's working directory, not from ${campaign.worktree}, and puts the child under $TMPDIR at a path that does not exist when you write the prompt. The named worktree and the expected HEAD then describe somewhere the child never goes.\n\nCreate the lane worktree yourself and name it:\n  git worktree add ${campaign.worktree.slice(0, campaign.worktree.lastIndexOf("/"))}/<lane>-<date> -b <branch> <base>\nthen dispatch with cwd set to that path and no worktree flag.`,
+			true,
+		);
+	}
+
 	// Knobs that swap what the child actually runs: an inline config or contract replaces
 	// the role definition, agentScope excludes the guard's own agents directory, a skill
 	// injects instructions the campaign never reviewed, and a forked or caught-up context
@@ -1120,6 +1142,12 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 			const problems: Array<{ code: string; reason: string }> = [];
 			const controlled = checkCampaignAgent(child.agent);
 			if (!controlled.allow) problems.push({ code: controlled.code, reason: controlled.reason });
+			if (child.worktree === true) {
+				problems.push({
+					code: "CG021",
+					reason: `Child "${child.agent}" asks for a managed worktree, which branches from the session's working directory rather than ${campaign.worktree} and lands under $TMPDIR. Create the lane worktree yourself and pass cwd instead.`,
+				});
+			}
 			if (child.context === "fork") {
 				problems.push({
 					code: "CG019",
