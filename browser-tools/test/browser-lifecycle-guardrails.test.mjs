@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -280,6 +280,195 @@ test('stopChrome never deletes lifecycle files for a browser that is still runni
   });
 });
 
+test('stopChrome preserves lifecycle files and clone data when shutdown fails', () => {
+  withTempCache((tmp) => {
+    const port = 9336;
+    const ownerToken = 'shutdown-owner';
+    const managedToken = 'shutdown-managed-token';
+    const userDataDir = join(tmp, `chrome-data-${port}`);
+    const args = [
+      `--remote-debugging-port=${port}`,
+      `--user-data-dir=${userDataDir}`,
+      `--pi-browser-tools-managed=${managedToken}`,
+    ];
+    mkdirSync(userDataDir);
+
+    const browser = spawn(process.execPath, [
+      '-e',
+      'setInterval(() => {}, 1000)',
+      '--',
+      ...args,
+    ], { stdio: 'ignore' });
+    writeFileSync(join(tmp, `chrome-${port}.pid`), String(browser.pid));
+    writeFileSync(join(tmp, `chrome-${port}.json`), JSON.stringify({
+      managedBy: 'browser-tools',
+      pid: browser.pid,
+      port,
+      userDataDir,
+      managedToken,
+      ownerId: 'shutdown-test',
+      ownerTokenHash: ownerTokenHash(ownerToken),
+      args,
+    }));
+
+    const denySignalModule = join(tmp, 'deny-browser-sigterm.mjs');
+    writeFileSync(denySignalModule, `
+const targetPid = Number(process.env.BROWSER_TOOLS_TEST_DENY_PID);
+const realKill = process.kill;
+process.kill = (pid, signal) => {
+  if (pid === targetPid && signal === 'SIGTERM') {
+    const error = new Error('shutdown denied');
+    error.code = 'EPERM';
+    throw error;
+  }
+  return realKill(pid, signal);
+};
+`);
+
+    try {
+      const stopScript = new URL('../scripts/stop.mjs', import.meta.url).pathname;
+      const result = spawnSync(process.execPath, [stopScript, '--port', String(port), '--clean'], {
+        encoding: 'utf-8',
+        env: {
+          ...process.env,
+          BROWSER_TOOLS_CACHE_DIR: tmp,
+          BROWSER_TOOLS_OWNER_TOKEN: ownerToken,
+          BROWSER_TOOLS_TEST_DENY_PID: String(browser.pid),
+          NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --import=${denySignalModule}`.trim(),
+        },
+      });
+      assert.equal(result.status, 1, 'the CLI must fail when Chrome remains alive');
+      assert.match(result.stderr, /Failed to stop Chrome: shutdown denied/);
+      assert.ok(existsSync(join(tmp, `chrome-${port}.pid`)), 'failed stop must retain the PID file');
+      assert.ok(existsSync(join(tmp, `chrome-${port}.json`)), 'failed stop must retain managed state');
+      assert.ok(existsSync(userDataDir), 'failed stop must not delete a clone still owned by a live browser');
+    } finally {
+      try { process.kill(browser.pid, 'SIGKILL'); } catch {}
+    }
+  });
+});
+
+test('stopChrome reports failure and preserves state when Chrome survives SIGKILL', () => {
+  withTempCache((tmp) => {
+    const port = 9337;
+    const ownerToken = 'unkillable-owner';
+    const managedToken = 'unkillable-managed-token';
+    const userDataDir = join(tmp, `chrome-data-${port}`);
+    const args = [
+      `--remote-debugging-port=${port}`,
+      `--user-data-dir=${userDataDir}`,
+      `--pi-browser-tools-managed=${managedToken}`,
+    ];
+    mkdirSync(userDataDir);
+
+    const browser = spawn(process.execPath, [
+      '-e',
+      'setInterval(() => {}, 1000)',
+      '--',
+      ...args,
+    ], { stdio: 'ignore' });
+    writeFileSync(join(tmp, `chrome-${port}.pid`), String(browser.pid));
+    writeFileSync(join(tmp, `chrome-${port}.json`), JSON.stringify({
+      managedBy: 'browser-tools',
+      pid: browser.pid,
+      port,
+      userDataDir,
+      managedToken,
+      ownerId: 'unkillable-test',
+      ownerTokenHash: ownerTokenHash(ownerToken),
+      args,
+    }));
+
+    const denySignalsModule = join(tmp, 'deny-browser-signals.mjs');
+    writeFileSync(denySignalsModule, `
+const targetPid = Number(process.env.BROWSER_TOOLS_TEST_DENY_PID);
+const realKill = process.kill;
+process.kill = (pid, signal) => {
+  if (pid === targetPid && (signal === 'SIGTERM' || signal === 'SIGKILL')) return true;
+  return realKill(pid, signal);
+};
+Atomics.wait = () => 'timed-out';
+const realNow = Date.now;
+let offset = 0;
+Date.now = () => realNow() + (offset += 500);
+`);
+
+    try {
+      const stopScript = new URL('../scripts/stop.mjs', import.meta.url).pathname;
+      const result = spawnSync(process.execPath, [stopScript, '--port', String(port), '--clean'], {
+        encoding: 'utf-8',
+        env: {
+          ...process.env,
+          BROWSER_TOOLS_CACHE_DIR: tmp,
+          BROWSER_TOOLS_OWNER_TOKEN: ownerToken,
+          BROWSER_TOOLS_TEST_DENY_PID: String(browser.pid),
+          NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --import=${denySignalsModule}`.trim(),
+        },
+      });
+      assert.equal(result.status, 1, 'the CLI must fail when Chrome survives SIGKILL');
+      assert.match(result.stderr, /Managed Chrome remained alive after SIGKILL/);
+      assert.ok(existsSync(join(tmp, `chrome-${port}.pid`)), 'an unkillable browser must retain the PID file');
+      assert.ok(existsSync(join(tmp, `chrome-${port}.json`)), 'an unkillable browser must retain managed state');
+      assert.ok(existsSync(userDataDir), 'an unkillable browser must retain its live clone');
+    } finally {
+      try { process.kill(browser.pid, 'SIGKILL'); } catch {}
+    }
+  });
+});
+
+test('stopChrome treats a directly spawned zombie as exited', () => {
+  withTempCache((tmp) => {
+    const port = 9338;
+    const ownerToken = 'direct-owner';
+    const managedToken = 'direct-managed-token';
+    const userDataDir = join(tmp, `chrome-data-${port}`);
+    const readyFile = join(tmp, 'direct-browser-ready');
+    const fakeChrome = join(tmp, 'direct-browser.mjs');
+    const args = [
+      `--remote-debugging-port=${port}`,
+      `--user-data-dir=${userDataDir}`,
+      `--pi-browser-tools-managed=${managedToken}`,
+    ];
+    mkdirSync(userDataDir);
+    writeFileSync(fakeChrome, `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+writeFileSync(process.env.BROWSER_TOOLS_TEST_READY_FILE, 'ready');
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
+
+    const browser = spawn(fakeChrome, args, {
+      stdio: 'ignore',
+      env: { ...process.env, BROWSER_TOOLS_TEST_READY_FILE: readyFile },
+    });
+    try {
+      for (let attempt = 0; attempt < 100 && !existsSync(readyFile); attempt++) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      }
+      assert.ok(existsSync(readyFile), 'the direct child must be ready before stop sends SIGTERM');
+
+      writeFileSync(join(tmp, `chrome-${port}.pid`), String(browser.pid));
+      writeFileSync(join(tmp, `chrome-${port}.json`), JSON.stringify({
+        managedBy: 'browser-tools',
+        pid: browser.pid,
+        port,
+        userDataDir,
+        managedToken,
+        ownerId: 'direct-test',
+        ownerTokenHash: ownerTokenHash(ownerToken),
+        args,
+      }));
+
+      const result = stopChrome({ port, ownerToken, clean: true });
+      assert.equal(result.status, 'stopped', 'a reaped zombie means SIGTERM completed successfully');
+      assert.ok(!existsSync(join(tmp, `chrome-${port}.pid`)), 'successful stop removes the PID file');
+      assert.ok(!existsSync(join(tmp, `chrome-${port}.json`)), 'successful stop removes managed state');
+      assert.ok(!existsSync(userDataDir), 'successful clean stop removes the clone');
+    } finally {
+      try { process.kill(browser.pid, 'SIGKILL'); } catch {}
+    }
+  });
+});
+
 test('stopChrome still clears lifecycle files when the process is genuinely gone', () => {
   withTempCache((tmp) => {
     // A pid that cannot be running: state is stale litter and must be reclaimed.
@@ -542,6 +731,34 @@ test('startChrome refuses to launch when the managed browser inventory cannot be
     [],
     'an unreadable process inventory must fail before creating lifecycle state or locks',
   );
+});
+
+test('pruneChromeClones preserves clones when the process inventory cannot be read', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'bt-prune-inventory-failure-'));
+  const binDir = join(tmp, 'bin');
+  const cacheDir = join(tmp, 'cache');
+  const cloneDir = join(cacheDir, 'chrome-data-65421');
+  mkdirSync(binDir);
+  mkdirSync(cloneDir, { recursive: true });
+  writeFileSync(join(binDir, 'ps'), '#!/bin/sh\nexit 23\n', { mode: 0o755 });
+
+  const previousPath = process.env.PATH;
+  const previousCacheDir = process.env.BROWSER_TOOLS_CACHE_DIR;
+  process.env.PATH = `${binDir}:${process.env.PATH}`;
+  process.env.BROWSER_TOOLS_CACHE_DIR = cacheDir;
+  try {
+    assert.throws(
+      () => pruneChromeClones(),
+      /Cannot read the managed Chrome process inventory/,
+      'prune must fail closed when it cannot prove a clone is unused',
+    );
+    assert.ok(existsSync(cloneDir), 'an unreadable inventory must never delete a possibly live clone');
+  } finally {
+    process.env.PATH = previousPath;
+    if (previousCacheDir === undefined) delete process.env.BROWSER_TOOLS_CACHE_DIR;
+    else process.env.BROWSER_TOOLS_CACHE_DIR = previousCacheDir;
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('concurrent auto-allocated starts with one owner reuse a single browser', { timeout: 30000 }, async (t) => {
