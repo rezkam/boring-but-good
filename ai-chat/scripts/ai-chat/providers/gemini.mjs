@@ -334,10 +334,8 @@ function normalizedGeminiErrorCode(error) {
 }
 
 export async function queryGeminiViaBrowserNetwork(browser, prompt, timeoutMs = 120000, options = {}) {
-  const pages = typeof browser.pages === 'function' ? await browser.pages() : [];
-  const existingPage = pages.find(candidate => isGeminiAppUrl(candidate.url()));
-  const page = existingPage || await browser.newPage({ background: true });
-  const ownsPage = !existingPage;
+  const page = await browser.newPage({ background: true });
+  const ownsPage = true;
   const promptSelector = 'div[role="textbox"][aria-label="Enter a prompt for Gemini"]';
   const requestedMode = options.modelConfig?.ui_selected || (options.modelConfig?.thinking
     ? 'Thinking'

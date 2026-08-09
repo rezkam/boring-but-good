@@ -47,7 +47,7 @@ test('Gemini search returns home-relative result paths to the agent', async () =
   const absolutePath = join(homedir(), privateRoot, 'tmp', 'gemini-search', 'result.md');
   const resultDir = await mkdtemp(join(tmpdir(), 'gemini-search-public-path-'));
   const result = await runGeminiSearchBatch({ query: 'query', resultDir }, {
-    queryGemini: async () => ({ text: 'answer https://example.test/source', model: GEMINI_SEARCH_MODEL, temporary: true, modelUiVerified: true }),
+    queryGemini: async () => ({ text: 'answer [source](https://example.test/source)', model: GEMINI_SEARCH_MODEL, temporary: true, modelUiVerified: true }),
     writeResult: async () => absolutePath,
   });
 
@@ -78,6 +78,37 @@ test('Gemini shutdown reads the configured AI Chat browser-state file', async ()
 
   assert.equal(stoppedBrowser, true);
   assert.deepEqual(stopped, [{ port: state.port, ownerToken: state.ownerToken, clean: false }]);
+});
+
+test('Gemini shutdown attempts the owner-checked stop before probing DevTools', async () => {
+  const events = [];
+  const stoppedBrowser = await stopOwnedAiChatBrowser({
+    browserStateFile: '/private-state.json',
+    readBrowserState: () => ({ port: 43124, ownerToken: 'test-owner-token', status: 'started' }),
+    browserTools: {
+      stopChrome: () => { events.push('stop'); return { status: 'failed' }; },
+      browserWSEndpoint: async () => { events.push('probe'); return null; },
+    },
+  });
+
+  assert.equal(stoppedBrowser, true);
+  assert.deepEqual(events, ['stop', 'probe']);
+});
+
+test('Gemini search rejects a citation copied only from the query', async () => {
+  const resultDir = await mkdtemp(join(tmpdir(), 'gemini-search-echoed-link-'));
+  const query = 'Summarize https://example.test/input';
+  await assert.rejects(
+    () => runGeminiSearchBatch({ query, resultDir }, {
+      queryGemini: async () => ({
+        text: `I cannot verify this, but here is the input: ${query.match(/https:\/\/\S+/)[0]}`,
+        model: GEMINI_SEARCH_MODEL,
+        temporary: true,
+        modelUiVerified: true,
+      }),
+    }),
+    /source URLs/i,
+  );
 });
 
 test('Gemini search supplies a private logger without replacing process stderr', async () => {
@@ -160,7 +191,7 @@ test('Gemini search stops safely between queries when cancellation is requested'
     queryGemini: async () => {
       calls.push('query');
       controller.abort();
-      return { text: 'completed before cancellation https://example.test/source', model: GEMINI_SEARCH_MODEL, temporary: true, modelUiVerified: true };
+      return { text: 'completed before cancellation [source](https://example.test/source)', model: GEMINI_SEARCH_MODEL, temporary: true, modelUiVerified: true };
     },
   });
 
@@ -182,7 +213,7 @@ test('Gemini search runs multiple queries and writes private result files', asyn
   }, {
     queryGemini: async (prompt, options) => {
       calls.push({ prompt, options });
-      return { text: `answer ${calls.length} https://example.test/source-${calls.length}`, model: GEMINI_SEARCH_MODEL, temporary: true, modelUiVerified: true };
+      return { text: `answer ${calls.length} [source](https://example.test/source-${calls.length})`, model: GEMINI_SEARCH_MODEL, temporary: true, modelUiVerified: true };
     },
     onProgress: update => updates.push(update),
   });

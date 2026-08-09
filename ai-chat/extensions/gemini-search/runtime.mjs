@@ -102,8 +102,10 @@ async function writePrivateResult({ resultDir, query, answer, capturedAt }) {
   return path;
 }
 
-function hasSourceUrl(text) {
-  return /https?:\/\/[^\s)\]}>,]+/i.test(text);
+function hasSourceUrl(text, query) {
+  const queryUrls = new Set(String(query).match(/https?:\/\/[^\s)\]}>,]+/gi) || []);
+  const citations = [...String(text).matchAll(/\[[^\]]+\]\((https?:\/\/[^\s)\]}>,]+)\)/gi)].map(match => match[1]);
+  return citations.some(url => !queryUrls.has(url));
 }
 
 function publicResultPath(path) {
@@ -188,9 +190,9 @@ export async function stopOwnedAiChatBrowser({
   const port = state?.port;
   const ownerToken = state?.ownerToken;
   if (!port || !ownerToken || state.status === 'stopped') return false;
-  if (!(await browserTools.browserWSEndpoint(port))) return false;
   const result = browserTools.stopChrome({ port, ownerToken, clean: false });
-  return result?.status === 'stopped' || result?.status === 'already-gone';
+  if (result?.status === 'stopped' || result?.status === 'already-gone') return true;
+  return !(await browserTools.browserWSEndpoint(port));
 }
 
 export async function runGeminiSearchBatch(params = {}, deps = {}) {
@@ -223,7 +225,7 @@ export async function runGeminiSearchBatch(params = {}, deps = {}) {
       if (response.model !== GEMINI_SEARCH_MODEL || response.modelUiVerified !== true || response.temporary !== true) {
         throw new Error('Gemini search result did not satisfy the required UI mode and temporary-mode contract.');
       }
-      if (!hasSourceUrl(response.text)) {
+      if (!hasSourceUrl(response.text, query)) {
         throw new Error('Gemini search result did not include source URLs.');
       }
       const capturedAt = new Date().toISOString();

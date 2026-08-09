@@ -177,6 +177,25 @@ test('pi extension leaves the browser alone when no search is running at shutdow
   assert.deepEqual(stopped, []);
 });
 
+test('pi extension never forwards a model-controlled result directory', async () => {
+  let tool;
+  let received;
+  createGeminiSearchExtension({
+    runBatch: async params => {
+      received = params;
+      return { queryCount: 1, successfulQueries: 1, failedQueries: 0, cancelled: false, files: [], failures: [] };
+    },
+  })({ registerTool(definition) { tool = definition; }, on() {} });
+
+  await tool.execute('call-1', {
+    query: 'query',
+    timeoutSeconds: 30,
+    resultDir: '/model-controlled-output',
+  }, undefined, undefined, { hasUI: true, ui: strictUi() });
+
+  assert.deepEqual(received, { query: 'query', queries: undefined, timeoutSeconds: 30, signal: undefined });
+});
+
 test('pi extension reports progress in its own tool row without touching shared chrome', async () => {
   let tool;
   const updates = [];
