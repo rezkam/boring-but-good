@@ -118,6 +118,28 @@ function sanitizeRuntimeError(error) {
   return 'Gemini search failed. Check the local pi logs for private diagnostics.';
 }
 
+let quietDepth = 0;
+let quietBuffer = '';
+
+export async function withQuietDiagnostics(operation) {
+  const original = process.stderr.write;
+  if (quietDepth === 0) {
+    quietBuffer = '';
+    process.stderr.write = chunk => {
+      quietBuffer += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+      return true;
+    };
+  }
+  quietDepth += 1;
+  try {
+    const value = await operation();
+    return { value, diagnostics: quietBuffer };
+  } finally {
+    quietDepth -= 1;
+    if (quietDepth === 0) process.stderr.write = original;
+  }
+}
+
 export async function queryGeminiWithAiChat(prompt, { timeoutSeconds = DEFAULT_GEMINI_SEARCH_TIMEOUT_SECONDS } = {}) {
   const browserProfileName = process.env.GEMINI_SEARCH_BROWSER_PROFILE || resolveTaskProfile('gemini') || null;
   const request = buildAiChatRequest({
@@ -139,12 +161,12 @@ export async function queryGeminiWithAiChat(prompt, { timeoutSeconds = DEFAULT_G
     },
   });
 
-  const outcome = await runAiChat(request, {
+  const { value: outcome } = await withQuietDiagnostics(() => runAiChat(request, {
     io: {
       stdout() {},
       writeFile() {},
     },
-  });
+  }));
   const text = outcome?.result?.text?.trim();
   const model = outcome?.metadata?.model || outcome?.result?.modelUsed || null;
   const temporary = outcome?.metadata?.provider_state?.is_temporary === true;
