@@ -14,7 +14,7 @@ import {
   startChrome,
   stopChrome,
   timestampedTmpPath,
-} from '../../../browser-tools/scripts/browser-control.mjs';
+} from '@rezkam/browser-tools';
 import { readCachedResponse, writeCachedResponse } from '../browser-query-cache.mjs';
 import { aiChatProviders, getAiChatProvider, listAiChatProviders } from './providers/index.mjs';
 

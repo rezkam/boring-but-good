@@ -19,7 +19,7 @@ AI Chat refuses to attach to unmanaged Chrome, another owner, missing owner toke
 AI Chat uses Chrome profile `Default` by default. Configure the Browser Tools task profile once only when another Chrome profile has the provider logins:
 
 ```bash
-../browser-tools/scripts/config.mjs task-profile set ai-chat --profile "<profile-alias-or-folder>"
+browser-tools config task-profile set ai-chat --profile "<profile-alias-or-folder>"
 ```
 
 ## Basic usage

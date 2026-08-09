@@ -8,6 +8,7 @@
     "validate": "npm test"
   },
   "dependencies": {
+    "@rezkam/browser-tools": "^1.0.1",
     "puppeteer-core": "^24.42.0"
   }
 }

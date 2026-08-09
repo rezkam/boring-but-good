@@ -1,7 +1,7 @@
 ---
 name: ai-chat
 description: "Use browser-authenticated AI chat providers through reusable provider adapters and Browser Tools. Use this skill for ChatGPT provider-ID continuation, read-only reattach/watch, conversation listing, model profiles, and final or NDJSON output, as well as Grok, Gemini, and Perplexity browser-session work."
-compatibility: "Requires the browser-tools skill as a sibling checkout, macOS Chrome, Node.js 20+, npm dependencies from package.json, and logged-in browser sessions for selected providers."
+compatibility: "Requires @rezkam/browser-tools from package.json, macOS Chrome, Node.js 20+, installed npm dependencies, and logged-in browser sessions for selected providers."
 ---
 
 # AI Chat

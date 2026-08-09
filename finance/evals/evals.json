@@ -22,7 +22,7 @@
         "The answer reads or follows references/tradingeconomics.md helper selection rules.",
         "The answer uses scripts/tradingeconomics-markets.mjs --market commodities --json rather than scraping only /commodity/crude-oil.",
         "The final answer is a JSON object with source, captured_at, coverage or row count, and a Crude Oil row.",
-        "Browser Tools is stopped with ../browser-tools/scripts/stop.mjs --clean if the run started it."
+        "Browser Tools is stopped with browser-tools stop --clean if the run started it."
       ]
     },
     {

@@ -12,7 +12,7 @@ import {
 } from '../scripts/ai-chat/module.mjs';
 import { assertGrokPageUsable, classifyGrokPageState } from '../scripts/ai-chat/providers/grok.mjs';
 import { validatePerplexitySession } from '../scripts/ai-chat/providers/perplexity.mjs';
-import { stopChrome } from '../../browser-tools/scripts/browser-control.mjs';
+import { stopChrome } from '@rezkam/browser-tools';
 
 const REPO_ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const LIVE_BROWSER_EDGE_TESTS = process.env.AI_CHAT_LIVE_BROWSER_EDGE_TESTS === '1';

@@ -72,8 +72,28 @@ test('finance helpers depend on Browser Tools instead of owning browser manageme
   }
 
   assert.deepEqual(offenders, []);
-  assert.match(readRelative('scripts/browser-tools-runtime.mjs'), /\.\.\/\.\.\/browser-tools\/scripts\/browser-control\.mjs/);
-  assert.match(readRelative('scripts/browser-tools-runtime.mjs'), /\.\.\/\.\.\/browser-tools\/scripts\/resource-helper\.mjs/);
+  assert.match(readRelative('scripts/browser-tools-runtime.mjs'), /@rezkam\/browser-tools/);
+  assert.match(readRelative('scripts/browser-tools-runtime.mjs'), /@rezkam\/browser-tools\/resource-helper\.mjs/);
+
+  const siblingUsage = new RegExp(['(?:\\.\\.\\/)+', 'browser-tools', '\\/'].join(''));
+  const sourceScriptCommand = new RegExp(['browser-tools', '\\/scripts\\/'].join(''));
+  const siblingContract = new RegExp(['(?:sibling.{0,40}browser[ -]tools|browser[ -]tools.{0,40}sibling)'].join(''), 'i');
+  const sourceEntryPoint = new RegExp(['`(?:start|stop|config)', '\\.mjs'].join(''), 'i');
+  const directUsage = walk(ROOT, path => ['.mjs', '.md', '.json'].includes(extname(path)))
+    .filter(path => !path.endsWith('package-lock.json'))
+    .filter(path => relative(ROOT, path) !== 'test/skill-contract.test.mjs')
+    .filter(path => {
+      const text = readFileSync(path, 'utf-8');
+      return siblingUsage.test(text)
+        || sourceScriptCommand.test(text)
+        || siblingContract.test(text)
+        || sourceEntryPoint.test(text);
+    })
+    .map(path => relative(ROOT, path));
+  assert.deepEqual(directUsage, []);
+
+  const packageJson = JSON.parse(readRelative('package.json'));
+  assert.equal(packageJson.dependencies?.['@rezkam/browser-tools'], '^1.0.1');
 });
 
 test('Trading Economics helpers share the Trading Economics module', () => {
