@@ -76,7 +76,7 @@ The directory uses mode `0700`. An existing directory with broader permissions i
 
 The tool result sent to the agent contains only completion status and a home-relative result-file path represented here as `<home-relative-result-path>`. Pi's `read` tool expands the runtime path, so the agent can read the file without receiving the absolute host home path.
 
-The Gemini WebUI response does not expose an independently trustworthy backend model identifier. The extension verifies the exact selected UI mode before submission and reports that scope accurately.
+The Gemini WebUI response does not expose an independently trustworthy backend model identifier. The extension verifies the exact selected UI mode before submission and reports that scope accurately. It refuses a result that contains no direct source URL.
 
 Gemini responses, prompts, account metadata, cookies, and profile labels must not be committed.
 
@@ -86,4 +86,4 @@ The tool row shows per-query progress while pi waits. The extension does not wri
 
 Escape cancels a search. A queued search stops before it acquires the browser, and an in-flight search returns immediately while its browser session is still allowed to close. If pi exits while a search is running, the extension stops the browser that search started.
 
-A queued search cancels immediately before it acquires the managed browser. A cancellation request for an active batch takes effect between queries. An in-flight Gemini browser request is allowed to finish its cleanup so the managed browser is not orphaned. Completed result paths remain available.
+A queued search cancels immediately before it acquires the managed browser. An active invocation reports cancellation immediately, while its underlying Gemini browser request continues only until its own cleanup finishes. The next search remains queued until that cleanup is complete, so browsers cannot overlap. Completed result paths remain available.

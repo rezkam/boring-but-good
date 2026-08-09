@@ -504,16 +504,16 @@ export const geminiProvider = {
     };
   },
 
-  async run({ browser, request, selectedModel, conversation }) {
+  async run({ browser, request, selectedModel, conversation, logger = console }) {
     const cookieContext = await getGeminiCookieContext({ browser, request });
     const cookies = cookieContext.cookies;
     const sessionVerification = await verifyGeminiSession({ browser, cookies, cookieContext, request });
     if (sessionVerification.ui.checked && !sessionVerification.ui_ready) {
-      console.error(`[gemini] UI login check is not ready: ${sessionVerification.ui.reason}. Direct WebUI auth ${sessionVerification.direct_ready ? 'passed' : 'failed'}.`);
+      logger.error(`[gemini] UI login check is not ready: ${sessionVerification.ui.reason}. Direct WebUI auth ${sessionVerification.direct_ready ? 'passed' : 'failed'}.`);
     }
     const useBrowserNetwork = cookieContext.source === COOKIE_SOURCE_MANAGED_BROWSER && !!browser && request.browserHeadless;
     if (!sessionVerification.direct_ready && !useBrowserNetwork) {
-      console.error(`[gemini] Direct session check is not ready: ${sessionVerification.direct.error || 'account RPC did not return models'}.`);
+      logger.error(`[gemini] Direct session check is not ready: ${sessionVerification.direct.error || 'account RPC did not return models'}.`);
     }
 
     const requestedModel = selectedModel === 'default' ? request.modelName : selectedModel;

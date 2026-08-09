@@ -5,7 +5,12 @@ import { join } from 'node:path';
 
 import { browserWSEndpoint, stopChrome } from '@rezkam/browser-tools';
 import { resolveTaskProfile } from '@rezkam/browser-tools';
-import { buildAiChatRequest, readAiChatBrowserState, runAiChat } from '../../scripts/ai-chat/module.mjs';
+import {
+  buildAiChatRequest,
+  readAiChatBrowserState,
+  resolveAiChatBrowserStateFile,
+  runAiChat,
+} from '../../scripts/ai-chat/module.mjs';
 
 export const GEMINI_SEARCH_MODEL = 'gemini-3.6-flash-extended-thinking';
 export const DEFAULT_GEMINI_SEARCH_TIMEOUT_SECONDS = 300;
@@ -97,6 +102,10 @@ async function writePrivateResult({ resultDir, query, answer, capturedAt }) {
   return path;
 }
 
+function hasSourceUrl(text) {
+  return /https?:\/\/[^\s)\]}>,]+/i.test(text);
+}
+
 function publicResultPath(path) {
   const home = homedir();
   return path === home || path.startsWith(`${home}/`)
@@ -115,33 +124,15 @@ function sanitizeRuntimeError(error) {
   if (/timed? out|timeout/i.test(message)) return 'The Gemini search timed out.';
   if (/required .*mode|ui mode|did not use/i.test(message)) return `Gemini did not verify the required ${GEMINI_SEARCH_MODEL} mode.`;
   if (/temporary/i.test(message)) return 'Gemini temporary chat mode could not be verified.';
+  if (/source URLs/i.test(message)) return 'Gemini search returned no source URLs.';
   if (/cancel/i.test(message)) return 'The Gemini search was cancelled.';
-  return 'Gemini search failed. Check the local pi logs for private diagnostics.';
+  return 'Gemini search failed.';
 }
 
-let quietDepth = 0;
-let quietBuffer = '';
-
-export async function withQuietDiagnostics(operation) {
-  const original = process.stderr.write;
-  if (quietDepth === 0) {
-    quietBuffer = '';
-    process.stderr.write = chunk => {
-      quietBuffer += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
-      return true;
-    };
-  }
-  quietDepth += 1;
-  try {
-    const value = await operation();
-    return { value, diagnostics: quietBuffer };
-  } finally {
-    quietDepth -= 1;
-    if (quietDepth === 0) process.stderr.write = original;
-  }
-}
-
-export async function queryGeminiWithAiChat(prompt, { timeoutSeconds = DEFAULT_GEMINI_SEARCH_TIMEOUT_SECONDS } = {}) {
+export async function queryGeminiWithAiChat(prompt, {
+  timeoutSeconds = DEFAULT_GEMINI_SEARCH_TIMEOUT_SECONDS,
+  run = runAiChat,
+} = {}) {
   const browserProfileName = process.env.GEMINI_SEARCH_BROWSER_PROFILE || resolveTaskProfile('gemini') || null;
   const request = buildAiChatRequest({
     providerName: 'gemini',
@@ -162,12 +153,14 @@ export async function queryGeminiWithAiChat(prompt, { timeoutSeconds = DEFAULT_G
     },
   });
 
-  const { value: outcome } = await withQuietDiagnostics(() => runAiChat(request, {
+  const outcome = await run(request, {
     io: {
       stdout() {},
       writeFile() {},
     },
-  }));
+    // AI Chat's progress belongs to this private tool invocation, not pi's terminal renderer.
+    logger: { error() {} },
+  });
   const text = outcome?.result?.text?.trim();
   const model = outcome?.metadata?.model || outcome?.result?.modelUsed || null;
   const temporary = outcome?.metadata?.provider_state?.is_temporary === true;
@@ -185,13 +178,18 @@ export async function queryGeminiWithAiChat(prompt, { timeoutSeconds = DEFAULT_G
 
 // ai-chat closes its browser at the end of a run, which cannot happen when the host process
 // exits mid-search. The recorded owner token is what makes that leftover browser recoverable.
-export async function stopOwnedAiChatBrowser() {
-  const state = readAiChatBrowserState();
+export async function stopOwnedAiChatBrowser({
+  browserStateFile,
+  readBrowserState = readAiChatBrowserState,
+  browserTools = { browserWSEndpoint, stopChrome },
+} = {}) {
+  const stateFile = resolveAiChatBrowserStateFile({}, browserStateFile ? { browserStateFile } : {});
+  const state = readBrowserState(stateFile);
   const port = state?.port;
   const ownerToken = state?.ownerToken;
   if (!port || !ownerToken || state.status === 'stopped') return false;
-  if (!(await browserWSEndpoint(port))) return false;
-  const result = stopChrome({ port, ownerToken, clean: false });
+  if (!(await browserTools.browserWSEndpoint(port))) return false;
+  const result = browserTools.stopChrome({ port, ownerToken, clean: false });
   return result?.status === 'stopped' || result?.status === 'already-gone';
 }
 
@@ -224,6 +222,9 @@ export async function runGeminiSearchBatch(params = {}, deps = {}) {
       const response = await queryGemini(buildGeminiSearchPrompt(query), { timeoutSeconds });
       if (response.model !== GEMINI_SEARCH_MODEL || response.modelUiVerified !== true || response.temporary !== true) {
         throw new Error('Gemini search result did not satisfy the required UI mode and temporary-mode contract.');
+      }
+      if (!hasSourceUrl(response.text)) {
+        throw new Error('Gemini search result did not include source URLs.');
       }
       const capturedAt = new Date().toISOString();
       const absolutePath = await writeResult({ resultDir, query, answer: response.text, capturedAt });

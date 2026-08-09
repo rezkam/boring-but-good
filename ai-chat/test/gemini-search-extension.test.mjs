@@ -5,10 +5,11 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
-  withQuietDiagnostics,
   GEMINI_SEARCH_MODEL,
+  queryGeminiWithAiChat,
   buildGeminiSearchPrompt,
   runGeminiSearchBatch,
+  stopOwnedAiChatBrowser,
 } from '../extensions/gemini-search/runtime.mjs';
 
 test('Gemini search rejects results without exact UI mode verification', async () => {
@@ -26,12 +27,27 @@ test('Gemini search rejects results without exact UI mode verification', async (
   );
 });
 
+test('Gemini search rejects a response that contains no source URL', async () => {
+  const resultDir = await mkdtemp(join(tmpdir(), 'gemini-search-no-sources-'));
+  await assert.rejects(
+    () => runGeminiSearchBatch({ query: 'query', resultDir }, {
+      queryGemini: async () => ({
+        text: 'This answer has no source links.',
+        model: GEMINI_SEARCH_MODEL,
+        temporary: true,
+        modelUiVerified: true,
+      }),
+    }),
+    /source URLs/i,
+  );
+});
+
 test('Gemini search returns home-relative result paths to the agent', async () => {
   const privateRoot = ['.ag', 'ents'].join('');
   const absolutePath = join(homedir(), privateRoot, 'tmp', 'gemini-search', 'result.md');
   const resultDir = await mkdtemp(join(tmpdir(), 'gemini-search-public-path-'));
   const result = await runGeminiSearchBatch({ query: 'query', resultDir }, {
-    queryGemini: async () => ({ text: 'answer', model: GEMINI_SEARCH_MODEL, temporary: true, modelUiVerified: true }),
+    queryGemini: async () => ({ text: 'answer https://example.test/source', model: GEMINI_SEARCH_MODEL, temporary: true, modelUiVerified: true }),
     writeResult: async () => absolutePath,
   });
 
@@ -39,29 +55,49 @@ test('Gemini search returns home-relative result paths to the agent', async () =
   assert.doesNotMatch(result.files[0].path, new RegExp(homedir().replaceAll('/', '\\/')));
 });
 
-test('Gemini diagnostics never reach the terminal and the stream is restored afterwards', async () => {
+test('Gemini shutdown reads the configured AI Chat browser-state file', async () => {
+  const stopped = [];
+  const state = { port: 43123, ownerToken: 'test-owner-token', status: 'started' };
+  const stoppedBrowser = await stopOwnedAiChatBrowser({
+    browserStateFile: '/private-configured-browser-state.json',
+    readBrowserState: stateFile => {
+      assert.equal(stateFile, '/private-configured-browser-state.json');
+      return state;
+    },
+    browserTools: {
+      browserWSEndpoint: async port => {
+        assert.equal(port, state.port);
+        return 'ws://managed-browser';
+      },
+      stopChrome: ({ port, ownerToken, clean }) => {
+        stopped.push({ port, ownerToken, clean });
+        return { status: 'stopped' };
+      },
+    },
+  });
+
+  assert.equal(stoppedBrowser, true);
+  assert.deepEqual(stopped, [{ port: state.port, ownerToken: state.ownerToken, clean: false }]);
+});
+
+test('Gemini search supplies a private logger without replacing process stderr', async () => {
   const original = process.stderr.write;
-  const leaked = [];
-  process.stderr.write = chunk => { leaked.push(String(chunk)); return true; };
-  let captured;
-  let restoredWrite;
-  try {
-    captured = await withQuietDiagnostics(async () => {
-      process.stderr.write('[ai-chat] Starting Browser Tools Chrome owned by ai-chat\n');
-      console.error('[gemini] Running provider transport: webui-api');
-      return 'answer';
-    });
-    restoredWrite = process.stderr.write;
-  } finally {
-    process.stderr.write = original;
-  }
+  let capturedLogger;
+  const result = await queryGeminiWithAiChat('query', {
+    run: async (_request, deps) => {
+      capturedLogger = deps.logger;
+      assert.equal(process.stderr.write, original);
+      deps.logger.error('private diagnostic');
+      return {
+        result: { text: 'answer https://example.test/source', modelUsed: GEMINI_SEARCH_MODEL },
+        metadata: { model: GEMINI_SEARCH_MODEL, provider_state: { is_temporary: true, model_ui_verified: true } },
+      };
+    },
+  });
 
-  assert.notEqual(restoredWrite, undefined);
-
-  assert.deepEqual(leaked, []);
-  assert.equal(captured.value, 'answer');
-  assert.match(captured.diagnostics, /Starting Browser Tools Chrome/);
-  assert.match(captured.diagnostics, /provider transport/);
+  assert.equal(process.stderr.write, original);
+  assert.equal(typeof capturedLogger.error, 'function');
+  assert.equal(result.text, 'answer https://example.test/source');
 });
 
 test('Gemini search redacts unexpected result-directory filesystem errors', async () => {
@@ -124,7 +160,7 @@ test('Gemini search stops safely between queries when cancellation is requested'
     queryGemini: async () => {
       calls.push('query');
       controller.abort();
-      return { text: 'completed before cancellation', model: GEMINI_SEARCH_MODEL, temporary: true, modelUiVerified: true };
+      return { text: 'completed before cancellation https://example.test/source', model: GEMINI_SEARCH_MODEL, temporary: true, modelUiVerified: true };
     },
   });
 
@@ -146,7 +182,7 @@ test('Gemini search runs multiple queries and writes private result files', asyn
   }, {
     queryGemini: async (prompt, options) => {
       calls.push({ prompt, options });
-      return { text: `answer ${calls.length}`, model: GEMINI_SEARCH_MODEL, temporary: true, modelUiVerified: true };
+      return { text: `answer ${calls.length} https://example.test/source-${calls.length}`, model: GEMINI_SEARCH_MODEL, temporary: true, modelUiVerified: true };
     },
     onProgress: update => updates.push(update),
   });

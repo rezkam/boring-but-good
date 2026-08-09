@@ -60,6 +60,35 @@ test('pi extension promptly cancels a queued search before it acquires the brows
   assert.equal(calls, 1);
 });
 
+test('pi extension immediately rejects an already-aborted search without joining the browser queue', async () => {
+  let tool;
+  let releaseFirst;
+  const firstGate = new Promise(resolve => { releaseFirst = resolve; });
+  let calls = 0;
+  const runBatch = async () => {
+    calls += 1;
+    if (calls === 1) await firstGate;
+    return { queryCount: 1, successfulQueries: 1, failedQueries: 0, cancelled: false, files: [], failures: [] };
+  };
+  createGeminiSearchExtension({ runBatch })({ registerTool(definition) { tool = definition; }, on() {} });
+
+  const first = tool.execute('call-1', { query: 'first' }, undefined, undefined, { hasUI: true, ui: strictUi() });
+  await Promise.resolve();
+  const controller = new AbortController();
+  controller.abort();
+
+  const second = tool.execute('call-2', { query: 'cancelled' }, controller.signal, undefined, { hasUI: true, ui: strictUi() });
+  const outcome = await Promise.race([
+    second.then(() => 'resolved', error => error.name),
+    new Promise(resolve => setTimeout(() => resolve('still-waiting'), 50)),
+  ]);
+  assert.equal(outcome, 'AbortError');
+  assert.equal(calls, 1);
+
+  releaseFirst();
+  await first;
+});
+
 test('pi extension abandons an in-flight search on abort without leaving the browser unserialized', async () => {
   let tool;
   let releaseFirst;
