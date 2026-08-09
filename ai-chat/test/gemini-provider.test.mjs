@@ -93,6 +93,48 @@ function promptFromStreamCall(call) {
   return innerReqList[0][0];
 }
 
+test('Gemini browser-network fallback reuses the authenticated Gemini app page', async () => {
+  const response = {
+    url: () => 'https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate',
+    request: () => ({ method: () => 'POST' }),
+    text: async () => streamAnswerRaw('answer from reused page'),
+  };
+  let closed = false;
+  const page = {
+    url: () => 'https://gemini.google.com/app',
+    async goto() {},
+    async waitForSelector() {},
+    async evaluate(_fn, value) {
+      if (value?.requestedMode) {
+        return { observedMode: value.requestedMode, temporaryActive: value.temporary, historyModeVerified: true };
+      }
+    },
+    async waitForResponse(predicate) {
+      assert.equal(predicate(response), true);
+      return response;
+    },
+    async close() { closed = true; },
+  };
+  const browser = {
+    pages: async () => [page],
+    newPage: async () => assert.fail('must reuse the existing authenticated Gemini page'),
+  };
+
+  const result = await queryGeminiViaBrowserNetwork(browser, 'browser prompt', 45000, {
+    modelConfig: {
+      id: 'gemini-3.6-flash-extended-thinking',
+      thinking: true,
+      ui_choice: 'Extended thinking',
+      ui_selected: 'Flash Extended',
+    },
+    temporary: true,
+  });
+
+  assert.equal(result.text, 'answer from reused page');
+  assert.equal(result.modelUiVerified, true);
+  assert.equal(closed, false);
+});
+
 test('Gemini browser-network fallback captures and parses the complete StreamGenerate response', async () => {
   const calls = [];
   const response = {
@@ -169,10 +211,11 @@ test('Gemini provider falls back from failed Node replay to a complete browser-n
   };
   const browser = {
     pages: async () => [{
+      ...networkPage,
       url: () => 'https://gemini.google.com/app',
       cookies: async () => [{ name: '__Secure-1PSID', value: 'psid' }],
     }],
-    newPage: async () => networkPage,
+    newPage: async () => assert.fail('must reuse the authenticated Gemini app page'),
   };
   const stdout = [];
 
