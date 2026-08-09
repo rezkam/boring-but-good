@@ -1,5 +1,11 @@
 # @rezkam/browser-tools
 
+## 1.0.2
+
+### Patch Changes
+
+- 197694d: Clean up managed Chrome lifecycle records and profile clones when Chrome exits between the final SIGTERM wait and the SIGKILL safety recheck.
+
 ## 1.0.1
 
 ### Patch Changes
