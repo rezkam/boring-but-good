@@ -5,6 +5,7 @@ import type { PromptVerdict } from "./judge.ts";
 import {
 	amendAuthorization,
 	checkWriterCap,
+	declareBlocked,
 	grantForcePush,
 	continuationDecision,
 	DEFAULT_TIERS,
@@ -1123,4 +1124,25 @@ test("a granted force push is allowed on the exact branch, and nothing else is",
 	assert.equal(structure(request({ tool: "bash", campaign: granted, input: { command: "git reset --hard origin/main" } })).code, "CG015");
 	// And an ungranted campaign is exactly where it was.
 	assert.equal(structure(request({ tool: "bash", campaign: campaign(), input: { command: push } })).code, "CG015");
+});
+
+test("a campaign can declare itself blocked on the owner, and that is not parking the goal", () => {
+	// CG023 assumed remaining slices meant remaining work. A campaign waiting on decisions only
+	// the owner can make had neither a way to say so nor a way to stop, so it looped: refused
+	// when it tried to park, with no authorized work left to do.
+	const waiting = declareBlocked(campaign({ slicesDone: 18, slicesTotal: 29 }), "task 17 wrapper deletion; task 5 spend");
+	assert.equal(waiting.status, "blocked");
+	assert.match(waiting.blockedOn ?? "", /task 17 wrapper deletion/);
+
+	// Blocked stops the continuation, because continuing has nothing to continue into.
+	assert.equal(continuationDecision(waiting, { consecutiveErrors: 0 }).proceed, false);
+
+	// And the goal may now follow the campaign it tracks, rather than being refused forever.
+	assert.deepEqual(
+		evaluateStructure(request({ tool: "update_goal", campaign: waiting, input: { status: "blocked" } })),
+		{ allow: true, judge: [] },
+	);
+
+	// An active campaign is unchanged: this is a declared state, not a way around the rule.
+	assert.equal(structure(request({ tool: "update_goal", campaign: campaign({ slicesDone: 18 }), input: { status: "blocked" } })).code, "CG023");
 });

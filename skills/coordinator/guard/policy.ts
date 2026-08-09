@@ -55,7 +55,9 @@ export interface Campaign {
 	worktree: string;
 	planPath: string | null;
 	authorized: string;
-	status: "active" | "review" | "closed";
+	status: "active" | "review" | "blocked" | "closed";
+	/** What the campaign is waiting on the owner for, when it declared itself blocked. */
+	blockedOn?: string;
 	slicesTotal: number;
 	slicesDone: number;
 	lanes: Lane[];
@@ -188,6 +190,7 @@ export function continuationDecision(
 	turn: { stopReason?: string; consecutiveErrors: number },
 ): { proceed: boolean; reason?: string } {
 	if (campaign.status === "closed") return { proceed: false, reason: "the campaign is closed" };
+	if (campaign.status === "blocked") return { proceed: false, reason: `the campaign is blocked on ${campaign.blockedOn ?? "the owner"}` };
 	// Deciding this here rather than at the call site is the point: the caller continued only
 	// while a lane was open, so a campaign between dispatches had nothing carrying it.
 	const open = campaign.lanes.filter((lane) => lane.state !== "integrated");
@@ -277,6 +280,21 @@ export function forcePushTargets(command: string): string[] | null {
 		targets.push(name);
 	}
 	return targets;
+}
+
+/**
+ * Declare the campaign blocked on the owner.
+ *
+ * CG023 read remaining slices as remaining work, which is true right up until it is not: a
+ * campaign whose next tasks all need a decision only the owner can make had no way to say
+ * so and no way to stop, so it was refused when it tried to park and had nothing left to
+ * do. Being blocked is a real state, and the fix is to record it where the user can see it
+ * rather than to let a goal be parked quietly.
+ */
+export function declareBlocked(campaign: Campaign, waitingOn: string): Campaign {
+	const reason = waitingOn.trim();
+	if (!reason) return campaign;
+	return { ...campaign, status: "blocked", blockedOn: reason };
 }
 
 export function laneSummary(campaign: Campaign): string {
@@ -1278,6 +1296,9 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 		if (!campaign) return { allow: true, judge: [] };
 		const status = text(input.status);
 		if (status !== "blocked" && status !== "complete") return { allow: true, judge: [] };
+		// A campaign that declared itself blocked has already said so where the user can see it,
+		// so the goal is allowed to follow the ledger rather than argue with it.
+		if (campaign.status === "blocked") return { allow: true, judge: [] };
 		// Every slice counted is not the end. The mandatory final review runs after that, so a
 		// goal that completes here stops the loop one step before the step that catches things.
 		// A campaign that is genuinely over is closed, and a closed campaign leaves the guard
@@ -1287,7 +1308,7 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 		const lanes = open.length > 0 ? `, and ${open.length} lane${open.length > 1 ? "s are" : " is"} still open` : "";
 		return deny(
 			"CG023",
-			`Campaign ${campaign.slug} is still ${campaign.status}: ${remaining}${lanes}. Marking the goal ${status} stops the continuation that carries this campaign while you are away, and a transport error is not a finished campaign. Finish the work, run the final review, then end it deliberately with /campaign close.`,
+			`Campaign ${campaign.slug} is still ${campaign.status}: ${remaining}${lanes}. Marking the goal ${status} stops the continuation that carries this campaign while you are away, and a transport error is not a finished campaign. If you are genuinely waiting on the user, say so with coordinator_campaign action "blocked" and a note naming the decision, which stops the loop where they can see why. Otherwise finish the work, run the final review, then end it with /campaign close.`,
 		);
 	}
 

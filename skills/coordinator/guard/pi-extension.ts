@@ -39,6 +39,7 @@ import {
 	parseModelPin,
 	findTierClash,
 	amendAuthorization,
+	declareBlocked,
 	grantForcePush,
 	parseTierEntries,
 	recordIntegration,
@@ -105,6 +106,7 @@ const StartParams = Type.Object({
 		Type.Literal("open-review"),
 		Type.Literal("close"),
 		Type.Literal("set-slices"),
+		Type.Literal("blocked"),
 		Type.Literal("show"),
 	]),
 	slug: Type.Optional(Type.String({ description: "Campaign slug, required for start." })),
@@ -113,6 +115,7 @@ const StartParams = Type.Object({
 	slices_total: Type.Optional(Type.Number({ description: "Total slices in the approved plan." })),
 	slices_done: Type.Optional(Type.Number({ description: "Slices finished so far, for set-slices." })),
 	authorized: Type.Optional(Type.String({ description: "The authorization scope the user granted, verbatim." })),
+	waiting_on: Type.Optional(Type.String({ description: 'For "blocked": the decision or input you are waiting on, named exactly.' })),
 });
 
 const LaneParams = Type.Object({
@@ -408,6 +411,15 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			return;
 		}
 		const open = campaign.lanes.filter((lane) => lane.state !== "integrated").length;
+		// A blocked campaign is waiting on the user, so the one thing worth the status line is
+		// what it is waiting for.
+		if (campaign.status === "blocked") {
+			ctx.ui.setStatus(
+				"coordinator-guard",
+				ctx.ui.theme.fg("warning", `Campaign ${campaign.slug} BLOCKED on ${campaign.blockedOn ?? "the owner"} (/campaign resume)`),
+			);
+			return;
+		}
 		const label = `Campaign ${campaign.slug} ${campaign.slicesDone}/${campaign.slicesTotal}, ${open} open`;
 		ctx.ui.setStatus("coordinator-guard", ctx.ui.theme.fg(campaign.status === "closed" ? "muted" : "accent", label));
 	}
@@ -824,7 +836,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		name: "coordinator_campaign",
 		label: "Coordinator Campaign",
 		description:
-			"Register and drive the guarded campaign lifecycle. Call action \"start\" before the first dispatch of a coordinator campaign; dispatches are blocked until you do. Use \"set-slices\" as slices land, \"open-review\" once every slice is done, and \"close\" when the campaign is over.",
+			"Register and drive the guarded campaign lifecycle. Call action \"start\" before the first dispatch of a coordinator campaign; dispatches are blocked until you do. Use \"set-slices\" to correct the count, \"blocked\" when every remaining task needs a decision only the user can make, \"open-review\" once every slice is done, and \"close\" when the campaign is over.",
 		promptSnippet: "Register or update the guarded coordinator campaign",
 		parameters: StartParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -852,6 +864,14 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 					});
 					armed = true;
 					recordProgress();
+					break;
+				}
+				case "blocked": {
+					if (!campaign) throw new Error("no campaign is registered");
+					if (!params.waiting_on?.trim()) {
+						throw new Error('blocked requires waiting_on naming the decision you need, because a campaign that stops without saying why is indistinguishable from one that gave up');
+					}
+					campaign = declareBlocked(campaign, params.waiting_on);
 					break;
 				}
 				case "set-slices": {
@@ -1038,7 +1058,10 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 					show("Campaign closed and guard disarmed. Enforcement is off until the next campaign.");
 					break;
 				case "resume":
-					if (campaign) campaign.status = "active";
+					if (campaign) {
+						campaign.status = "active";
+						delete campaign.blockedOn;
+					}
 					armed = true;
 					noProgressContinuations = 0;
 					consecutiveErrors = 0;
