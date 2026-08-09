@@ -8,6 +8,16 @@ const theme = {
   bold: text => text,
 };
 
+// The reference extension leaves the footer and widget area to the user, so any call here is a defect.
+function strictUi() {
+  return {
+    theme,
+    setStatus() { assert.fail('gemini_search must not write to the shared footer status'); },
+    setWidget() { assert.fail('gemini_search must not take over the widget area'); },
+    setFooter() { assert.fail('gemini_search must not replace the footer'); },
+  };
+}
+
 test('pi extension promptly cancels a queued search before it acquires the browser', async () => {
   let tool;
   let releaseFirst;
@@ -68,8 +78,7 @@ test('pi extension abandons an in-flight search on abort without leaving the bro
     };
   };
   createGeminiSearchExtension({ runBatch })({ registerTool(definition) { tool = definition; }, on() {} });
-  const cleared = [];
-  const ctx = { hasUI: true, ui: { setStatus(key, value) { cleared.push([key, value]); }, setWidget(key, value) { cleared.push([key, value]); } } };
+  const ctx = { hasUI: true, ui: strictUi() };
 
   const controller = new AbortController();
   const first = tool.execute('call-1', { query: 'first' }, controller.signal, undefined, ctx);
@@ -81,7 +90,6 @@ test('pi extension abandons an in-flight search on abort without leaving the bro
     new Promise(resolve => setTimeout(() => resolve('still-waiting'), 50)),
   ]);
   assert.equal(outcome, 'AbortError');
-  assert.deepEqual(cleared.filter(([, value]) => value === undefined).map(([key]) => key).sort(), ['gemini-search', 'gemini-search']);
 
   const second = tool.execute('call-2', { query: 'second' }, undefined, undefined, ctx);
   const queued = await Promise.race([
@@ -96,8 +104,53 @@ test('pi extension abandons an in-flight search on abort without leaving the bro
   assert.deepEqual(started, ['first', 'second']);
 });
 
-test('pi extension skips UI updates in non-interactive sessions', async () => {
+test('pi extension stops a browser left running when the session shuts down mid-search', async () => {
   let tool;
+  const handlers = new Map();
+  let releaseSearch;
+  const searchGate = new Promise(resolve => { releaseSearch = resolve; });
+  const runBatch = async () => {
+    await searchGate;
+    return { queryCount: 1, successfulQueries: 1, failedQueries: 0, cancelled: false, files: [], failures: [] };
+  };
+  const stopped = [];
+  createGeminiSearchExtension({
+    runBatch,
+    stopOwnedBrowser: async () => { stopped.push('stopped'); },
+  })({
+    registerTool(definition) { tool = definition; },
+    on(event, handler) { handlers.set(event, handler); },
+  });
+
+  const search = tool.execute('call-1', { query: 'in flight' }, undefined, undefined, { hasUI: true, ui: strictUi() });
+  await Promise.resolve();
+  await handlers.get('session_shutdown')({ reason: 'quit' }, { hasUI: true, ui: strictUi() });
+  assert.deepEqual(stopped, ['stopped']);
+
+  releaseSearch();
+  await search;
+});
+
+test('pi extension leaves the browser alone when no search is running at shutdown', async () => {
+  let tool;
+  const handlers = new Map();
+  const stopped = [];
+  createGeminiSearchExtension({
+    runBatch: async () => ({ queryCount: 1, successfulQueries: 1, failedQueries: 0, cancelled: false, files: [], failures: [] }),
+    stopOwnedBrowser: async () => { stopped.push('stopped'); },
+  })({
+    registerTool(definition) { tool = definition; },
+    on(event, handler) { handlers.set(event, handler); },
+  });
+
+  await tool.execute('call-1', { query: 'finished' }, undefined, undefined, { hasUI: true, ui: strictUi() });
+  await handlers.get('session_shutdown')({ reason: 'quit' }, { hasUI: true, ui: strictUi() });
+  assert.deepEqual(stopped, []);
+});
+
+test('pi extension reports progress in its own tool row without touching shared chrome', async () => {
+  let tool;
+  const updates = [];
   const runBatch = async (_params, deps) => {
     deps.onProgress({ phase: 'searching', index: 0, total: 1, query: 'only query' });
     return {
@@ -111,20 +164,17 @@ test('pi extension skips UI updates in non-interactive sessions', async () => {
   };
   createGeminiSearchExtension({ runBatch })({ registerTool(definition) { tool = definition; }, on() {} });
 
-  const ctx = {
-    hasUI: false,
-    ui: {
-      setStatus() { assert.fail('setStatus must not run without UI'); },
-      setWidget() { assert.fail('setWidget must not run without UI'); },
-    },
-  };
-  const result = await tool.execute('call-1', { query: 'only query' }, undefined, undefined, ctx);
+  const result = await tool.execute('call-1', { query: 'only query' }, undefined, update => updates.push(update), {
+    hasUI: true,
+    ui: strictUi(),
+  });
   assert.match(result.content[0].text, /1\/1/);
+  assert.equal(updates.length, 1);
+  assert.match(updates[0].content[0].text, /searching: only query/);
 });
 
 test('pi extension registers a file-backed multi-query Gemini search tool', async () => {
   let tool;
-  const statuses = [];
   const updates = [];
   const pi = {
     registerTool(definition) { tool = definition; },
@@ -157,7 +207,7 @@ test('pi extension registers a file-backed multi-query Gemini search tool', asyn
     queries: ['first query', 'second query'],
   }, undefined, update => updates.push(update), {
     hasUI: true,
-    ui: { setStatus: (...args) => statuses.push(args), setWidget: () => {}, theme },
+    ui: strictUi(),
   });
 
   assert.deepEqual(result.content, [{
@@ -165,7 +215,6 @@ test('pi extension registers a file-backed multi-query Gemini search tool', asyn
     text: 'Completed 2/2 Gemini searches in temporary chats.\nRead the full results from:\n1. /result-store/result-1.md\n2. /result-store/result-2.md',
   }]);
   assert.equal(updates.length, 3);
-  assert.deepEqual(statuses.at(-1), ['gemini-search', undefined]);
 
   const partial = tool.renderResult(updates[0], { expanded: false, isPartial: true }, theme);
   assert.match(partial.render(80).join('\n'), /first query/);

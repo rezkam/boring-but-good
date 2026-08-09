@@ -3,8 +3,9 @@ import { chmod, lstat, mkdir, open } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+import { browserWSEndpoint, stopChrome } from '@rezkam/browser-tools';
 import { resolveTaskProfile } from '@rezkam/browser-tools';
-import { buildAiChatRequest, runAiChat } from '../../scripts/ai-chat/module.mjs';
+import { buildAiChatRequest, readAiChatBrowserState, runAiChat } from '../../scripts/ai-chat/module.mjs';
 
 export const GEMINI_SEARCH_MODEL = 'gemini-3.6-flash-extended-thinking';
 export const DEFAULT_GEMINI_SEARCH_TIMEOUT_SECONDS = 300;
@@ -180,6 +181,18 @@ export async function queryGeminiWithAiChat(prompt, { timeoutSeconds = DEFAULT_G
   if (!temporary) throw new Error('Gemini did not verify temporary chat mode.');
 
   return { text, model, temporary, modelUiVerified };
+}
+
+// ai-chat closes its browser at the end of a run, which cannot happen when the host process
+// exits mid-search. The recorded owner token is what makes that leftover browser recoverable.
+export async function stopOwnedAiChatBrowser() {
+  const state = readAiChatBrowserState();
+  const port = state?.port;
+  const ownerToken = state?.ownerToken;
+  if (!port || !ownerToken || state.status === 'stopped') return false;
+  if (!(await browserWSEndpoint(port))) return false;
+  const result = stopChrome({ port, ownerToken, clean: false });
+  return result?.status === 'stopped' || result?.status === 'already-gone';
 }
 
 export async function runGeminiSearchBatch(params = {}, deps = {}) {

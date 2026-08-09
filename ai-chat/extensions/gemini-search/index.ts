@@ -5,6 +5,7 @@ import { Type, type Static } from 'typebox';
 import {
   DEFAULT_GEMINI_SEARCH_TIMEOUT_SECONDS,
   runGeminiSearchBatch,
+  stopOwnedAiChatBrowser,
 } from './runtime.mjs';
 
 const geminiSearchSchema = Type.Object({
@@ -74,10 +75,19 @@ function abortError(message: string): Error {
 }
 
 export function createGeminiSearchExtension(
-  { runBatch = runGeminiSearchBatch as RunBatch }: { runBatch?: RunBatch } = {},
+  {
+    runBatch = runGeminiSearchBatch as RunBatch,
+    stopOwnedBrowser = stopOwnedAiChatBrowser,
+  }: { runBatch?: RunBatch; stopOwnedBrowser?: () => Promise<unknown> } = {},
 ): ExtensionFactory {
   return function geminiSearchExtension(pi: ExtensionAPI) {
     let queue: Promise<unknown> = Promise.resolve();
+    let searchesInFlight = 0;
+
+    pi.on('session_shutdown', async () => {
+      if (searchesInFlight === 0) return;
+      await stopOwnedBrowser();
+    });
     const runExclusive = <T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> => {
       const start = () => {
         if (signal?.aborted) throw abortError('Gemini search was cancelled before it acquired the browser.');
@@ -100,13 +110,6 @@ export function createGeminiSearchExtension(
       });
     };
 
-    const clearActivity = (ctx: { hasUI?: boolean; ui: { setStatus(key: string, value?: string): void; setWidget?(key: string, value?: string[]): void } }) => {
-      if (!ctx.hasUI) return;
-      ctx.ui.setStatus('gemini-search', undefined);
-      ctx.ui.setWidget?.('gemini-search', undefined);
-    };
-
-    pi.on('session_shutdown', (_event, ctx) => clearActivity(ctx));
 
     pi.registerTool<typeof geminiSearchSchema, GeminiSearchDetails>({
       name: 'gemini_search',
@@ -121,47 +124,29 @@ export function createGeminiSearchExtension(
       parameters: geminiSearchSchema,
       executionMode: 'sequential',
 
-      async execute(_toolCallId, params, signal, onUpdate, ctx) {
-        const states = new Map<number, GeminiSearchProgress>();
-        const paint = () => {
-          if (!ctx.hasUI) return;
-          const theme = ctx.ui.theme;
-          const entries = [...states.values()].sort((left, right) => left.index - right.index);
-          const done = entries.filter(entry => entry.phase !== 'searching').length;
-          const total = entries[0]?.total ?? 1;
-          ctx.ui.setStatus('gemini-search', `gemini search ${done}/${total}`);
-          if (!theme) return;
-          ctx.ui.setWidget?.('gemini-search', [
-            theme.fg('accent', `─── Gemini Search ${'─'.repeat(24)}`),
-            ...entries.map(entry => {
-              const label = entry.query.length > 44 ? `${entry.query.slice(0, 41)}...` : entry.query;
-              if (entry.phase === 'searching') return `  ${theme.fg('accent', '⋯')} ${theme.fg('muted', label)}`;
-              if (entry.phase === 'complete') return `  ${theme.fg('success', '✔')} ${theme.fg('muted', label)}`;
-              if (entry.phase === 'failed') return `  ${theme.fg('error', '✖')} ${theme.fg('muted', label)}`;
-              return `  ${theme.fg('warning', '■')} ${theme.fg('muted', label)}`;
-            }),
-          ]);
-        };
+      async execute(_toolCallId, params, signal, onUpdate) {
+        return runExclusive(async () => {
+          searchesInFlight += 1;
+          try {
+            return await runSearch();
+          } finally {
+            searchesInFlight -= 1;
+          }
+        }, signal);
 
-        try {
-          return await runExclusive(async () => {
-            const batch = await runBatch({ ...params, signal }, {
-              onProgress(progress) {
-                states.set(progress.index, progress);
-                paint();
-                onUpdate?.({
-                  content: [{ type: 'text', text: `${progress.phase}: ${progress.query}` }],
-                  details: progress,
-                });
-              },
-            });
-            return {
-              content: [{ type: 'text', text: resultText(batch) }],
-              details: batch,
-            };
-          }, signal);
-        } finally {
-          clearActivity(ctx);
+        async function runSearch() {
+          const batch = await runBatch({ ...params, signal }, {
+            onProgress(progress) {
+              onUpdate?.({
+                content: [{ type: 'text', text: `${progress.phase}: ${progress.query}` }],
+                details: progress,
+              });
+            },
+          });
+          return {
+            content: [{ type: 'text' as const, text: resultText(batch) }],
+            details: batch,
+          };
         }
       },
 
