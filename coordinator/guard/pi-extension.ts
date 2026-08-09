@@ -13,6 +13,7 @@ import { complete, completeSimple } from "@earendil-works/pi-ai/compat";
 import type { Model, ThinkingLevel, UserMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { delimiter as pathDelimiter } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,6 +39,7 @@ import {
 	parseModelPin,
 	findTierClash,
 	parseTierEntries,
+	recordIntegration,
 	renderTiers,
 	withTierList,
 	parseRouteHeader,
@@ -114,6 +116,12 @@ const StartParams = Type.Object({
 const LaneParams = Type.Object({
 	action: Type.Union([Type.Literal("returned"), Type.Literal("integrated"), Type.Literal("done"), Type.Literal("dead")]),
 	key: Type.String({ description: "The ROUTE key of the lane." }),
+	slice: Type.Optional(
+		StringEnum(["done", "retry", "partial"] as const, {
+			description:
+				'Required when integrating a writer lane. "done" finishes a slice and advances the count, "retry" re-ran a slice already counted, "partial" landed work the slice still needs more of.',
+		}),
+	),
 	note: Type.Optional(Type.String()),
 });
 
@@ -898,7 +906,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		name: "coordinator_lane",
 		label: "Coordinator Lane",
 		description:
-			"Record what happened to a dispatched lane. \"returned\" when a writer's work came back, \"integrated\" once you have merged that work into the campaign branch and run the gates yourself, \"done\" to close a read-only review or investigation lane that has reported, \"dead\" when the run died. Open lanes count against the writer cap until they are integrated.",
+			"Record what happened to a dispatched lane. \"returned\" when a writer's work came back, \"integrated\" once you have merged that work into the campaign branch and run the gates yourself, \"done\" to close a read-only review or investigation lane that has reported, \"dead\" when the run died. Integrating a writer lane also records the slice through the required \"slice\" field, so the count cannot drift from the work. Open lanes count against the writer cap until they are integrated.",
 		promptSnippet: "Record a dispatched lane as returned, integrated, or dead",
 		parameters: LaneParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -913,17 +921,32 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 					`lane ${params.key} is a writer, so "done" would free its capacity without recording an integration. Integrate its work into the campaign branch, run the gates yourself, then use "integrated".`,
 				);
 			}
+			// The slice count used to live behind a second tool nothing forced anyone to call, so
+			// it froze while the work continued. Integration is the moment the slice is known.
+			if (params.action === "integrated" && lane.kind === "implement" && params.slice === undefined) {
+				throw new Error(
+					`integrating writer lane ${params.key} also records the slice: pass slice "done" when this finishes a slice, "retry" when it re-ran a slice already counted, or "partial" when the slice needs more work. The count is ${campaign.slicesDone} of ${campaign.slicesTotal}, and review opens on it.`,
+				);
+			}
 			if (params.action === "dead") {
 				campaign.lanes = campaign.lanes.filter((candidate) => candidate !== lane);
 			} else {
 				lane.state = params.action === "done" ? "integrated" : params.action;
 				if (params.note) lane.note = params.note;
 			}
+			if (params.action === "integrated" && lane.kind === "implement" && params.slice) {
+				campaign = { ...campaign, ...recordIntegration(campaign, params.slice) };
+			}
 			recordProgress();
 			persist();
 			updateStatusLine(ctx);
 			return {
-				content: [{ type: "text", text: `lane ${params.key} -> ${params.action}. Open: ${laneSummary(campaign)}` }],
+				content: [
+					{
+						type: "text",
+						text: `lane ${params.key} -> ${params.action}. Slices: ${campaign.slicesDone} of ${campaign.slicesTotal}. Open: ${laneSummary(campaign)}`,
+					},
+				],
 				details: { lanes: campaign.lanes },
 			};
 		},

@@ -8,6 +8,7 @@ import {
 	DEFAULT_TIERS,
 	findTierClash,
 	parseTierEntries,
+	recordIntegration,
 	withTierList,
 	contractPrompt,
 	continuationPrompt,
@@ -1046,4 +1047,24 @@ test("CG023: the goal cannot be parked while the campaign it tracks still has wo
 	assert.match(structure(request({ tool: "update_goal", campaign: allSlices, input: { status: "complete" } })).reason, /\/campaign close/);
 	// And with no campaign the guard is inert, so ordinary goals are untouched.
 	assert.deepEqual(evaluateStructure({ ...request({ tool: "update_goal", input: { status: "blocked" } }), campaign: null }), { allow: true, judge: [] });
+});
+
+test("integrating a writer lane records the slice, because one fact is recorded once", () => {
+	// A live campaign integrated 42 lanes and called set-slices 14 times, so the count froze at
+	// 18 of 31 for twelve hours while the work continued. The writer cap forces the integration
+	// call; nothing forced the second one, so the redundant half decayed exactly as prose does.
+	// Then openReview refused forever, and the ledger cross-check made the honest status block
+	// the refusable one.
+	const live = campaign({ slicesTotal: 4, slicesDone: 0 });
+
+	const done = recordIntegration(live, "done");
+	assert.equal(done.slicesDone, 1, "an integrated slice counts itself");
+
+	// A re-run of a slice already counted must not count twice, which is why the caller says
+	// which it is rather than the guard inferring it from lane names like task-3-gate-r3.
+	assert.equal(recordIntegration({ ...live, slicesDone: 1 }, "retry").slicesDone, 1);
+	assert.equal(recordIntegration({ ...live, slicesDone: 1 }, "partial").slicesDone, 1);
+
+	// The count is a ledger, not a tally that can run past its own total.
+	assert.equal(recordIntegration({ ...live, slicesDone: 4 }, "done").slicesDone, 4);
 });

@@ -116,6 +116,10 @@ what makes the slice cross-layer or long-horizon, not the word "hard". If you ha
 written the row, you have not decided the routing and you are about to default into doing
 everything yourself.
 
+Integrating a writer lane records the slice in the same call: pass `slice: "done"` when it
+finishes a slice, `"retry"` when it re-ran one already counted, `"partial"` when the slice
+still needs work. There is no separate step to forget, because review opens on that count.
+
 Then, once agents return, put the proof in the status block instead of the plan:
 
 ```bash
