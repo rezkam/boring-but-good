@@ -106,6 +106,7 @@ Position one is what the injected contract tells the coordinator to reach for; t
 are accepted, so one provider outage does not stall a campaign on refusals.
 
 ```
+/campaign authorize <scope>                         widen the recorded scope, appended not replaced
 /campaign models                                    show both tables with measured tok/s
 /campaign models gpt                                select every OpenAI default, including the judge
 /campaign models claude                             select every Claude default, including the judge
@@ -154,6 +155,7 @@ enforced table is never something you have to remember.
 | CG016 | An action the guard cannot classify, and work deferred to a scheduler | A read-only action belongs in the guard's management list, named there rather than assumed; a scheduled run starts with no tool call, so no rule can see it |
 | CG018 | A dispatch the judge could not read, including an unavailable judge model | An unread prompt is an unchecked one, so it fails rather than passing by default |
 | (tool error) | Integrating a writer lane without saying what it did to the slice count | The count lived behind a second tool nothing forced anyone to call, so one campaign integrated 42 lanes, called set-slices 14 times, and froze at 18 of 31 for twelve hours |
+| CG024 | Polling CI while slices remain | A campaign spent hours reporting checks 0/14 on a PR whose checks could not pass, and no slice depended on the result |
 | CG023 | Marking the goal blocked or complete while the campaign still has work | A goal extension parked itself after a transport error, which stops the continuation an unattended campaign runs on |
 | CG022 | A routing reason describing work broader than the class it declared | Sustained cross-component ownership was routed as class 1, whose meaning is a complete, mechanical slice; only escalation was ever graded |
 | CG021 | A dispatch asking the harness for a managed worktree | Managed isolation branches from the session working directory rather than the campaign worktree, and puts the child under $TMPDIR at a path that does not exist when the prompt is written, so the named worktree and expected HEAD describe somewhere the child never goes |
