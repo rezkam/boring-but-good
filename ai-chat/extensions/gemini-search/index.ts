@@ -136,7 +136,12 @@ export function createGeminiSearchExtension(
         }, signal);
 
         async function runSearch() {
-          const batch = await runBatch({ ...params, signal }, {
+          const batch = await runBatch({
+            query: params.query,
+            queries: params.queries,
+            timeoutSeconds: params.timeoutSeconds,
+            signal,
+          }, {
             onProgress(progress) {
               onUpdate?.({
                 content: [{ type: 'text', text: `${progress.phase}: ${progress.query}` }],

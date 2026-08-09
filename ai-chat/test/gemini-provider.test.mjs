@@ -93,13 +93,17 @@ function promptFromStreamCall(call) {
   return innerReqList[0][0];
 }
 
-test('Gemini browser-network fallback reuses the authenticated Gemini app page', async () => {
+test('Gemini browser-network fallback preserves an existing Gemini page and uses a dedicated page', async () => {
   const response = {
     url: () => 'https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate',
     request: () => ({ method: () => 'POST' }),
-    text: async () => streamAnswerRaw('answer from reused page'),
+    text: async () => streamAnswerRaw('answer from dedicated page'),
   };
   let closed = false;
+  const borrowedPage = {
+    url: () => 'https://gemini.google.com/app/existing-conversation',
+    async goto() { assert.fail('must not navigate a borrowed Gemini page'); },
+  };
   const page = {
     url: () => 'https://gemini.google.com/app',
     async goto() {},
@@ -116,8 +120,11 @@ test('Gemini browser-network fallback reuses the authenticated Gemini app page',
     async close() { closed = true; },
   };
   const browser = {
-    pages: async () => [page],
-    newPage: async () => assert.fail('must reuse the existing authenticated Gemini page'),
+    pages: async () => [borrowedPage],
+    newPage: async options => {
+      assert.deepEqual(options, { background: true });
+      return page;
+    },
   };
 
   const result = await queryGeminiViaBrowserNetwork(browser, 'browser prompt', 45000, {
@@ -130,9 +137,9 @@ test('Gemini browser-network fallback reuses the authenticated Gemini app page',
     temporary: true,
   });
 
-  assert.equal(result.text, 'answer from reused page');
+  assert.equal(result.text, 'answer from dedicated page');
   assert.equal(result.modelUiVerified, true);
-  assert.equal(closed, false);
+  assert.equal(closed, true);
 });
 
 test('Gemini browser-network fallback captures and parses the complete StreamGenerate response', async () => {
@@ -215,7 +222,10 @@ test('Gemini provider falls back from failed Node replay to a complete browser-n
       url: () => 'https://gemini.google.com/app',
       cookies: async () => [{ name: '__Secure-1PSID', value: 'psid' }],
     }],
-    newPage: async () => assert.fail('must reuse the authenticated Gemini app page'),
+    newPage: async options => {
+      assert.deepEqual(options, { background: true });
+      return networkPage;
+    },
   };
   const stdout = [];
 
