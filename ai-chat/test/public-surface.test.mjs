@@ -94,6 +94,27 @@ test('public AI Chat files exclude agent attribution', () => {
   assert.deepEqual(attributionLeaks, []);
 });
 
+test('AI Chat consumes Browser Tools only through the published package', () => {
+  const siblingImport = new RegExp(['(?:\\.\\.\\/)+', 'browser-tools', '\\/'].join(''));
+  const sourceScriptCommand = new RegExp(['browser-tools', '\\/scripts\\/'].join(''));
+  const siblingContract = new RegExp(['(?:sibling.{0,40}browser[ -]tools|browser[ -]tools.{0,40}sibling)'].join(''), 'i');
+  const sourceEntryPoint = new RegExp(['`(?:start|stop|config)', '\\.mjs'].join(''), 'i');
+  const offenders = publicFiles()
+    .filter(file => relative(ROOT, file) !== 'test/public-surface.test.mjs')
+    .filter(file => {
+      const text = readFileSync(file, 'utf-8');
+      return siblingImport.test(text)
+        || sourceScriptCommand.test(text)
+        || siblingContract.test(text)
+        || sourceEntryPoint.test(text);
+    })
+    .map(file => relative(ROOT, file));
+  assert.deepEqual(offenders, []);
+
+  const packageJson = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf-8'));
+  assert.equal(packageJson.dependencies?.['@rezkam/browser-tools'], '^1.0.1');
+});
+
 test('public ChatGPT contract has no stale local or rewrite claims', () => {
   const docs = ['SKILL.md', 'references/ai-chat.md', 'references/providers.md', 'references/transport.md', 'references/orchestration.md', 'references/evaluation.md']
     .map(file => readFileSync(join(ROOT, file), 'utf8')).join('\n');

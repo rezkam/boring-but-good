@@ -6,5 +6,8 @@
     "test": "node --test test/*.mjs",
     "coverage": "node --test --experimental-test-coverage test/*.mjs",
     "validate": "npm test"
+  },
+  "dependencies": {
+    "@rezkam/browser-tools": "^1.0.1"
   }
 }

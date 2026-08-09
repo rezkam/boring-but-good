@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { readManagedStateForPort } from '../../../../browser-tools/scripts/browser-control.mjs';
+import { readManagedStateForPort } from '@rezkam/browser-tools';
 import { urlHasAllowedHostname } from './shared.mjs';
 
 import {
@@ -272,7 +272,7 @@ async function getGeminiCookieContext({ browser, request }) {
       return { ...managedCookieContext, source: COOKIE_SOURCE_MANAGED_BROWSER, chromeProfile: null };
     }
     if (source === COOKIE_SOURCE_MANAGED_BROWSER) {
-      throw new Error('[gemini] Could not read Google cookies from the Browser Tools managed browser. Start Browser Tools with the configured Gemini Chrome profile, for example browser-tools/scripts/start.mjs --task gemini --sync. If managed Chrome is already running from a stale copy, stop it with --clean, restart with --sync, and retry. You can also pass --cookie-source chrome-profile --chrome-profile <profile-folder> for the direct profile fallback.');
+      throw new Error('[gemini] Could not read Google cookies from the Browser Tools managed browser. Start Browser Tools with the configured Gemini Chrome profile, for example browser-tools start --task gemini --sync. If managed Chrome is already running from a stale copy, stop it with --clean, restart with --sync, and retry. You can also pass --cookie-source chrome-profile --chrome-profile <profile-folder> for the direct profile fallback.');
     }
   }
 

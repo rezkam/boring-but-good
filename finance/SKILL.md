@@ -1,7 +1,7 @@
 ---
 name: finance
 description: "Fetch market and macroeconomic data through browser-authenticated finance sources using Browser Tools managed Chrome. Use this skill whenever the user asks for prices, tickers, commodities, stock indexes, currencies, bonds, market snapshots, Yahoo Finance quotes, Perplexity Finance, Trading Economics, country indicators, forecasts, country-list comparisons, GDP, inflation, unemployment, debt, government spending, or other finance or macro data. Prefer this over generic browser scraping for finance questions."
-compatibility: "Requires the browser-tools skill as a sibling checkout, Node.js 20+, Browser Tools npm dependencies, and network access. Some providers need a logged-in Chrome profile copied by Browser Tools."
+compatibility: "Requires @rezkam/browser-tools from package.json, Node.js 20+, installed npm dependencies, and network access. Some providers need a logged-in Chrome profile copied by Browser Tools."
 ---
 
 # Finance
@@ -23,11 +23,11 @@ Read [references/tradingeconomics.md](references/tradingeconomics.md) for Tradin
 
 ## Browser Tools dependency
 
-Start a Browser Tools managed browser first when a helper needs live browser access. Use the sibling Browser Tools `start.mjs` command with `--task finance --sync`, then export the owner token it prints.
+Start a Browser Tools managed browser first when a helper needs live browser access. Use `browser-tools start --task finance --sync`, then export the owner token it prints.
 
 Use `--sync` when current cookies matter or a provider looks logged out. Use the reported `--port` when Browser Tools did not use the default port.
 
-Finance helpers import Browser Tools at runtime from the sibling `browser-tools` skill. They do not own Chrome lifecycle, profile discovery, cache directories, or DevTools safety.
+Finance helpers import Browser Tools at runtime from the `@rezkam/browser-tools` package. They do not own Chrome lifecycle, profile discovery, cache directories, or DevTools safety.
 
 ## Commands
 
@@ -58,7 +58,7 @@ scripts/tradingeconomics-country-list.mjs --indicator government-spending-to-gdp
 - Use `--json` for Trading Economics tasks and return a JSON object to the user.
 - Include `source`, `captured_at`, source URL, row counts or coverage, missing country information, and any provider errors in the final answer.
 - If the full output is too large, save it to `/tmp/...json` and return `full_json_path` plus a compact summary.
-- Stop Browser Tools with its sibling `stop.mjs` command and `--clean --port <reported port> --owner-token <token>` if you started it for the task.
+- Stop Browser Tools with `browser-tools stop --clean --port <reported port> --owner-token <token>` if you started it for the task.
 
 ## Local config and cache
 

@@ -1,7 +1,7 @@
 export async function loadBrowserToolsRuntime() {
   const [browserControl, resourceHelper] = await Promise.all([
-    import('../../browser-tools/scripts/browser-control.mjs'),
-    import('../../browser-tools/scripts/resource-helper.mjs'),
+    import('@rezkam/browser-tools'),
+    import('@rezkam/browser-tools/resource-helper.mjs'),
   ]);
 
   return {
