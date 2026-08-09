@@ -61,6 +61,8 @@ export interface Campaign {
 	lanes: Lane[];
 	routes: RouteHeader[];
 	steers: Record<string, number>;
+	/** Capabilities the user granted by name, kept structured so a refusal can check them. */
+	grants?: { forcePush?: string[] };
 	lastStatusAt: number | null;
 	/** Why the most recent block was not counted, so the refusal can say it instead of guessing. */
 	lastStatusProblem?: string | null;
@@ -234,6 +236,47 @@ export function amendAuthorization(campaign: Campaign, addition: string): Campai
 	const extra = addition.trim();
 	if (!extra) return campaign;
 	return { ...campaign, authorized: `${campaign.authorized}; ${extra}` };
+}
+
+/**
+ * Grant a force push on one exact branch.
+ *
+ * Kept as a branch list rather than read out of the authorization prose, because deciding
+ * whether a sentence permits rewriting published history is exactly the judgement this
+ * guard refuses to make with a regex. The user names the branch; the guard compares
+ * strings.
+ */
+export function grantForcePush(campaign: Campaign, branch: string): Campaign {
+	const name = branch.trim().replace(/^refs\/heads\//, "");
+	if (!name) return campaign;
+	const current = campaign.grants?.forcePush ?? [];
+	if (current.includes(name)) return campaign;
+	return { ...campaign, grants: { ...campaign.grants, forcePush: [...current, name] } };
+}
+
+/**
+ * The branches a push command would write, as written on the command line.
+ *
+ * Returns null when the destinations cannot be read, which is treated as ungranted: a push
+ * whose targets are unclear is not a push that was approved.
+ */
+export function forcePushTargets(command: string): string[] | null {
+	const match = /(?:^|[\s;&|(])git(?:\s+(?:-[cC]\s+\S+|--\S+|-[^-\s]\S*))*\s+push\s+([^;&|]*)/i.exec(command);
+	if (!match) return null;
+	const args = (match[1] ?? "").trim().split(/\s+/).filter(Boolean);
+	const positional = args.filter((arg) => !arg.startsWith("-"));
+	// The first positional is the remote; everything after it is a refspec.
+	const refspecs = positional.slice(1);
+	if (refspecs.length === 0) return null;
+	const targets: string[] = [];
+	for (const spec of refspecs) {
+		const bare = spec.replace(/^\+/, "");
+		const destination = bare.includes(":") ? bare.slice(bare.lastIndexOf(":") + 1) : bare;
+		const name = destination.replace(/^refs\/heads\//, "").trim();
+		if (!name) return null;
+		targets.push(name);
+	}
+	return targets;
 }
 
 export function laneSummary(campaign: Campaign): string {
@@ -676,7 +719,7 @@ function checkBash(command: string, campaign: Campaign | null): GuardDecision {
 	const discardsTree =
 		"discards uncommitted work with no prompt, and a backup branch does not save it because a branch only captures commits. To move a branch pointer use git switch -C <branch> <sha> or git update-ref, which refuse rather than discard. If you truly need a clean tree, commit or export first and say so in the status block.";
 	const rewritesHistory =
-		"rewrites published history, which is outside the recorded authorization and can destroy work that is not yours. Ask the user before any force push, naming the exact branch.";
+		'rewrites published history, which is outside the recorded authorization and can destroy work that is not yours. Ask the user before any force push, naming the exact branch. Once they approve it, they record it with "/campaign authorize force-push <branch>"; do not close and restart the campaign to widen your own scope, which throws away the ledger review opens on.';
 	const destructive: Array<[RegExp, string, string]> = [
 		[new RegExp(`${git}reset\\s+--hard`, "i"), "git reset --hard", discardsTree],
 		[new RegExp(`${git}stash(\\s|$)`, "i"), "git stash", discardsTree],
@@ -692,7 +735,20 @@ function checkBash(command: string, campaign: Campaign | null): GuardDecision {
 		],
 	];
 	for (const [pattern, label, reason] of destructive) {
-		if (pattern.test(command)) return deny("CG015", `${label} ${reason}`);
+		if (!pattern.test(command)) continue;
+		// A force push the user granted by branch name is the one case that passes, and only
+		// when every ref this command writes is on that list: a second refspec alongside the
+		// granted one is a different push.
+		if (reason === rewritesHistory && campaign?.grants?.forcePush?.length) {
+			const targets = forcePushTargets(command);
+			const allowed = campaign.grants.forcePush;
+			if (targets && targets.length > 0 && targets.every((target) => allowed.includes(target))) continue;
+			return deny(
+				"CG015",
+				`${label} ${reason} Force push is granted here for ${allowed.join(", ")}, and this command writes ${targets?.join(", ") ?? "refs that cannot be read from the command line"}.`,
+			);
+		}
+		return deny("CG015", `${label} ${reason}`);
 	}
 	return { allow: true };
 }

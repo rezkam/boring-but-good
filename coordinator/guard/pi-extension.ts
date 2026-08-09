@@ -39,6 +39,7 @@ import {
 	parseModelPin,
 	findTierClash,
 	amendAuthorization,
+	grantForcePush,
 	parseTierEntries,
 	recordIntegration,
 	renderTiers,
@@ -997,7 +998,8 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 
 			return suggest([
 				{ value: "", label: "campaign", description: "show the contract, or the armed state" },
-				{ value: "authorize ", label: "authorize", description: "widen the recorded scope, for example a force-push you just approved" },
+				{ value: "authorize force-push ", label: "authorize force-push", description: "grant a force push on one exact branch" },
+				{ value: "authorize ", label: "authorize", description: "widen the recorded scope in words" },
 				{ value: "models", label: "models", description: "show or set the tier lists" },
 				{ value: "judge", label: "judge", description: "show or set the prompt judge" },
 				{ value: "arm", label: "arm", description: "turn enforcement on" },
@@ -1052,12 +1054,20 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 							break;
 						}
 						const addition = args.trim().slice("authorize".length).trim();
+						if (!addition) {
+							show(
+								`Usage: /campaign authorize <scope>\n       /campaign authorize force-push <branch>\n\nCurrent authorization:\n${campaign.authorized}\nForce push granted for: ${campaign.grants?.forcePush?.join(", ") || "nothing"}`,
+							);
+							break;
+						}
+						// Rewriting published history is checked against a branch list rather than read
+						// out of the prose, so the one grant that needs a machine answer gets one.
+						const forcePush = /^force[- ]push\s+(\S+)$/i.exec(addition);
+						campaign = amendAuthorization(campaign, addition);
+						if (forcePush?.[1]) campaign = grantForcePush(campaign, forcePush[1]);
+						persist();
 						show(
-							addition
-								? ((campaign = amendAuthorization(campaign, addition)),
-									persist(),
-									`Authorization widened. It now reads:\n\n${campaign.authorized}\n\nEnforced from the next tool call.`)
-								: `Usage: /campaign authorize <scope>\n\nCurrent authorization:\n${campaign.authorized}`,
+							`Authorization widened. It now reads:\n\n${campaign.authorized}\n\nForce push granted for: ${campaign.grants?.forcePush?.join(", ") || "nothing"}\n\nEnforced from the next tool call.`,
 						);
 						break;
 					}
