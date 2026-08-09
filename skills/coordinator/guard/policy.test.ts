@@ -4,6 +4,7 @@ import { test } from "node:test";
 import type { PromptVerdict } from "./judge.ts";
 import {
 	checkWriterCap,
+	continuationDecision,
 	DEFAULT_TIERS,
 	findTierClash,
 	parseTierEntries,
@@ -101,6 +102,7 @@ function verdict(overrides: Partial<PromptVerdict> = {}): PromptVerdict {
 		unrenderedPlaceholders: [],
 		classJustification: "substantive",
 		modelUnavailability: "absent",
+		describedScope: "mechanical",
 		...overrides,
 	};
 }
@@ -265,6 +267,19 @@ test("CG008: launches are refused while the status block is stale, management ac
 
 	assert.deepEqual(evaluateStructure({ ...stale, input: { action: "status" } }), { allow: true, judge: [] });
 	assert.deepEqual(evaluateStructure({ ...stale, input: { action: "stop", runId: "abc" } }), { allow: true, judge: [] });
+});
+
+test("CG008 reports the exact reason the latest status block was rejected", () => {
+	const exact = "missing required field WORKTREE";
+	const staleCampaign = campaign({ lastStatusProblem: exact });
+	const { code, reason } = structure(request({
+		campaign: staleCampaign,
+		now: 1_000 + 6 * 60_000,
+		input: launch({ async: true }),
+	}));
+	assert.equal(code, "CG008");
+	assert.match(reason, /missing required field WORKTREE/);
+	assert.doesNotMatch(reason, /numbers disagreed/, "a missing row is not a numeric disagreement");
 });
 
 test("CG010: a route key cannot be reused while its lane is still open", () => {
@@ -947,4 +962,57 @@ test("the Claude preset is Claude-only and preserves every class's intended effo
 			2: ["claude-bridge/claude-opus-5:xhigh"],
 		},
 	});
+});
+
+test("CG022: work the reason describes as broader than its declared class is refused", () => {
+	// A campaign routed sustained cross-component UI ownership as class 1, whose whole meaning
+	// is "complete, mechanical slice". Nothing checked that, because the only graded reason was
+	// escalation: the table could refuse reaching up and never noticed reaching down.
+	const under = "ROUTE: s1-parser | class 1 | claude-bridge/claude-sonnet-5:medium | broad cross-component ownership, virtualization, interaction and accessibility work needs sustained context";
+	const req = request({ input: launch({ task: implementTask(under) }) });
+	const { code, reason } = denyJudged(req, [verdict({ describedScope: "cross-layer" })]);
+	assert.equal(code, "CG022");
+	assert.match(reason, /class 3/);
+
+	// Declaring the class the work actually needs is allowed.
+	assert.deepEqual(judged(request({ input: launch({ task: implementTask(under) }) }), [verdict({ describedScope: "mechanical" })]), { allow: true });
+
+	// Reaching up is CG012's job and stays there, so the two rules cannot double-refuse.
+	const top = "ROUTE: s1-parser | class 3 | claude-bridge/claude-opus-5:medium | one file, one exact spec";
+	const highReq = request({ input: launch({ model: "claude-bridge/claude-opus-5:medium", task: implementTask(top) }) });
+	assert.deepEqual(judged(highReq, [verdict({ describedScope: "mechanical" })]), { allow: true });
+});
+
+test("a provider error does not stop a campaign, an abort does", () => {
+	// goal.ts parks its objective when a turn ends in an error, and this guard's own
+	// continuation returned on the same condition. One transport failure then ends the
+	// unattended campaign silently, which is the failure both were built to prevent.
+	const live = campaign({ lanes: [{ key: "s1", kind: "implement", model: "m:high", startedAt: 1, state: "running" }] });
+	assert.equal(continuationDecision(live, { stopReason: "error", consecutiveErrors: 1 }).proceed, true);
+	assert.equal(continuationDecision(live, { stopReason: "aborted", consecutiveErrors: 0 }).proceed, false);
+	assert.equal(continuationDecision(live, { stopReason: "endTurn", consecutiveErrors: 0 }).proceed, true);
+
+	// It must still give up rather than hammer a provider that keeps failing.
+	const exhausted = continuationDecision(live, { stopReason: "error", consecutiveErrors: 3 });
+	assert.equal(exhausted.proceed, false);
+	assert.match(exhausted.reason ?? "", /3 consecutive/);
+});
+
+test("CG023: the goal cannot be parked while the campaign it tracks still has work", () => {
+	// The campaign is the goal. A goal extension that marks itself blocked after a tool error
+	// stops the continuation that carries an unattended campaign, so the transition is refused
+	// while the ledger still says there is work.
+	const live = campaign({ slicesDone: 2, slicesTotal: 4 });
+	const blocked = structure(request({ tool: "update_goal", campaign: live, input: { status: "blocked" } }));
+	assert.equal(blocked.code, "CG023");
+	assert.match(blocked.reason, /2 of 4/);
+
+	const complete = structure(request({ tool: "update_goal", campaign: live, input: { status: "complete" } }));
+	assert.equal(complete.code, "CG023");
+
+	// Once the ledger agrees the work is finished, the transition is the coordinator's to make.
+	const finished = campaign({ slicesDone: 4, slicesTotal: 4 });
+	assert.deepEqual(evaluateStructure(request({ tool: "update_goal", campaign: finished, input: { status: "complete" } })), { allow: true, judge: [] });
+	// And with no campaign the guard is inert, so ordinary goals are untouched.
+	assert.deepEqual(evaluateStructure({ ...request({ tool: "update_goal", input: { status: "blocked" } }), campaign: null }), { allow: true, judge: [] });
 });
