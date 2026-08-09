@@ -22,6 +22,7 @@ import { findRoleShadows } from "./shadows.ts";
 import { rateFor, readThroughput, reorderByThroughput, type Throughput } from "./throughput.ts";
 
 import {
+	continuationDecision,
 	continuationPrompt,
 	contractPrompt,
 	checkWriterCap,
@@ -165,6 +166,8 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 	let tiers: TierLists = DEFAULT_TIERS;
 	const verdictCache = new Map<string, PromptVerdict>();
 	let noProgressContinuations = 0;
+	/** Errored turns in a row, so a failing provider stops the campaign but one blip does not. */
+	let consecutiveErrors = 0;
 	let lastContinuationAt = 0;
 	let continuationQueued = false;
 	let continuationTimer: ReturnType<typeof setTimeout> | null = null;
@@ -726,7 +729,11 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		if (!/^[ \t>*-]*CAMPAIGN\b/im.test(assistantText)) return;
 		const block = readStatusBlock(assistantText);
 		if (!block.ok) {
+			const problem = `it is missing required field${block.missing.length > 1 ? "s" : ""} ${block.missing.join(", ")}.`;
+			campaign.lastStatusProblem = problem;
+			persist();
 			notify(ctx, `Status block missing ${block.missing.join(", ")}, not counted as fresh`, "warning");
+			notice(`Coordinator guard: status block not counted, because ${problem}`);
 			return;
 		}
 		// A block that contradicts the ledger does not refresh it. The next launch then fails
@@ -734,10 +741,13 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		// let narration write the state that gates review.
 		const disagreement = statusBlockDisagreement(block, campaign);
 		if (disagreement) {
+			campaign.lastStatusProblem = disagreement;
+			persist();
 			notify(ctx, `Status block not counted as fresh: ${disagreement}`, "warning");
 			notice(`Coordinator guard: status block not counted, because ${disagreement}`);
 			return;
 		}
+		campaign.lastStatusProblem = null;
 		campaign.lastStatusAt = Date.now();
 		persist();
 		updateStatusLine(ctx);
@@ -759,7 +769,14 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		const last = [...event.messages].reverse().find((message) => message.role === "assistant") as
 			| { stopReason?: string }
 			| undefined;
-		if (last?.stopReason === "aborted" || last?.stopReason === "error") return;
+		consecutiveErrors = last?.stopReason === "error" ? consecutiveErrors + 1 : 0;
+		const carry = continuationDecision(campaign, { stopReason: last?.stopReason, consecutiveErrors });
+		if (!carry.proceed) {
+			if (last?.stopReason === "error") {
+				notify(ctx, `coordinator-guard: campaign not continued, ${carry.reason}. Use /campaign resume.`, "warning");
+			}
+			return;
+		}
 
 		const wait = Math.max(0, CONTINUATION_INTERVAL_MS - (Date.now() - lastContinuationAt));
 		continuationTimer = setTimeout(() => {

@@ -13,6 +13,7 @@ const COMPLETE = {
 	unrenderedPlaceholders: [],
 	classJustification: "substantive",
 	modelUnavailability: "absent",
+	describedScope: "mechanical",
 };
 
 function answer(overrides: Record<string, unknown> = {}): string {
@@ -43,6 +44,7 @@ test("parseVerdict fails closed on anything it cannot read whole", () => {
 		[answer({ coordinatorGitWork: "merge" }), "coordinatorGitWork"],
 		[answer({ classJustification: "great" }), "classJustification"],
 		[answer({ modelUnavailability: "maybe" }), "modelUnavailability"],
+		[answer({ describedScope: "enormous" }), "describedScope"],
 		[answer({ forbidsPush: "yes" }), "must be booleans"],
 		[answer({ unrenderedPlaceholders: "none" }), "must be an array"],
 		[answer({ worktree: 7 }), "worktree must be"],
