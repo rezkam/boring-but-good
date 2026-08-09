@@ -1941,6 +1941,11 @@ export function stopChrome({ port = DEFAULT_PORT, clean = false, dryRun = false,
         if (status === 'failed') {
           error = new Error('Managed Chrome remained alive after SIGKILL');
         }
+      } else if (killSafety.reason === 'process-not-found' && !processExists(pid)) {
+        // Chrome can exit after the final SIGTERM wait check and before the safety recheck obtains
+        // its command line. It is then safe to complete normal already-gone cleanup, but only after
+        // independently confirming that the PID has not survived or been recycled.
+        status = 'already-gone';
       } else {
         status = 'failed';
         error = new Error(`Refusing SIGKILL after failed safety recheck: ${killSafety.reason}`);
