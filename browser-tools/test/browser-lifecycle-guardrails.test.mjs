@@ -416,6 +416,97 @@ Date.now = () => realNow() + (offset += 500);
   });
 });
 
+test('stop CLI cleans up when Chrome exits between the SIGTERM wait and safety recheck', () => {
+  withTempCache((tmp) => {
+    const port = 9339;
+    const ownerToken = 'post-wait-owner';
+    const managedToken = 'post-wait-managed-token';
+    const userDataDir = join(tmp, `chrome-data-${port}`);
+    const args = [
+      `--remote-debugging-port=${port}`,
+      `--user-data-dir=${userDataDir}`,
+      `--pi-browser-tools-managed=${managedToken}`,
+    ];
+    const browser = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', '--', ...args], { stdio: 'ignore' });
+    const binDir = join(tmp, 'bin');
+    const commandSeen = join(tmp, 'initial-command-seen');
+    mkdirSync(userDataDir);
+    mkdirSync(binDir);
+    writeFileSync(join(tmp, `chrome-${port}.pid`), String(browser.pid));
+    writeFileSync(join(tmp, `chrome-${port}.json`), JSON.stringify({
+      managedBy: 'browser-tools',
+      pid: browser.pid,
+      port,
+      userDataDir,
+      managedToken,
+      ownerId: 'post-wait-test',
+      ownerTokenHash: ownerTokenHash(ownerToken),
+      args,
+    }));
+    writeFileSync(join(binDir, 'ps'), `#!/bin/sh
+if [ "$4" = "command=" ]; then
+  if [ -f "$BROWSER_TOOLS_TEST_PS_COMMAND_SEEN" ]; then exit 0; fi
+  : > "$BROWSER_TOOLS_TEST_PS_COMMAND_SEEN"
+  printf '%s\\n' "$BROWSER_TOOLS_TEST_PS_COMMAND"
+  exit 0
+fi
+if [ "$4" = "state=" ]; then printf 'S\\n'; exit 0; fi
+exec /bin/ps "$@"
+`, { mode: 0o755 });
+    const raceModule = join(tmp, 'exit-after-sigterm-wait.mjs');
+    writeFileSync(raceModule, `
+const targetPid = Number(process.env.BROWSER_TOOLS_TEST_RACE_PID);
+const realKill = process.kill;
+let sentTerm = false;
+let clockCalls = 0;
+process.kill = (pid, signal) => {
+  if (pid !== targetPid) return realKill(pid, signal);
+  if (signal === 'SIGTERM') { sentTerm = true; return true; }
+  if (signal === 0) {
+    clockCalls += 1;
+    if (clockCalls <= 2) return true;
+    const error = new Error('process exited');
+    error.code = 'ESRCH';
+    throw error;
+  }
+  return realKill(pid, signal);
+};
+const realNow = Date.now;
+let waitClockCalls = 0;
+Date.now = () => {
+  if (!sentTerm) return realNow();
+  waitClockCalls += 1;
+  return realNow() + (waitClockCalls > 2 ? 3000 : 0);
+};
+Atomics.wait = () => 'timed-out';
+`);
+
+    try {
+      const stopScript = new URL('../scripts/stop.mjs', import.meta.url).pathname;
+      const result = spawnSync(process.execPath, [stopScript, '--port', String(port), '--clean'], {
+        encoding: 'utf-8',
+        env: {
+          ...process.env,
+          PATH: `${binDir}:${process.env.PATH}`,
+          BROWSER_TOOLS_CACHE_DIR: tmp,
+          BROWSER_TOOLS_OWNER_TOKEN: ownerToken,
+          BROWSER_TOOLS_TEST_RACE_PID: String(browser.pid),
+          BROWSER_TOOLS_TEST_PS_COMMAND_SEEN: commandSeen,
+          BROWSER_TOOLS_TEST_PS_COMMAND: `${process.execPath} ${args.join(' ')}`,
+          NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --import=${raceModule}`.trim(),
+        },
+      });
+      assert.equal(result.status, 0, 'a confirmed post-wait exit must be successful');
+      assert.match(result.stdout, /was already gone/);
+      assert.ok(!existsSync(join(tmp, `chrome-${port}.pid`)), 'a confirmed exit removes the PID file');
+      assert.ok(!existsSync(join(tmp, `chrome-${port}.json`)), 'a confirmed exit removes managed state');
+      assert.ok(!existsSync(userDataDir), '--clean removes the clone after a confirmed exit');
+    } finally {
+      try { process.kill(browser.pid, 'SIGKILL'); } catch {}
+    }
+  });
+});
+
 test('stopChrome treats a directly spawned zombie as exited', () => {
   withTempCache((tmp) => {
     const port = 9338;
