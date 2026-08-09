@@ -17,7 +17,7 @@
  * and two of them broke on this guard's own vocabulary. See judge.ts.
  */
 
-import type { JudgedKind, PromptVerdict } from "./judge.ts";
+import type { DescribedScope, JudgedKind, PromptVerdict } from "./judge.ts";
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
@@ -62,6 +62,8 @@ export interface Campaign {
 	routes: RouteHeader[];
 	steers: Record<string, number>;
 	lastStatusAt: number | null;
+	/** Why the most recent block was not counted, so the refusal can say it instead of guessing. */
+	lastStatusProblem?: string | null;
 	startedAt: number;
 }
 
@@ -163,8 +165,35 @@ export function newCampaign(init: {
 		routes: [],
 		steers: {},
 		lastStatusAt: init.startedAt,
+		lastStatusProblem: null,
 		startedAt: init.startedAt,
 	};
+}
+
+/** How many consecutive errored turns a campaign tolerates before it stops continuing itself. */
+export const MAX_CONSECUTIVE_ERRORS = 3;
+
+/**
+ * Whether the campaign should continue itself after a turn ends.
+ *
+ * The campaign is the goal, and a goal that parks itself on the first transport error ends
+ * the unattended run it exists to carry. A provider failure is not a decision, so it is
+ * retried; a deliberate abort is a decision, so it stops. Repeated failures stop too,
+ * because continuing into a provider that keeps refusing is not progress.
+ */
+export function continuationDecision(
+	campaign: Campaign,
+	turn: { stopReason?: string; consecutiveErrors: number },
+): { proceed: boolean; reason?: string } {
+	if (campaign.status === "closed") return { proceed: false, reason: "the campaign is closed" };
+	if (turn.stopReason === "aborted") return { proceed: false, reason: "the turn was aborted, which is a decision rather than a failure" };
+	if (turn.stopReason === "error") {
+		if (turn.consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+			return { proceed: false, reason: `${turn.consecutiveErrors} consecutive turns ended in an error, so the provider is failing rather than the campaign progressing` };
+		}
+		return { proceed: true, reason: `turn ${turn.consecutiveErrors} of ${MAX_CONSECUTIVE_ERRORS} after a provider error` };
+	}
+	return { proceed: true };
 }
 
 export function laneSummary(campaign: Campaign): string {
@@ -216,6 +245,11 @@ Slices: ${campaign.slicesDone} done of ${campaign.slicesTotal}
 Open lanes: ${laneSummary(campaign)}
 Last status block: ${staleMinutes === null ? "never" : `${staleMinutes} minutes ago`}
 
+This campaign is the goal. It continues across turns and survives a provider error, so a
+failed turn is retried rather than treated as an ending. Do not park it: marking a goal
+blocked or complete while slices remain or lanes are open is refused, and the way to stop
+deliberately is /campaign close.
+
 AUTHORIZED      ${campaign.authorized}
 NOT AUTHORIZED  merge; close or reopen PRs; publish releases; touch production; force-push over shared history; delete outside the named scope
 
@@ -228,7 +262,9 @@ These are enforced at the tool boundary, not by your memory of them. A dispatch 
 ${tierTable(tiers)}
 - Every launch opens with a routing header, and its model must match what the call carries:
   ROUTE: <key> | class <1|2|3> | <provider/model:effort> | <why this class>
-  Class 3 implementation needs a real justification, not the word "complex".
+  Class 3 implementation needs a real justification, not the word "complex", and a reason
+  describing broader work than its class allows is refused too: class 1 is a complete,
+  mechanical slice, class 2 is integration work, class 3 is cross-layer or long-horizon.
 - Review is a separate table with its own two classes, declared as "review 1" or "review 2",
   never an implementation class:
 ${reviewTable(tiers)}
@@ -1060,7 +1096,7 @@ function checkCampaignAgent(agent: string | undefined): GuardDecision {
  * never shown. State refusals are excluded: the fix there is to do something else first,
  * and it is already named in the reason.
  */
-const SHAPE_CODES = new Set(["CG002", "CG003", "CG004", "CG005", "CG009", "CG012", "CG013", "CG017", "CG019", "CG021"]);
+const SHAPE_CODES = new Set(["CG002", "CG003", "CG004", "CG005", "CG009", "CG012", "CG013", "CG017", "CG019", "CG021", "CG022"]);
 
 function dispatchContract(campaign: Campaign, agent: string | undefined, tiers: TierLists): string {
 	return [
@@ -1124,6 +1160,23 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 		if (!campaign && !request.armed) return { allow: true, judge: [] };
 		const verdict = checkBash(text(input.command));
 		return verdict.allow ? { allow: true, judge: [] } : verdict;
+	}
+
+	// The campaign is the goal. A goal extension parks its objective when a turn ends in an
+	// error, and a parked goal stops the continuation an unattended campaign runs on, so the
+	// transition is refused while the ledger still says there is work to do.
+	if (request.tool === "update_goal") {
+		if (!campaign) return { allow: true, judge: [] };
+		const status = text(input.status);
+		if (status !== "blocked" && status !== "complete") return { allow: true, judge: [] };
+		const open = campaign.lanes.filter((lane) => lane.state !== "integrated");
+		if (campaign.slicesDone >= campaign.slicesTotal && open.length === 0) return { allow: true, judge: [] };
+		const remaining = `${campaign.slicesDone} of ${campaign.slicesTotal} slices are recorded done`;
+		const lanes = open.length > 0 ? `, and ${open.length} lane${open.length > 1 ? "s are" : " is"} still open` : "";
+		return deny(
+			"CG023",
+			`Campaign ${campaign.slug} is still active: ${remaining}${lanes}. Marking the goal ${status} stops the continuation that carries this campaign while you are away, and a transport error is not a finished campaign. Record real progress with coordinator_campaign, or close the campaign deliberately with /campaign close.`,
+		);
 	}
 
 	if (request.tool !== "subagent") return { allow: true, judge: [] };
@@ -1329,9 +1382,14 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 
 	if (campaign.lastStatusAt !== null && now - campaign.lastStatusAt > config.statusMaxAgeMs) {
 		const minutes = Math.floor((now - campaign.lastStatusAt) / 60_000);
+		// A refusal that lists every reason it might be right teaches nothing. When a block was
+		// read and rejected, the exact defect is known and is the only thing worth saying.
+		const cause = campaign.lastStatusProblem
+			? `The last status block was not counted, because ${campaign.lastStatusProblem}`
+			: `The last status block was ${minutes} minutes ago`;
 		return deny(
 			"CG008",
-			`The last status block was ${minutes} minutes ago, or the last one was not counted because its numbers disagreed with the recorded campaign. Print the status block, then retry this launch in the same turn. Required fields: ${STATUS_FIELDS.join(", ")}.`,
+			`${cause} Print the status block, then retry this launch in the same turn. Required fields: ${STATUS_FIELDS.join(", ")}.`,
 		);
 	}
 
@@ -1435,6 +1493,22 @@ function evaluateVerdictsInner(
 			return deny(
 				"CG020",
 				`${fallback.used} is a fallback for ${fallback.axis} ${fallback.cls}; the preferred model is ${fallback.preferred}. Reach past the preferred model only when it is unavailable, and say so in the routing reason, for example "claude-bridge rate-limited at 14:02". The reason on route ${target.routeKey} does not explain the choice.`,
+				true,
+			);
+		}
+
+		// The table could refuse reaching up and never noticed reaching down, so sustained
+		// cross-component ownership was routed as "complete, mechanical slice" and admitted.
+		// Under-tiering is the cheaper mistake to make and the more expensive one to discover:
+		// the lane runs, and the work it was too small for comes back half done.
+		const SCOPE_CLASS: Record<DescribedScope, ImplementationClass> = { mechanical: 1, integration: 2, "cross-layer": 3 };
+		const needed = SCOPE_CLASS[verdict.describedScope];
+		// A worker declaring a review header is already refused by CG004, so an implement
+		// verdict here always carries an implementation class.
+		if (kind === "implement" && needed > target.declaredClass) {
+			return deny(
+				"CG022",
+				`Route ${target.routeKey} declares class ${target.declaredClass}, but its own reason describes ${verdict.describedScope} work, which is class ${needed}. Declare the class the work needs, or write a reason that matches the class you chose. Class 1 is a complete, mechanical slice; class 2 is prose-led or integration work; class 3 is cross-layer or long-horizon work.`,
 				true,
 			);
 		}

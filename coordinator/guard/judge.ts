@@ -20,6 +20,8 @@
 export type JudgedKind = "implement" | "review" | "investigate";
 export type CoordinatorGitWork = "rebase" | "cherry-pick" | "push" | "pr" | "none";
 export type JustificationQuality = "substantive" | "label" | "absent";
+/** The shape of work a routing reason describes, independent of the class it declared. */
+export type DescribedScope = "mechanical" | "integration" | "cross-layer";
 
 export interface PromptVerdict {
 	kind: JudgedKind;
@@ -32,6 +34,8 @@ export interface PromptVerdict {
 	classJustification: JustificationQuality;
 	/** Whether the reason says a preferred model was unusable, which is what a fallback costs. */
 	modelUnavailability: "stated" | "absent";
+	/** What the reason describes, so policy can compare it against the declared class. */
+	describedScope: DescribedScope;
 }
 
 export interface JudgeRequest {
@@ -58,7 +62,8 @@ Answer with one JSON object and nothing else. It must have exactly these keys:
   "coordinatorGitWork": "rebase" | "cherry-pick" | "push" | "pr" | "none",
   "unrenderedPlaceholders": string[],
   "classJustification": "substantive" | "label" | "absent",
-  "modelUnavailability": "stated" | "absent"
+  "modelUnavailability": "stated" | "absent",
+  "describedScope": "mechanical" | "integration" | "cross-layer"
 }
 
 Field meanings:
@@ -75,6 +80,11 @@ Field meanings:
 - coordinatorGitWork: branch-moving git work the prompt asks this subagent to perform. Committing locally is the agent's own job and is "none". Report "rebase", "cherry-pick", "push", or "pr" when the prompt asks for it, even alongside genuine implementation work. A prohibition is not a request: "never push" is "none".
 - unrenderedPlaceholders: template placeholders that were never filled in, such as "\${slice}", "{{path}}", "[SLICE NAME]", or a path with a segment left as the literal word undefined or null. Ordinary prose about null or undefined values in code is not a placeholder. Return [] when there are none.
 - classJustification: how well the routing header's reason justifies the class it declared. "substantive" when it names something concrete about the work, such as the layers, packages, contracts, or files involved. "label" when it only asserts difficulty, such as "hard" or "complex". "absent" when there is no reason.
+- describedScope: the shape of the work the routing header's reason describes, judged from that reason alone and ignoring the class number it declared.
+  - "mechanical" for a bounded, self-contained change: one file, one module, an exact written spec, a transcription, a rename, a vendoring.
+  - "integration" for prose-led work that spans a package or wires existing pieces together.
+  - "cross-layer" only when the reason itself describes work crossing several layers, packages, or contracts, or requiring sustained ownership of a broad surface.
+  Answer the lowest value the text clearly supports, and answer "mechanical" when the reason is short, vague, or you are unsure. This question is about the described work, not about how well it is justified.
 - modelUnavailability: whether the routing header's reason says a preferred, default, or first-choice model could not be used, for example that it was rate limited, erroring, over quota, down, or otherwise unavailable. "stated" only when the reason says something about a model being unusable. A reason that only describes the work, however detailed, is "absent". This is a separate question from classJustification: a thorough description of cross-layer work is substantive and still "absent" here.
 
 Return only the JSON object.`;
@@ -93,10 +103,12 @@ ${request.prompt}
 const KINDS = new Set<string>(["implement", "review", "investigate"]);
 const GIT_WORK = new Set<string>(["rebase", "cherry-pick", "push", "pr", "none"]);
 const QUALITIES = new Set<string>(["substantive", "label", "absent"]);
+const SCOPES = new Set<string>(["mechanical", "integration", "cross-layer"]);
 /** Sorted, because the parser compares this against the answer's sorted key list. */
 export const REQUIRED_KEYS = [
 	"classJustification",
 	"coordinatorGitWork",
+	"describedScope",
 	"expectedHead",
 	"forbidsPush",
 	"kind",
@@ -139,6 +151,9 @@ export function parseVerdict(raw: string): { ok: true; verdict: PromptVerdict } 
 	if (typeof value.classJustification !== "string" || !QUALITIES.has(value.classJustification)) {
 		return { ok: false, error: "classJustification is not one of the listed values" };
 	}
+	if (typeof value.describedScope !== "string" || !SCOPES.has(value.describedScope)) {
+		return { ok: false, error: `describedScope must be one of ${[...SCOPES].join(", ")}, got ${JSON.stringify(value.describedScope)}` };
+	}
 	if (typeof value.stopsOnHeadMismatch !== "boolean" || typeof value.forbidsPush !== "boolean") {
 		return { ok: false, error: "stopsOnHeadMismatch and forbidsPush must be booleans" };
 	}
@@ -164,6 +179,7 @@ export function parseVerdict(raw: string): { ok: true; verdict: PromptVerdict } 
 			unrenderedPlaceholders: value.unrenderedPlaceholders as string[],
 			classJustification: value.classJustification as JustificationQuality,
 			modelUnavailability: value.modelUnavailability as "stated" | "absent",
+			describedScope: value.describedScope as DescribedScope,
 		},
 	};
 }
