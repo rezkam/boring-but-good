@@ -82,6 +82,8 @@ Gemini responses, prompts, account metadata, cookies, and profile labels must no
 
 ## Progress and cancellation
 
-The tool row shows per-query progress while pi waits, and the footer reports the current query count and phase. Expanded results show file paths and sanitized per-query failures.
+The tool row shows per-query progress while pi waits. The extension does not write to the footer status, the widget area, or any other shared chrome, so the editor keeps its normal shape and stays usable during a search. Expanded results show file paths and sanitized per-query failures.
+
+Escape cancels a search. A queued search stops before it acquires the browser, and an in-flight search returns immediately while its browser session is still allowed to close. If pi exits while a search is running, the extension stops the browser that search started.
 
 A queued search cancels immediately before it acquires the managed browser. A cancellation request for an active batch takes effect between queries. An in-flight Gemini browser request is allowed to finish its cleanup so the managed browser is not orphaned. Completed result paths remain available.
