@@ -202,6 +202,26 @@ export function continuationDecision(
 	return { proceed: true };
 }
 
+/** What an integrated writer lane did to the slice ledger. */
+export type SliceOutcome = "done" | "retry" | "partial";
+
+/**
+ * Record an integration against the slice count, in the same call that records the lane.
+ *
+ * These were two tools. The writer cap forces the integration call, because an open lane
+ * holds capacity, but nothing forced the separate set-slices, so one campaign integrated 42
+ * lanes, called set-slices 14 times, and froze at 18 of 31 for twelve hours while the work
+ * carried on. Review never opens at 18 of 31, and the ledger cross-check then makes an
+ * honest status block the refusable one, so the campaign cannot finish or tell the truth.
+ *
+ * A lane name cannot answer this: task-3-gate-r3 is a re-run of a slice already counted, and
+ * only the coordinator knows that. So the caller states the outcome and the guard counts it.
+ */
+export function recordIntegration(campaign: Campaign, outcome: SliceOutcome): Campaign {
+	if (outcome !== "done") return campaign;
+	return { ...campaign, slicesDone: Math.min(campaign.slicesTotal, campaign.slicesDone + 1) };
+}
+
 export function laneSummary(campaign: Campaign): string {
 	const open = campaign.lanes.filter((lane) => lane.state !== "integrated");
 	if (open.length === 0) return "none";
