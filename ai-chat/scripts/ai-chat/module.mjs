@@ -463,6 +463,7 @@ function browserProtocolTimeoutMs(request) {
 export async function ensureAiChatBrowserSession(request, deps = {}) {
   if (deps.browser) return { browser: deps.browser, shouldDisconnect: false, request, source: 'injected' };
 
+  const logger = deps.logger || console;
   const stateFile = resolveAiChatBrowserStateFile(request, deps);
   const stateFs = deps.browserStateFs || defaultBrowserStateFs;
   const browserTools = browserToolsDeps(deps);
@@ -478,7 +479,7 @@ export async function ensureAiChatBrowserSession(request, deps = {}) {
       requireProfile: true,
     });
     if (validation.ok) {
-      console.error(`[ai-chat] Reusing owned Browser Tools Chrome on :${validation.port}`);
+      logger.error(`[ai-chat] Reusing owned Browser Tools Chrome on :${validation.port}`);
       try {
         const browser = await browserTools.connectBrowser(validation.port, {
           ownerToken: validation.ownerToken,
@@ -506,7 +507,7 @@ export async function ensureAiChatBrowserSession(request, deps = {}) {
     }
 
     if (validation.stale) {
-      console.error(`[ai-chat] Discarding stale AI Chat browser state (${validation.reason}); starting a new owned browser.`);
+      logger.error(`[ai-chat] Discarding stale AI Chat browser state (${validation.reason}); starting a new owned browser.`);
       clearAiChatBrowserState(stateFile, stateFs);
     } else {
       throw aiChatBrowserError('Refusing to use saved AI Chat browser', {
@@ -518,7 +519,7 @@ export async function ensureAiChatBrowserSession(request, deps = {}) {
     }
   }
 
-  console.error('[ai-chat] Starting Browser Tools Chrome owned by ai-chat');
+  logger.error('[ai-chat] Starting Browser Tools Chrome owned by ai-chat');
   const started = await browserTools.startChrome({
     port: request.port,
     taskName: AI_CHAT_BROWSER_TASK_NAME,
@@ -571,6 +572,7 @@ export async function ensureAiChatBrowserSession(request, deps = {}) {
 
 async function finishAiChatBrowserSession({ browserSession, browser, provider, request, deps = {} }) {
   if (!browserSession?.shouldDisconnect) return;
+  const logger = deps.logger || console;
   let disconnectError = null;
   try {
     browser?.disconnect();
@@ -608,8 +610,8 @@ async function finishAiChatBrowserSession({ browserSession, browser, provider, r
     stopStatus,
     updatedAt: new Date().toISOString(),
   }, stateFile, stateFs);
-  if (disconnectError) console.error(`[ai-chat] CDP disconnect failed before browser shutdown: ${disconnectError.message}`);
-  console.error(`[ai-chat] Closed owned Browser Tools Chrome on :${port} after ${provider.name}.`);
+  if (disconnectError) logger.error(`[ai-chat] CDP disconnect failed before browser shutdown: ${disconnectError.message}`);
+  logger.error(`[ai-chat] Closed owned Browser Tools Chrome on :${port} after ${provider.name}.`);
 }
 
 async function finishAiChatBrowserSessionPreservingError(args, operationError = null) {
@@ -1423,7 +1425,7 @@ export function emitCachedResponse({ request, cached, io = defaultIo, metadata =
   return { source: 'cache', metadata: response.metadata, result: publicProviderResult(provider || { name: response.metadata.provider || request.providerName }, response.result), output: outputText };
 }
 
-export async function runPromptAttempt({ browser, provider, request, selectedModel, conversation = null }) {
+export async function runPromptAttempt({ browser, provider, request, selectedModel, conversation = null, logger = console }) {
   let attemptContext = null;
   let page = null;
 
@@ -1431,16 +1433,16 @@ export async function runPromptAttempt({ browser, provider, request, selectedMod
     if (request?.conversationTarget && isHttpUrl(request.conversationTarget)) {
       validateConversationUrlForProvider(provider, request.conversationTarget, { optionName: '--conversation' });
     }
-    console.error(`[${provider.name}] Running provider transport: ${provider.transport || 'direct'}`);
-    const result = await provider.run({ browser, request, selectedModel, conversation, onStreamEvent: request.onStreamEvent });
+    logger.error(`[${provider.name}] Running provider transport: ${provider.transport || 'direct'}`);
+    const result = await provider.run({ browser, request, selectedModel, conversation, onStreamEvent: request.onStreamEvent, logger });
     const normalized = normalizeProviderResult({ result, page: null, provider, request, selectedModel });
     if (normalized.rateLimited) {
-      console.error(`[${provider.name}] Rate limit detected for model: ${selectedModel}`);
+      logger.error(`[${provider.name}] Rate limit detected for model: ${selectedModel}`);
     } else if (normalized.placeholderRejected) {
-      console.error(`[${provider.name}] WARNING: Rejected placeholder-only response (${normalized.text.length} chars)`);
+      logger.error(`[${provider.name}] WARNING: Rejected placeholder-only response (${normalized.text.length} chars)`);
     } else {
       const suffix = normalized.done ? '' : ' (partial, timed out)';
-      console.error(`[${provider.name}] Response complete: ${normalized.text.length} chars${suffix}`);
+      logger.error(`[${provider.name}] Response complete: ${normalized.text.length} chars${suffix}`);
     }
     return normalized;
   }
@@ -1449,22 +1451,22 @@ export async function runPromptAttempt({ browser, provider, request, selectedMod
     const conversationUrl = conversation?.url || provider.conversationUrlFromState?.({ conversation, request }) || null;
     if (conversationUrl) {
       validateConversationUrlForProvider(provider, conversationUrl);
-      console.error(`[${provider.name}] Opening conversation: ${sanitizeConversationUrlForOutput(conversationUrl)}`);
+      logger.error(`[${provider.name}] Opening conversation: ${sanitizeConversationUrlForOutput(conversationUrl)}`);
       page = await openConversationPage({ browser, provider, url: conversationUrl });
     } else {
       if (request?.conversationTarget && isHttpUrl(request.conversationTarget)) {
         validateConversationUrlForProvider(provider, request.conversationTarget, { optionName: '--conversation' });
       }
-      console.error(`[${provider.name}] Finding page...`);
+      logger.error(`[${provider.name}] Finding page...`);
       page = await provider.findPage({ browser, continueChat: request.continueChat, request });
     }
-    console.error(`[${provider.name}] Page ready: ${page.url()}`);
+    logger.error(`[${provider.name}] Page ready: ${page.url()}`);
     const preflightContext = await provider.preflight?.({ browser, page, request, selectedModel, conversation }) || null;
 
     attemptContext = await provider.createAttemptContext?.({ browser, page, request, selectedModel, conversation, preflightContext, onStreamEvent: request.onStreamEvent }) || null;
 
     if (selectedModel !== 'default' && provider.shouldSetModel?.({ request, conversation, selectedModel }) !== false) {
-      console.error(`[${provider.name}] Setting model: ${selectedModel}`);
+      logger.error(`[${provider.name}] Setting model: ${selectedModel}`);
       await provider.setModel({ page, model: selectedModel, thinking: request.thinking, request, selectedModel });
     }
 
@@ -1473,7 +1475,7 @@ export async function runPromptAttempt({ browser, provider, request, selectedMod
       : await page.evaluate(() => document.body.innerText.length);
 
     await provider.clearInput({ page, request });
-    console.error(`[${provider.name}] Typing ${request.prompt.length} chars...`);
+    logger.error(`[${provider.name}] Typing ${request.prompt.length} chars...`);
     await provider.typePrompt({ page, prompt: request.prompt, request });
 
     const allPagesBefore = await browser.pages();
@@ -1483,7 +1485,7 @@ export async function runPromptAttempt({ browser, provider, request, selectedMod
 
     await provider.beforeSubmit?.({ browser, page, request, selectedModel, attemptContext });
     await provider.submit({ page, request, selectedModel });
-    console.error(`[${provider.name}] Submitted. Waiting for response (timeout: ${request.timeoutSeconds}s)...`);
+    logger.error(`[${provider.name}] Submitted. Waiting for response (timeout: ${request.timeoutSeconds}s)...`);
 
     const result = await provider.waitForResponse({
       browser,
@@ -1512,18 +1514,18 @@ export async function runPromptAttempt({ browser, provider, request, selectedMod
       });
     }
 
-    process.stderr.write('\n');
+    logger.error('');
     if (normalized.rateLimited) {
-      console.error(`[${provider.name}] Rate limit detected for model: ${selectedModel}`);
+      logger.error(`[${provider.name}] Rate limit detected for model: ${selectedModel}`);
     } else if (normalized.placeholderRejected) {
-      console.error(`[${provider.name}] WARNING: Rejected placeholder-only response (${normalized.text.length} chars)`);
+      logger.error(`[${provider.name}] WARNING: Rejected placeholder-only response (${normalized.text.length} chars)`);
     } else if (!normalized.text || (normalized.text.length < 10 && !normalized.done)) {
-      console.error(`[${provider.name}] WARNING: Response appears empty or too short (${normalized.text.length} chars)`);
+      logger.error(`[${provider.name}] WARNING: Response appears empty or too short (${normalized.text.length} chars)`);
     } else {
       const suffix = normalized.done ? '' : ' (partial, timed out)';
-      console.error(`[${provider.name}] Response complete: ${normalized.text.length} chars${suffix}`);
+      logger.error(`[${provider.name}] Response complete: ${normalized.text.length} chars${suffix}`);
     }
-    console.error(`[${provider.name}] Final URL: ${normalized.finalUrl}`);
+    logger.error(`[${provider.name}] Final URL: ${normalized.finalUrl}`);
 
     return normalized;
   } finally {
@@ -1573,11 +1575,11 @@ export function resolveInitialModel(provider, request, conversation = null) {
   return provider.defaultModel || request.modelName || 'default';
 }
 
-export async function runWithFallbacks({ browser, provider, request, conversation = null }) {
+export async function runWithFallbacks({ browser, provider, request, conversation = null, logger = console }) {
   const initialModel = resolveInitialModel(provider, request, conversation);
   const fallbackTrail = [initialModel];
   let fallbackFrom = null;
-  let result = await runPromptAttempt({ browser, provider, request, selectedModel: initialModel, conversation });
+  let result = await runPromptAttempt({ browser, provider, request, selectedModel: initialModel, conversation, logger });
 
   if (result.rateLimited) {
     const rejectedModel = initialModel;
@@ -1594,8 +1596,8 @@ export async function runWithFallbacks({ browser, provider, request, conversatio
     for (const fallbackModel of fallbackModels) {
       fallbackFrom = fallbackFrom || rejectedModel;
       fallbackTrail.push(fallbackModel);
-      console.error(`[${provider.name}] Quota banner detected on ${result.modelUsed || rejectedModel}; retrying with ${fallbackModel}...`);
-      result = await runPromptAttempt({ browser, provider, request, selectedModel: fallbackModel, conversation });
+      logger.error(`[${provider.name}] Quota banner detected on ${result.modelUsed || rejectedModel}; retrying with ${fallbackModel}...`);
+      result = await runPromptAttempt({ browser, provider, request, selectedModel: fallbackModel, conversation, logger });
       if (!result.rateLimited) break;
     }
   }
@@ -1673,6 +1675,7 @@ export async function runAiChat(request, deps = {}) {
 
   const cache = deps.cache || defaultCache;
   const io = deps.io || defaultIo;
+  const logger = deps.logger || console;
   const fs = deps.fs || defaultFs;
   let streamEmitter = null;
   const emitStreamError = (error, source = request.prompt ? 'live-cdp' : 'provider-snapshot') => {
@@ -1835,7 +1838,7 @@ export async function runAiChat(request, deps = {}) {
   try {
     if (!activeRequest.prompt && conversation && provider.recheckConversation) {
       const selectedModel = resolveInitialModel(provider, activeRequest, conversation);
-      console.error(`[${provider.name}] Rechecking saved conversation: ${conversation.id || sanitizeConversationUrlForOutput(conversation.url) || 'provider-state'}`);
+      logger.error(`[${provider.name}] Rechecking saved conversation: ${conversation.id || sanitizeConversationUrlForOutput(conversation.url) || 'provider-state'}`);
       const result = normalizeProviderResult({
         result: await provider.recheckConversation({ browser, request: activeRequest, selectedModel, conversation, onStreamEvent: activeRequest.onStreamEvent }),
         page: null,
@@ -1851,7 +1854,7 @@ export async function runAiChat(request, deps = {}) {
         metadata.evidence_warning = evidence.warning;
         metadata.evidence_target_url = evidence.targetUrl;
         result.evidenceWarning = evidence.warning;
-        console.error(evidence.warning);
+        logger.error(evidence.warning);
       } else if (evidence) {
         metadata.evidence_path = evidence.path;
         metadata.evidence_url = evidence.url;
@@ -1865,11 +1868,11 @@ export async function runAiChat(request, deps = {}) {
         const terminal = chatGptTerminalEvent(result, metadata, 'provider-snapshot');
         streamEmitter.emitTerminal(terminal.event, terminal.payload);
       } else emitOutput({ request: activeRequest, outputText: finalOutput.text, metadata, rawText: result.rawText, io });
-      if (activeRequest.outFile) console.error(`[${provider.name}] Saved to ${activeRequest.outFile}`);
+      if (activeRequest.outFile) logger.error(`[${provider.name}] Saved to ${activeRequest.outFile}`);
       return { source: 'recheck', provider, result: publicProviderResult(provider, result), metadata, output: finalOutput.text };
     }
 
-    const { result, fallbackFrom, fallbackTrail } = await runWithFallbacks({ browser, provider, request: activeRequest, conversation });
+    const { result, fallbackFrom, fallbackTrail } = await runWithFallbacks({ browser, provider, request: activeRequest, conversation, logger });
     const metadata = buildMetadata({ request: activeRequest, provider, result, fallbackFrom, fallbackTrail, conversation });
     const evidence = await captureEvidenceScreenshot({ browser, provider, result, request: activeRequest, fs });
     if (evidence?.skipped) {
@@ -1877,7 +1880,7 @@ export async function runAiChat(request, deps = {}) {
       metadata.evidence_warning = evidence.warning;
       metadata.evidence_target_url = evidence.targetUrl;
       result.evidenceWarning = evidence.warning;
-      console.error(evidence.warning);
+      logger.error(evidence.warning);
     } else if (evidence) {
       metadata.evidence_path = evidence.path;
       metadata.evidence_url = evidence.url;
@@ -1905,7 +1908,7 @@ export async function runAiChat(request, deps = {}) {
       const terminal = chatGptTerminalEvent(result, metadata, 'live-cdp');
       streamEmitter.emitTerminal(terminal.event, terminal.payload);
     } else emitOutput({ request: activeRequest, outputText: finalOutput.text, metadata, rawText: result.rawText, io });
-    if (activeRequest.outFile) console.error(`[${provider.name}] Saved to ${activeRequest.outFile}`);
+    if (activeRequest.outFile) logger.error(`[${provider.name}] Saved to ${activeRequest.outFile}`);
 
     return { source: 'live', provider, result: publicProviderResult(provider, result), metadata, output: finalOutput.text };
   } catch (error) {

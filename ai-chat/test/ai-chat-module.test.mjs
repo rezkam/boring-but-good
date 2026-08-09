@@ -2218,6 +2218,32 @@ test('ChatGPT capability modes never touch local cache or conversation storage',
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('runPromptAttempt writes diagnostics to its injected logger instead of process stderr', async () => {
+  const diagnostics = [];
+  const provider = {
+    name: 'direct',
+    transport: 'webui-api',
+    async run({ logger }) {
+      logger.error('[direct] provider-private diagnostic');
+      return { text: 'answer', done: true, status: 'complete' };
+    },
+  };
+
+  await runPromptAttempt({
+    browser: {},
+    provider,
+    request: buildAiChatRequest({ providerName: 'direct', prompt: 'hello' }),
+    selectedModel: 'default',
+    logger: { error(message) { diagnostics.push(message); } },
+  });
+
+  assert.deepEqual(diagnostics, [
+    '[direct] Running provider transport: webui-api',
+    '[direct] provider-private diagnostic',
+    '[direct] Response complete: 6 chars',
+  ]);
+});
+
 test('submit-only disposes its attempt observer without closing the browser or page', async () => {
   let disposed = 0; let closed = 0;
   const page = { url: () => 'https://chatgpt.com/', evaluate: async () => 0, close: () => { closed += 1; } };

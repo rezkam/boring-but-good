@@ -89,6 +89,7 @@ export function createGeminiSearchExtension(
       await stopOwnedBrowser();
     });
     const runExclusive = <T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> => {
+      if (signal?.aborted) return Promise.reject(abortError('Gemini search was cancelled.'));
       const start = () => {
         if (signal?.aborted) throw abortError('Gemini search was cancelled before it acquired the browser.');
         return operation();
