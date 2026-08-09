@@ -100,7 +100,8 @@ export function createGeminiSearchExtension(
       });
     };
 
-    const clearActivity = (ctx: { ui: { setStatus(key: string, value?: string): void; setWidget?(key: string, value?: string[]): void } }) => {
+    const clearActivity = (ctx: { hasUI?: boolean; ui: { setStatus(key: string, value?: string): void; setWidget?(key: string, value?: string[]): void } }) => {
+      if (!ctx.hasUI) return;
       ctx.ui.setStatus('gemini-search', undefined);
       ctx.ui.setWidget?.('gemini-search', undefined);
     };
@@ -123,6 +124,7 @@ export function createGeminiSearchExtension(
       async execute(_toolCallId, params, signal, onUpdate, ctx) {
         const states = new Map<number, GeminiSearchProgress>();
         const paint = () => {
+          if (!ctx.hasUI) return;
           const theme = ctx.ui.theme;
           const entries = [...states.values()].sort((left, right) => left.index - right.index);
           const done = entries.filter(entry => entry.phase !== 'searching').length;
