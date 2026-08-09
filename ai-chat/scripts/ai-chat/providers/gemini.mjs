@@ -334,7 +334,10 @@ function normalizedGeminiErrorCode(error) {
 }
 
 export async function queryGeminiViaBrowserNetwork(browser, prompt, timeoutMs = 120000, options = {}) {
-  const page = await browser.newPage({ background: true });
+  const pages = typeof browser.pages === 'function' ? await browser.pages() : [];
+  const existingPage = pages.find(candidate => isGeminiAppUrl(candidate.url()));
+  const page = existingPage || await browser.newPage({ background: true });
+  const ownsPage = !existingPage;
   const promptSelector = 'div[role="textbox"][aria-label="Enter a prompt for Gemini"]';
   const requestedMode = options.modelConfig?.ui_selected || (options.modelConfig?.thinking
     ? 'Thinking'
@@ -425,11 +428,12 @@ export async function queryGeminiViaBrowserNetwork(browser, prompt, timeoutMs = 
       rawText,
       browserNetworkFallback: true,
       modelUsed: options.modelConfig?.id || null,
+      modelUiVerified: configured.observedMode === requestedMode,
       temporaryVerified: configured.temporaryActive === true,
       historyModeVerified: configured.historyModeVerified === true,
     };
   } finally {
-    await page.close().catch(() => {});
+    if (ownsPage) await page.close().catch(() => {});
   }
 }
 
@@ -587,6 +591,7 @@ export const geminiProvider = {
         conversation_state: result.conversationState || null,
         is_temporary: result.browserNetworkFallback ? result.temporaryVerified === true : temporary,
         temporary_verified: result.browserNetworkFallback ? result.temporaryVerified === true : null,
+        model_ui_verified: result.browserNetworkFallback ? result.modelUiVerified === true : null,
         history_mode_verified: result.browserNetworkFallback ? result.historyModeVerified === true : null,
         saved_to_library: saveToLibrary,
         cookie_source: cookieContext.source,
