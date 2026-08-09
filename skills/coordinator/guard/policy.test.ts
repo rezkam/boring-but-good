@@ -5,6 +5,7 @@ import type { PromptVerdict } from "./judge.ts";
 import {
 	amendAuthorization,
 	checkWriterCap,
+	grantForcePush,
 	continuationDecision,
 	DEFAULT_TIERS,
 	findTierClash,
@@ -1099,4 +1100,27 @@ test("the owner can widen authorization without restarting the campaign", () => 
 	assert.match(widened.authorized, /force-push feat\/x with lease/);
 	assert.equal(widened.slicesDone, live.slicesDone, "widening scope is not progress");
 	assert.equal(widened.lanes, live.lanes);
+});
+
+test("a granted force push is allowed on the exact branch, and nothing else is", () => {
+	// Recording the approval was not enough: CG015 never read it, so the coordinator was left
+	// with an approval it could not use and a refusal it could not satisfy.
+	const branch = "feat/coordinator-research-reliability";
+	const granted = grantForcePush(campaign(), branch);
+	assert.deepEqual(granted.grants?.forcePush, [branch]);
+
+	const push = `git push --force-with-lease=refs/heads/${branch}:c11f206f origin HEAD:refs/heads/${branch}`;
+	assert.deepEqual(evaluateStructure(request({ tool: "bash", campaign: granted, input: { command: push } })), { allow: true, judge: [] });
+	assert.deepEqual(evaluateStructure(request({ tool: "bash", campaign: granted, input: { command: `git push -f origin HEAD:${branch}` } })), { allow: true, judge: [] });
+
+	// The grant is for one branch. Every other target stays refused, including the one that
+	// matters most, and including a push that smuggles a second refspec alongside the granted one.
+	assert.equal(structure(request({ tool: "bash", campaign: granted, input: { command: "git push --force origin main" } })).code, "CG015");
+	assert.equal(structure(request({ tool: "bash", campaign: granted, input: { command: `git push -f origin HEAD:${branch} HEAD:main` } })).code, "CG015");
+	assert.equal(structure(request({ tool: "bash", campaign: granted, input: { command: "git push origin +main" } })).code, "CG015");
+
+	// A grant is not a licence for the other destructive commands.
+	assert.equal(structure(request({ tool: "bash", campaign: granted, input: { command: "git reset --hard origin/main" } })).code, "CG015");
+	// And an ungranted campaign is exactly where it was.
+	assert.equal(structure(request({ tool: "bash", campaign: campaign(), input: { command: push } })).code, "CG015");
 });
