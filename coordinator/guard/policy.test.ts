@@ -964,6 +964,23 @@ test("the Claude preset is Claude-only and preserves every class's intended effo
 	});
 });
 
+test("CG022 covers every tiered role, not only writers", () => {
+	// Scouts use the same implementation classes, and the review axis exists precisely to
+	// separate a routine branch from a broad or cross-layer one.
+	const scoutRoute = "ROUTE: s1-parser | class 1 | claude-bridge/claude-sonnet-5:medium | inventory every call site across app, protocol and coordinator and map the contracts between them";
+	const scout = request({ input: launch({ agent: "campaign-scout", task: implementTask(scoutRoute) }) });
+	assert.equal(denyJudged(scout, [verdict({ kind: "investigate", expectedHead: null, stopsOnHeadMismatch: false, describedScope: "cross-layer" })]).code, "CG022");
+
+	const reviewing = campaign({ status: "review", slicesDone: 4 });
+	const reviewRoute = "ROUTE: final-review | review 1 | claude-bridge/claude-opus-5:high | the branch rewrites the reducer contract across protocol, coordinator and app";
+	const review = request({ campaign: reviewing, input: reviewLaunch({ model: "claude-bridge/claude-opus-5:high", task: implementTask(reviewRoute) }) });
+	assert.equal(denyJudged(review, [verdict({ kind: "review", stopsOnHeadMismatch: false, describedScope: "cross-layer" })]).code, "CG022");
+
+	// review 2 already is the broad tier, so the same reason is right there.
+	const broad = request({ campaign: reviewing, input: reviewLaunch({ task: implementTask(GOOD_REVIEW_ROUTE) }) });
+	assert.deepEqual(judged(broad, [verdict({ kind: "review", stopsOnHeadMismatch: false, describedScope: "cross-layer" })]), { allow: true });
+});
+
 test("CG022: work the reason describes as broader than its declared class is refused", () => {
 	// A campaign routed sustained cross-component UI ownership as class 1, whose whole meaning
 	// is "complete, mechanical slice". Nothing checked that, because the only graded reason was
@@ -981,6 +998,18 @@ test("CG022: work the reason describes as broader than its declared class is ref
 	const top = "ROUTE: s1-parser | class 3 | claude-bridge/claude-opus-5:medium | one file, one exact spec";
 	const highReq = request({ input: launch({ model: "claude-bridge/claude-opus-5:medium", task: implementTask(top) }) });
 	assert.deepEqual(judged(highReq, [verdict({ describedScope: "mechanical" })]), { allow: true });
+});
+
+test("an unfinished campaign continues even with no lane open", () => {
+	// The parked goal was only half the failure. This guard's continuation returned whenever
+	// no lane was open, so a campaign at 18 of 31 with everything integrated had nothing left
+	// carrying it: the goal extension had stopped and the guard never started.
+	const between = campaign({ slicesDone: 18, slicesTotal: 31, lanes: [] });
+	assert.equal(continuationDecision(between, { consecutiveErrors: 0 }).proceed, true);
+
+	// Nothing left to do is the one case that legitimately stops.
+	const finished = campaign({ slicesDone: 31, slicesTotal: 31, lanes: [] });
+	assert.equal(continuationDecision(finished, { consecutiveErrors: 0 }).proceed, false);
 });
 
 test("a provider error does not stop a campaign, an abort does", () => {
@@ -1010,9 +1039,11 @@ test("CG023: the goal cannot be parked while the campaign it tracks still has wo
 	const complete = structure(request({ tool: "update_goal", campaign: live, input: { status: "complete" } }));
 	assert.equal(complete.code, "CG023");
 
-	// Once the ledger agrees the work is finished, the transition is the coordinator's to make.
-	const finished = campaign({ slicesDone: 4, slicesTotal: 4 });
-	assert.deepEqual(evaluateStructure(request({ tool: "update_goal", campaign: finished, input: { status: "complete" } })), { allow: true, judge: [] });
+	// Every slice done is not the end: the mandatory final review still has to happen, and a
+	// goal that completes here stops the loop before it.
+	const allSlices = campaign({ slicesDone: 4, slicesTotal: 4 });
+	assert.equal(structure(request({ tool: "update_goal", campaign: allSlices, input: { status: "complete" } })).code, "CG023");
+	assert.match(structure(request({ tool: "update_goal", campaign: allSlices, input: { status: "complete" } })).reason, /\/campaign close/);
 	// And with no campaign the guard is inert, so ordinary goals are untouched.
 	assert.deepEqual(evaluateStructure({ ...request({ tool: "update_goal", input: { status: "blocked" } }), campaign: null }), { allow: true, judge: [] });
 });

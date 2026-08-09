@@ -175,6 +175,9 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 
 	function recordProgress(): void {
 		noProgressContinuations = 0;
+		// A streak belongs to one stretch of work. Carrying it across a resume or a new
+		// campaign would let two old failures make the next campaign's first error the last.
+		consecutiveErrors = 0;
 	}
 
 	/** A background launch answers with its run id; keeping it makes status and stop unambiguous. */
@@ -407,6 +410,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		tiers = DEFAULT_TIERS;
 		verdictCache.clear();
 		noProgressContinuations = 0;
+		consecutiveErrors = 0;
 		continuationQueued = false;
 		if (continuationTimer) clearTimeout(continuationTimer);
 		continuationTimer = null;
@@ -759,8 +763,6 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 
 	pi.on("agent_end", async (event, ctx) => {
 		if (!campaign || campaign.status === "closed") return;
-		const open = campaign.lanes.filter((lane) => lane.state !== "integrated");
-		if (open.length === 0) return;
 		if (continuationQueued || continuationTimer || ctx.hasPendingMessages()) return;
 		if (noProgressContinuations >= MAX_NO_PROGRESS_CONTINUATIONS) {
 			notify(ctx, `coordinator-guard: ${noProgressContinuations} continuations with no lane progress, paused. Use /campaign resume.`, "warning");
@@ -786,7 +788,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			// a missed continuation has to stay a missed continuation rather than a crashed pi.
 			try {
 				if (!campaign || campaign.status === "closed") return;
-				if (campaign.lanes.every((lane) => lane.state === "integrated")) return;
+				if (!continuationDecision(campaign, { consecutiveErrors: 0 }).proceed) return;
 				if (continuationQueued || ctx.hasPendingMessages() || !ctx.isIdle()) return;
 				continuationQueued = true;
 				noProgressContinuations += 1;
@@ -839,6 +841,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 						startedAt: now,
 					});
 					armed = true;
+					recordProgress();
 					break;
 				}
 				case "set-slices": {
@@ -1011,6 +1014,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 					if (campaign) campaign.status = "active";
 					armed = true;
 					noProgressContinuations = 0;
+					consecutiveErrors = 0;
 					lastContinuationAt = 0;
 					persist();
 					show("Campaign active.");

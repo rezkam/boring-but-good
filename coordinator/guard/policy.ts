@@ -186,6 +186,12 @@ export function continuationDecision(
 	turn: { stopReason?: string; consecutiveErrors: number },
 ): { proceed: boolean; reason?: string } {
 	if (campaign.status === "closed") return { proceed: false, reason: "the campaign is closed" };
+	// Deciding this here rather than at the call site is the point: the caller continued only
+	// while a lane was open, so a campaign between dispatches had nothing carrying it.
+	const open = campaign.lanes.filter((lane) => lane.state !== "integrated");
+	if (open.length === 0 && campaign.slicesDone >= campaign.slicesTotal) {
+		return { proceed: false, reason: "every slice is recorded done and no lane is open" };
+	}
 	if (turn.stopReason === "aborted") return { proceed: false, reason: "the turn was aborted, which is a decision rather than a failure" };
 	if (turn.stopReason === "error") {
 		if (turn.consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
@@ -1169,13 +1175,16 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 		if (!campaign) return { allow: true, judge: [] };
 		const status = text(input.status);
 		if (status !== "blocked" && status !== "complete") return { allow: true, judge: [] };
+		// Every slice counted is not the end. The mandatory final review runs after that, so a
+		// goal that completes here stops the loop one step before the step that catches things.
+		// A campaign that is genuinely over is closed, and a closed campaign leaves the guard
+		// inert, so this refusal cannot outlive the work it protects.
 		const open = campaign.lanes.filter((lane) => lane.state !== "integrated");
-		if (campaign.slicesDone >= campaign.slicesTotal && open.length === 0) return { allow: true, judge: [] };
 		const remaining = `${campaign.slicesDone} of ${campaign.slicesTotal} slices are recorded done`;
 		const lanes = open.length > 0 ? `, and ${open.length} lane${open.length > 1 ? "s are" : " is"} still open` : "";
 		return deny(
 			"CG023",
-			`Campaign ${campaign.slug} is still active: ${remaining}${lanes}. Marking the goal ${status} stops the continuation that carries this campaign while you are away, and a transport error is not a finished campaign. Record real progress with coordinator_campaign, or close the campaign deliberately with /campaign close.`,
+			`Campaign ${campaign.slug} is still ${campaign.status}: ${remaining}${lanes}. Marking the goal ${status} stops the continuation that carries this campaign while you are away, and a transport error is not a finished campaign. Finish the work, run the final review, then end it deliberately with /campaign close.`,
 		);
 	}
 
@@ -1501,14 +1510,22 @@ function evaluateVerdictsInner(
 		// cross-component ownership was routed as "complete, mechanical slice" and admitted.
 		// Under-tiering is the cheaper mistake to make and the more expensive one to discover:
 		// the lane runs, and the work it was too small for comes back half done.
-		const SCOPE_CLASS: Record<DescribedScope, ImplementationClass> = { mechanical: 1, integration: 2, "cross-layer": 3 };
-		const needed = SCOPE_CLASS[verdict.describedScope];
-		// A worker declaring a review header is already refused by CG004, so an implement
-		// verdict here always carries an implementation class.
-		if (kind === "implement" && needed > target.declaredClass) {
+		// Scouts are tiered on the same implementation classes, and the review axis exists to
+		// separate a routine branch from a broad one, so both are checked. Only the tier names
+		// differ, which is why the needed value is read from an axis-specific map.
+		const axis: "class" | "review" = kind === "review" ? "review" : "class";
+		const needed =
+			axis === "review"
+				? ({ mechanical: 1, integration: 1, "cross-layer": 2 } as const)[verdict.describedScope]
+				: ({ mechanical: 1, integration: 2, "cross-layer": 3 } as const)[verdict.describedScope];
+		if (needed > target.declaredClass) {
+			const meanings =
+				axis === "review"
+					? 'Review 1 is a routine branch; review 2 is a subtle, risky, broad, or cross-layer one.'
+					: "Class 1 is a complete, mechanical slice; class 2 is prose-led or integration work; class 3 is cross-layer or long-horizon work.";
 			return deny(
 				"CG022",
-				`Route ${target.routeKey} declares class ${target.declaredClass}, but its own reason describes ${verdict.describedScope} work, which is class ${needed}. Declare the class the work needs, or write a reason that matches the class you chose. Class 1 is a complete, mechanical slice; class 2 is prose-led or integration work; class 3 is cross-layer or long-horizon work.`,
+				`Route ${target.routeKey} declares ${axis} ${target.declaredClass}, but its own reason describes ${verdict.describedScope} work, which is ${axis} ${needed}. Declare the tier the work needs, or write a reason that matches the tier you chose. ${meanings}`,
 				true,
 			);
 		}
