@@ -1,6 +1,6 @@
 {
   "name": "@rezkam/browser-tools",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Sandboxed, owner-token-protected Chrome automation for AI agents: control pages, record and review GIFs, capture HAR and raw CDP events, send CDP calls, and manage Chrome profiles.",
   "type": "module",
   "license": "Apache-2.0",
