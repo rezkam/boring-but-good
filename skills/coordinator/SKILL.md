@@ -150,7 +150,8 @@ usually means do it now, in one tool call.
 **Never dispatch. You own these, always:**
 
 - committing (`commit` skill), pushing, opening or updating the PR, rebasing, resolving
-  conflicts. The `pr-ready` skill covers that whole chain.
+  conflicts. The `pr-ready` skill covers that whole chain, and it runs once at the end,
+  not per slice.
 - running any gate whose result you will cite as evidence
 - status reporting, reading state, adjudicating a deviation an agent reported
 - any fix under roughly two files, and every review follow-up fix
@@ -202,7 +203,7 @@ prefer minimal formatting, because it is scanned rather than read.
 ```
 CAMPAIGN  <slug>          WORKTREE <path>
 SLICES    <n> done / <n> total     NOW: <slice> (<state>, <elapsed>)
-PR        #<n> <MERGE_STATE>, checks <n>/<n>
+PR        #<n> pushed at <sha>, checks read at the end
 AGENTS    <role> <model>@<effort> <alive|done|dead>
 DIRECT    <slice> because <reason>, or none
 PARKED    <gate waiting on an external dependency, or none>
@@ -236,7 +237,9 @@ gap in the log.
   never committed, never in the PR.** The user reads it live.
 - Record the baseline gate counts, pre-existing failures included, so a later red is
   attributable to a slice rather than to the environment.
-- Open the PR from the first slice. The `pr-ready` skill owns PR shape and state.
+- Open the PR from the first slice, then leave its remote state alone until the end. Push
+  as slices land and update the body if you want; do not read checks or mergeability
+  again until the campaign is over.
 
 The notes file is the campaign's memory, not the conversation. On any harness that drops
 skills between turns, re-read this skill and the notes file at the start of each turn.
@@ -255,10 +258,15 @@ A slice is done when all of these hold:
   not a caveat.
 - the diff holds this slice and nothing else, with no local paths, usernames, or secrets
 - the Slice log entry is appended
-- **the work is merge-ready**: run the `pr-ready` skill, which owns commit through green
-  checks. A slice sitting on a branch GitHub already calls unmergeable is not done. If
-  that skill is missing on this harness, say so in the status block rather than
-  improvising its procedure.
+- **the work is on the branch**: committed and pushed, with the local gates for the
+  packages it touched green. That is the whole per-slice bar.
+
+Do not run `pr-ready`, poll checks, or query mergeability per slice. Remote state is a
+release-time fact, and the guard refuses check polling while slices remain. Making the PR
+merge-ready, watching every check to a terminal state, and resolving conflicts happens
+**once**, after the final review, when the campaign is over. One campaign spent hours
+reporting `checks 0/14 (billing-blocked)` on a PR whose checks could not pass; none of it
+changed a single slice. Update the PR body as work lands if you like, and keep going.
 
 No code review per slice. Verify against the slice's acceptance criteria and move on.
 

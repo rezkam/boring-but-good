@@ -222,6 +222,20 @@ export function recordIntegration(campaign: Campaign, outcome: SliceOutcome): Ca
 	return { ...campaign, slicesDone: Math.min(campaign.slicesTotal, campaign.slicesDone + 1) };
 }
 
+/**
+ * Widen a campaign's recorded scope, appending rather than replacing.
+ *
+ * The grant was fixed at start, so an approval the owner gave in chat could not be recorded.
+ * A coordinator with a just-approved force-push in front of it found the only door open to
+ * it was closing the campaign and starting a continuation, which discards the ledger review
+ * opens on. Appending keeps the original grant readable next to what was added to it.
+ */
+export function amendAuthorization(campaign: Campaign, addition: string): Campaign {
+	const extra = addition.trim();
+	if (!extra) return campaign;
+	return { ...campaign, authorized: `${campaign.authorized}; ${extra}` };
+}
+
 export function laneSummary(campaign: Campaign): string {
 	const open = campaign.lanes.filter((lane) => lane.state !== "integrated");
 	if (open.length === 0) return "none";
@@ -635,7 +649,20 @@ function denyAll(problems: Array<{ code: string; reason: string }>): GuardDenial
 	return deny(problems[0].code, `This launch has ${problems.length} problems. Fix them together and retry once:\n\n${list}`);
 }
 
-function checkBash(command: string): GuardDecision {
+function checkBash(command: string, campaign: Campaign | null): GuardDecision {
+	// Checks are a release-time fact, read once when the PR is made ready. A campaign spent
+	// hours reporting "checks 0/14 (billing-blocked)" on a PR whose checks could not pass,
+	// which is loop time spent on something no slice depends on.
+	if (campaign && campaign.slicesDone < campaign.slicesTotal) {
+		const watching = /(^|[\s;&|(])gh\s+(run\s+(watch|list|view)|pr\s+checks)\b/i.test(command)
+			|| /(^|[\s;&|(])gh\s+pr\s+view\b[^;&|]*statusCheckRollup/i.test(command);
+		if (watching) {
+			return deny(
+				"CG024",
+				`Read CI once, when you make the PR ready at the end. This campaign is at ${campaign.slicesDone} of ${campaign.slicesTotal} slices, and no slice depends on a check result: a red or missing check now is the same work either way, and a check that cannot pass will not start passing because it was watched. Update the PR body and keep going.`,
+			);
+		}
+	}
 	const spawn = /(^|[\s;&|(])((codex\s+(exec|resume))|(claude\s+(-p|--print))|(pi\s+(-p|--prompt|exec))|(npx\s+(-y\s+)?pi\b))/i;
 	if (spawn.test(command)) {
 		return deny(
@@ -1184,7 +1211,7 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 
 	if (request.tool === "bash") {
 		if (!campaign && !request.armed) return { allow: true, judge: [] };
-		const verdict = checkBash(text(input.command));
+		const verdict = checkBash(text(input.command), campaign);
 		return verdict.allow ? { allow: true, judge: [] } : verdict;
 	}
 

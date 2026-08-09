@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import type { PromptVerdict } from "./judge.ts";
 import {
+	amendAuthorization,
 	checkWriterCap,
 	continuationDecision,
 	DEFAULT_TIERS,
@@ -1067,4 +1068,35 @@ test("integrating a writer lane records the slice, because one fact is recorded 
 
 	// The count is a ledger, not a tally that can run past its own total.
 	assert.equal(recordIntegration({ ...live, slicesDone: 4 }, "done").slicesDone, 4);
+});
+
+test("CG024: CI is not watched while slices remain", () => {
+	// A campaign spent hours reporting "checks 0/14 (billing-blocked)" on a PR whose checks
+	// could never pass. Checks are a release-time fact, read once when the PR is made ready,
+	// not a per-slice one: watching them mid-campaign buys nothing and costs the loop.
+	const live = campaign({ slicesDone: 18, slicesTotal: 31 });
+	for (const command of ["gh run watch 123", "gh pr checks 296", "gh run list --limit 5", "gh pr view 296 --json statusCheckRollup"]) {
+		const { code, reason } = structure(request({ tool: "bash", campaign: live, input: { command } }));
+		assert.equal(code, "CG024", command);
+		assert.match(reason, /once/);
+	}
+
+	// Working on the PR itself is not watching it, and the last slice opens the gate.
+	for (const command of ["gh pr edit 296 --body-file .agents/pr.md", "gh pr view 296 --json headRefOid", "gh pr create --fill"]) {
+		assert.deepEqual(evaluateStructure(request({ tool: "bash", campaign: live, input: { command } })), { allow: true, judge: [] }, command);
+	}
+	const ready = campaign({ slicesDone: 31, slicesTotal: 31 });
+	assert.deepEqual(evaluateStructure(request({ tool: "bash", campaign: ready, input: { command: "gh pr checks 296" } })), { allow: true, judge: [] });
+});
+
+test("the owner can widen authorization without restarting the campaign", () => {
+	// The recorded scope was immutable, so a force-push the owner had just approved stayed
+	// refused, and the coordinator's way out was to close the campaign and start a
+	// continuation, which throws away the ledger that gates review.
+	const live = campaign({ authorized: "implement approved slices" });
+	const widened = amendAuthorization(live, "force-push feat/x with lease");
+	assert.match(widened.authorized, /implement approved slices/, "the original grant is not silently replaced");
+	assert.match(widened.authorized, /force-push feat\/x with lease/);
+	assert.equal(widened.slicesDone, live.slicesDone, "widening scope is not progress");
+	assert.equal(widened.lanes, live.lanes);
 });
