@@ -79,27 +79,33 @@ export function createGeminiSearchExtension(
   return function geminiSearchExtension(pi: ExtensionAPI) {
     let queue: Promise<unknown> = Promise.resolve();
     const runExclusive = <T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> => {
-      let started = false;
       const start = () => {
         if (signal?.aborted) throw abortError('Gemini search was cancelled before it acquired the browser.');
-        started = true;
         return operation();
       };
+      // The queue keeps following the real run even when the caller abandons it, so an
+      // abandoned browser session is never overlapped by the next search.
       const running = queue.then(start, start);
       queue = running.catch(() => undefined);
       if (!signal) return running;
+      running.catch(() => undefined);
 
       let onAbort: (() => void) | undefined;
       const aborted = new Promise<T>((_resolve, reject) => {
-        onAbort = () => {
-          if (!started) reject(abortError('Gemini search was cancelled while waiting for the browser.'));
-        };
+        onAbort = () => reject(abortError('Gemini search was cancelled.'));
         signal.addEventListener('abort', onAbort, { once: true });
       });
       return Promise.race([running, aborted]).finally(() => {
         if (onAbort) signal.removeEventListener('abort', onAbort);
       });
     };
+
+    const clearActivity = (ctx: { ui: { setStatus(key: string, value?: string): void; setWidget?(key: string, value?: string[]): void } }) => {
+      ctx.ui.setStatus('gemini-search', undefined);
+      ctx.ui.setWidget?.('gemini-search', undefined);
+    };
+
+    pi.on('session_shutdown', (_event, ctx) => clearActivity(ctx));
 
     pi.registerTool<typeof geminiSearchSchema, GeminiSearchDetails>({
       name: 'gemini_search',
@@ -115,13 +121,32 @@ export function createGeminiSearchExtension(
       executionMode: 'sequential',
 
       async execute(_toolCallId, params, signal, onUpdate, ctx) {
-        return runExclusive(async () => {
-          ctx.ui.setStatus('gemini-search', 'waiting for Gemini search');
-          try {
+        const states = new Map<number, GeminiSearchProgress>();
+        const paint = () => {
+          const theme = ctx.ui.theme;
+          const entries = [...states.values()].sort((left, right) => left.index - right.index);
+          const done = entries.filter(entry => entry.phase !== 'searching').length;
+          const total = entries[0]?.total ?? 1;
+          ctx.ui.setStatus('gemini-search', `gemini search ${done}/${total}`);
+          if (!theme) return;
+          ctx.ui.setWidget?.('gemini-search', [
+            theme.fg('accent', `─── Gemini Search ${'─'.repeat(24)}`),
+            ...entries.map(entry => {
+              const label = entry.query.length > 44 ? `${entry.query.slice(0, 41)}...` : entry.query;
+              if (entry.phase === 'searching') return `  ${theme.fg('accent', '⋯')} ${theme.fg('muted', label)}`;
+              if (entry.phase === 'complete') return `  ${theme.fg('success', '✔')} ${theme.fg('muted', label)}`;
+              if (entry.phase === 'failed') return `  ${theme.fg('error', '✖')} ${theme.fg('muted', label)}`;
+              return `  ${theme.fg('warning', '■')} ${theme.fg('muted', label)}`;
+            }),
+          ]);
+        };
+
+        try {
+          return await runExclusive(async () => {
             const batch = await runBatch({ ...params, signal }, {
               onProgress(progress) {
-                const completed = progress.phase === 'searching' ? progress.index : progress.index + 1;
-                ctx.ui.setStatus('gemini-search', `${completed}/${progress.total} ${progress.phase}`);
+                states.set(progress.index, progress);
+                paint();
                 onUpdate?.({
                   content: [{ type: 'text', text: `${progress.phase}: ${progress.query}` }],
                   details: progress,
@@ -132,10 +157,10 @@ export function createGeminiSearchExtension(
               content: [{ type: 'text', text: resultText(batch) }],
               details: batch,
             };
-          } finally {
-            ctx.ui.setStatus('gemini-search', undefined);
-          }
-        }, signal);
+          }, signal);
+        } finally {
+          clearActivity(ctx);
+        }
       },
 
       renderCall(args, theme) {
@@ -155,8 +180,9 @@ export function createGeminiSearchExtension(
         return new Text(lines.join('\n'), 0, 0);
       },
 
-      renderResult(result, { expanded, isPartial }, theme) {
+      renderResult(result, { expanded, isPartial }, theme, context) {
         const details = result.details;
+        if (!details && context?.isError) return new Text(theme.fg('warning', 'Gemini search stopped.'), 0, 0);
         if (isPartial && 'phase' in details) {
           const total = Math.max(1, details.total);
           const finished = details.phase === 'searching' ? details.index : details.index + 1;
@@ -184,7 +210,7 @@ export function createGeminiSearchExtension(
           return new Text(lines.join('\n'), 0, 0);
         }
 
-        return new Text(theme.fg('accent', 'Waiting for Gemini search.'), 0, 0);
+        return new Text(theme.fg('accent', 'Starting Gemini search.'), 0, 0);
       },
     });
   };

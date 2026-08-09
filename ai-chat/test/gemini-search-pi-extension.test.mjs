@@ -26,7 +26,7 @@ test('pi extension promptly cancels a queued search before it acquires the brows
     if (calls === 1) await firstGate;
     return batchResult;
   };
-  createGeminiSearchExtension({ runBatch })({ registerTool(definition) { tool = definition; } });
+  createGeminiSearchExtension({ runBatch })({ registerTool(definition) { tool = definition; }, on() {} });
   const ctx = { ui: { setStatus() {} } };
 
   const first = tool.execute('call-1', { query: 'first' }, undefined, undefined, ctx);
@@ -50,12 +50,59 @@ test('pi extension promptly cancels a queued search before it acquires the brows
   assert.equal(calls, 1);
 });
 
+test('pi extension abandons an in-flight search on abort without leaving the browser unserialized', async () => {
+  let tool;
+  let releaseFirst;
+  const firstGate = new Promise(resolve => { releaseFirst = resolve; });
+  const started = [];
+  const runBatch = async params => {
+    started.push(params.query);
+    if (started.length === 1) await firstGate;
+    return {
+      queryCount: 1,
+      successfulQueries: 1,
+      failedQueries: 0,
+      cancelled: false,
+      files: [{ query: params.query, path: '/result-store/result.md' }],
+      failures: [],
+    };
+  };
+  createGeminiSearchExtension({ runBatch })({ registerTool(definition) { tool = definition; }, on() {} });
+  const cleared = [];
+  const ctx = { ui: { setStatus(key, value) { cleared.push([key, value]); }, setWidget(key, value) { cleared.push([key, value]); } } };
+
+  const controller = new AbortController();
+  const first = tool.execute('call-1', { query: 'first' }, controller.signal, undefined, ctx);
+  await Promise.resolve();
+  controller.abort();
+
+  const outcome = await Promise.race([
+    first.then(() => 'resolved', error => error.name),
+    new Promise(resolve => setTimeout(() => resolve('still-waiting'), 50)),
+  ]);
+  assert.equal(outcome, 'AbortError');
+  assert.deepEqual(cleared.filter(([, value]) => value === undefined).map(([key]) => key).sort(), ['gemini-search', 'gemini-search']);
+
+  const second = tool.execute('call-2', { query: 'second' }, undefined, undefined, ctx);
+  const queued = await Promise.race([
+    second.then(() => 'started-early'),
+    new Promise(resolve => setTimeout(() => resolve('waiting-for-browser'), 50)),
+  ]);
+  assert.equal(queued, 'waiting-for-browser');
+  assert.deepEqual(started, ['first']);
+
+  releaseFirst();
+  await second;
+  assert.deepEqual(started, ['first', 'second']);
+});
+
 test('pi extension registers a file-backed multi-query Gemini search tool', async () => {
   let tool;
   const statuses = [];
   const updates = [];
   const pi = {
     registerTool(definition) { tool = definition; },
+    on() {},
   };
   const runBatch = async (_params, deps) => {
     deps.onProgress({ phase: 'searching', index: 0, total: 2, query: 'first query' });
@@ -83,7 +130,7 @@ test('pi extension registers a file-backed multi-query Gemini search tool', asyn
   const result = await tool.execute('call-1', {
     queries: ['first query', 'second query'],
   }, undefined, update => updates.push(update), {
-    ui: { setStatus: (...args) => statuses.push(args) },
+    ui: { setStatus: (...args) => statuses.push(args), setWidget: () => {}, theme },
   });
 
   assert.deepEqual(result.content, [{

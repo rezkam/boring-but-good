@@ -5,6 +5,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  withQuietDiagnostics,
   GEMINI_SEARCH_MODEL,
   buildGeminiSearchPrompt,
   runGeminiSearchBatch,
@@ -36,6 +37,31 @@ test('Gemini search returns home-relative result paths to the agent', async () =
 
   assert.equal(result.files[0].path, ['~', privateRoot, 'tmp', 'gemini-search', 'result.md'].join('/'));
   assert.doesNotMatch(result.files[0].path, new RegExp(homedir().replaceAll('/', '\\/')));
+});
+
+test('Gemini diagnostics never reach the terminal and the stream is restored afterwards', async () => {
+  const original = process.stderr.write;
+  const leaked = [];
+  process.stderr.write = chunk => { leaked.push(String(chunk)); return true; };
+  let captured;
+  let restoredWrite;
+  try {
+    captured = await withQuietDiagnostics(async () => {
+      process.stderr.write('[ai-chat] Starting Browser Tools Chrome owned by ai-chat\n');
+      console.error('[gemini] Running provider transport: webui-api');
+      return 'answer';
+    });
+    restoredWrite = process.stderr.write;
+  } finally {
+    process.stderr.write = original;
+  }
+
+  assert.notEqual(restoredWrite, undefined);
+
+  assert.deepEqual(leaked, []);
+  assert.equal(captured.value, 'answer');
+  assert.match(captured.diagnostics, /Starting Browser Tools Chrome/);
+  assert.match(captured.diagnostics, /provider transport/);
 });
 
 test('Gemini search redacts unexpected result-directory filesystem errors', async () => {
