@@ -179,7 +179,7 @@ browser-tools status --json
 
 ### Headless mode
 
-Add `--headless` to `browser-tools start` to run the managed Chrome without opening a visible window. Use it for automation that does not need the user to watch or interact: navigation, evaluation, scraping, extraction, and screenshots all work the same over CDP. It launches Chrome's new headless mode (`--headless=new`), which runs the full browser, so the copied profile, cookies, and extensions load exactly as they do in a windowed launch. Old `--headless` is a separate lightweight engine that ignores extensions and is never used.
+Add `--headless` to `browser-tools start` to run the managed Chrome without opening a visible window. Use it for automation that does not need the user to watch or interact: navigation, evaluation, scraping, extraction, and screenshots all work the same over CDP. On macOS, the launch opts out of Dock recents so background sessions do not accumulate extra Chrome icons. It launches Chrome's new headless mode (`--headless=new`), which runs the full browser, so the copied profile, cookies, and extensions load exactly as they do in a windowed launch. Old `--headless` is a separate lightweight engine that ignores extensions and is never used.
 
 A headless launch would otherwise advertise a `HeadlessChrome` User-Agent. When the copied profile is signed in to Google, that headless fingerprint trips Google's session-theft protection and logs the source Chrome profile out, while a windowed launch (normal Chrome UA) does not. So a headless launch overrides the User-Agent, browser-wide, to the normal reduced Chrome UA for the installed version, making a headless clone match a windowed one. The override carries no machine-specific data.
 

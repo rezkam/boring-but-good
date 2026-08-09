@@ -69,7 +69,7 @@ import { connectBrowser, activePage, withBrowser } from '@rezkam/browser-tools';
 
 ## Behavior notes
 
-- Headless (`--headless`) runs full Chrome (`--headless=new`), not the legacy no-extensions engine, so profile, cookies, and extensions load the same as a windowed launch.
+- Headless (`--headless`) runs full Chrome (`--headless=new`), not the legacy no-extensions engine, so profile, cookies, and extensions load the same as a windowed launch. On macOS it opts out of Dock recents, so background automation does not add another Chrome icon.
 - Profile Sync excludes the Google identity from a copied profile by default, so a clone cannot log your main Chrome out of Google; pass `--include-google` only for Google-backed workflows.
 - Every managed browser is owned by a token printed at `start`; `stop` refuses to kill a browser it does not own, another agent's browser, or your main Chrome.
 - GIF recording requires an explicit action-specific output name. `start` captures pre-action frames before returning, and `stop` captures post-action frames before finalizing the GIF.

@@ -14,6 +14,7 @@ import {
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer-core';
 
 export const DEFAULT_PORT = 9222;
@@ -1450,6 +1451,42 @@ function assertChromeBinaryLaunchable(chromeBin) {
   throw new Error(`${problem}: ${chromeBin}. Set BROWSER_TOOLS_CHROME_BIN or browser.chromeBin in Browser Tools config.`);
 }
 
+function chromeAppBundleForExecutable(chromeBin) {
+  const marker = '.app/Contents/MacOS/';
+  const markerIndex = chromeBin.lastIndexOf(marker);
+  if (markerIndex < 0) return null;
+  return chromeBin.slice(0, markerIndex + '.app'.length);
+}
+
+function launchHeadlessChromeApp({ chromeBin, args }) {
+  if (process.platform !== 'darwin') return null;
+  const appBundle = chromeAppBundleForExecutable(chromeBin);
+  if (!appBundle) return null;
+
+  // The standard `open` command always makes a launched app eligible for Dock recents. Use the
+  // native workspace option that opts out before Chrome registers, while retaining a new hidden
+  // application instance for the isolated profile.
+  const launcher = fileURLToPath(new URL('./mac-headless-launch.jxa', import.meta.url));
+  const launched = spawnSync('osascript', ['-l', 'JavaScript', launcher, appBundle, ...args], {
+    encoding: 'utf-8',
+  });
+  if (launched.error) {
+    const error = new Error(`Chrome failed to launch through macOS NSWorkspace: ${launched.error.message}`);
+    error.cause = launched.error;
+    throw error;
+  }
+  if (launched.status !== 0) {
+    const detail = launched.stderr.trim() || launched.stdout.trim() || `status ${launched.status}`;
+    throw new Error(`Chrome failed to launch through macOS NSWorkspace: ${detail}`);
+  }
+
+  const pid = Number.parseInt(launched.stdout.trim(), 10);
+  if (!Number.isInteger(pid) || pid < 1) {
+    throw new Error('Chrome launched through macOS NSWorkspace, but no process PID was returned');
+  }
+  return { pid };
+}
+
 export function launchChrome({ port = DEFAULT_PORT, profileName = null, userDataDir = null, ownerToken = null, ownerId = null, headless = false, includeGoogle = false } = {}) {
   ensureCacheDir();
   const normalizedPort = normalizePort(port);
@@ -1462,15 +1499,19 @@ export function launchChrome({ port = DEFAULT_PORT, profileName = null, userData
   assertChromeBinaryLaunchable(chromeBin);
   const pidFile = pidFileForPort(normalizedPort);
   const stateFile = stateFileForPort(normalizedPort);
-  const proc = spawn(chromeBin, args, {
-    detached: true,
-    stdio: 'ignore',
-  });
-  proc.once('error', (error) => {
-    rmSync(pidFile, { force: true });
-    rmSync(stateFile, { force: true });
-    console.error(`[browser-control] Chrome spawn failed: ${error.message}`);
-  });
+  let proc = headless ? launchHeadlessChromeApp({ chromeBin, args }) : null;
+  if (!proc) {
+    proc = spawn(chromeBin, args, {
+      detached: true,
+      stdio: 'ignore',
+    });
+    proc.once('error', (error) => {
+      rmSync(pidFile, { force: true });
+      rmSync(stateFile, { force: true });
+      console.error(`[browser-control] Chrome spawn failed: ${error.message}`);
+    });
+    proc.unref();
+  }
   if (!Number.isInteger(proc.pid)) {
     throw new Error(`Chrome failed to start: no child process PID for ${chromeBin}`);
   }
@@ -1490,7 +1531,6 @@ export function launchChrome({ port = DEFAULT_PORT, profileName = null, userData
     args,
     startedAt: new Date().toISOString(),
   }, null, 2));
-  proc.unref();
   return proc;
 }
 

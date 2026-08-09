@@ -1,0 +1,27 @@
+ObjC.import('AppKit');
+
+function run(argv) {
+  const applicationURL = $.NSURL.fileURLWithPath($(argv[0]));
+  const options = Number($.NSWorkspaceLaunchWithoutAddingToRecents)
+    | Number($.NSWorkspaceLaunchWithoutActivation)
+    | Number($.NSWorkspaceLaunchNewInstance)
+    | Number($.NSWorkspaceLaunchAndHide);
+  const configuration = $.NSMutableDictionary.dictionary;
+  configuration.setObjectForKey($(argv.slice(1)), $.NSWorkspaceLaunchConfigurationArguments);
+  configuration.setObjectForKey(
+    $.NSProcessInfo.processInfo.environment,
+    $.NSWorkspaceLaunchConfigurationEnvironment,
+  );
+  const error = Ref();
+  const launched = $.NSWorkspace.sharedWorkspace.launchApplicationAtURLOptionsConfigurationError(
+    applicationURL,
+    options,
+    configuration,
+    error,
+  );
+  if (!launched || launched.isNil()) {
+    const detail = error[0] ? error[0].localizedDescription.js : 'unknown error';
+    throw new Error(`NSWorkspace launch failed: ${detail}`);
+  }
+  return Number(launched.processIdentifier);
+}
