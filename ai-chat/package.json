@@ -13,6 +13,9 @@
     "coverage": "node --test --experimental-test-coverage test/*.mjs",
     "validate": "npm test && npm run typecheck"
   },
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "dependencies": {
     "@rezkam/browser-tools": "^1.0.1",
     "puppeteer-core": "^24.42.0"

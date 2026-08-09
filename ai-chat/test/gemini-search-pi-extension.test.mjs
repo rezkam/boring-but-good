@@ -69,7 +69,7 @@ test('pi extension abandons an in-flight search on abort without leaving the bro
   };
   createGeminiSearchExtension({ runBatch })({ registerTool(definition) { tool = definition; }, on() {} });
   const cleared = [];
-  const ctx = { ui: { setStatus(key, value) { cleared.push([key, value]); }, setWidget(key, value) { cleared.push([key, value]); } } };
+  const ctx = { hasUI: true, ui: { setStatus(key, value) { cleared.push([key, value]); }, setWidget(key, value) { cleared.push([key, value]); } } };
 
   const controller = new AbortController();
   const first = tool.execute('call-1', { query: 'first' }, controller.signal, undefined, ctx);
@@ -94,6 +94,32 @@ test('pi extension abandons an in-flight search on abort without leaving the bro
   releaseFirst();
   await second;
   assert.deepEqual(started, ['first', 'second']);
+});
+
+test('pi extension skips UI updates in non-interactive sessions', async () => {
+  let tool;
+  const runBatch = async (_params, deps) => {
+    deps.onProgress({ phase: 'searching', index: 0, total: 1, query: 'only query' });
+    return {
+      queryCount: 1,
+      successfulQueries: 1,
+      failedQueries: 0,
+      cancelled: false,
+      files: [{ query: 'only query', path: '/result-store/result.md' }],
+      failures: [],
+    };
+  };
+  createGeminiSearchExtension({ runBatch })({ registerTool(definition) { tool = definition; }, on() {} });
+
+  const ctx = {
+    hasUI: false,
+    ui: {
+      setStatus() { assert.fail('setStatus must not run without UI'); },
+      setWidget() { assert.fail('setWidget must not run without UI'); },
+    },
+  };
+  const result = await tool.execute('call-1', { query: 'only query' }, undefined, undefined, ctx);
+  assert.match(result.content[0].text, /1\/1/);
 });
 
 test('pi extension registers a file-backed multi-query Gemini search tool', async () => {
@@ -130,6 +156,7 @@ test('pi extension registers a file-backed multi-query Gemini search tool', asyn
   const result = await tool.execute('call-1', {
     queries: ['first query', 'second query'],
   }, undefined, update => updates.push(update), {
+    hasUI: true,
     ui: { setStatus: (...args) => statuses.push(args), setWidget: () => {}, theme },
   });
 
