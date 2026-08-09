@@ -272,6 +272,11 @@ No code review per slice. Verify against the slice's acceptance criteria and mov
 
 Three failed fix rounds on one slice means it is not converging. Stop and report.
 
+When every remaining task needs a decision only the user can make, say so with
+`coordinator_campaign action:"blocked"` and a `waiting_on` naming the decision. That stops
+the continuation and puts the reason in the status line. Do not keep producing preparation
+work around a gate: unbounded preparation looks like progress and moves nothing.
+
 ## Review, once, at the end
 
 One review pass after all slices are done, not per slice. The user has asked for this
