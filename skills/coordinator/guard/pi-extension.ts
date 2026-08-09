@@ -38,6 +38,7 @@ import {
 	CLAUDE_DEFAULT_TIERS,
 	parseModelPin,
 	findTierClash,
+	amendAuthorization,
 	parseTierEntries,
 	recordIntegration,
 	renderTiers,
@@ -996,6 +997,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 
 			return suggest([
 				{ value: "", label: "campaign", description: "show the contract, or the armed state" },
+				{ value: "authorize ", label: "authorize", description: "widen the recorded scope, for example a force-push you just approved" },
 				{ value: "models", label: "models", description: "show or set the tier lists" },
 				{ value: "judge", label: "judge", description: "show or set the prompt judge" },
 				{ value: "arm", label: "arm", description: "turn enforcement on" },
@@ -1043,6 +1045,22 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 					show("Campaign active.");
 					break;
 				default: {
+					// Only the user can widen scope, which is why this is a command and not a tool.
+					if (command === "authorize" || command.startsWith("authorize ")) {
+						if (!campaign) {
+							show("No campaign is registered, so there is no authorization to widen.");
+							break;
+						}
+						const addition = args.trim().slice("authorize".length).trim();
+						show(
+							addition
+								? ((campaign = amendAuthorization(campaign, addition)),
+									persist(),
+									`Authorization widened. It now reads:\n\n${campaign.authorized}\n\nEnforced from the next tool call.`)
+								: `Usage: /campaign authorize <scope>\n\nCurrent authorization:\n${campaign.authorized}`,
+						);
+						break;
+					}
 					if (command === "models" || command.startsWith("models ")) {
 						show(handleModels(args.trim().slice("models".length).trim()));
 						break;
