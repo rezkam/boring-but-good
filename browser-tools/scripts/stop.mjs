@@ -121,6 +121,7 @@ if (result.status === 'would-stop') {
   process.exit(1);
 } else {
   console.error(`✗ Failed to stop Chrome: ${result.error?.message || 'unknown error'}`);
+  process.exit(1);
 }
 
 if (result.cleaned) console.log('✓ Cleaned up cached profile copy');

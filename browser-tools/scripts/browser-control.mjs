@@ -951,7 +951,19 @@ export function headlessUserAgent(chromeBin = browserToolsChromeBin()) {
 
 export function managedBrowserForUserDataDir(userDataDir) {
   const result = spawnSync('ps', ['-axo', 'pid=,command='], { encoding: 'utf-8' });
-  if (result.error || result.status !== 0) return null;
+  if (result.error) {
+    const error = new Error(
+      `Cannot read the managed Chrome process inventory: ps failed to start (${result.error.code || 'unknown error'}). Refusing to treat a profile clone as unused.`,
+    );
+    error.cause = result.error;
+    throw error;
+  }
+  if (result.status !== 0) {
+    const outcome = result.signal ? `signal ${result.signal}` : `status ${result.status ?? 'unknown'}`;
+    throw new Error(
+      `Cannot read the managed Chrome process inventory: ps exited with ${outcome}. Refusing to treat a profile clone as unused.`,
+    );
+  }
 
   for (const line of result.stdout.split('\n')) {
     const trimmed = line.trim();
@@ -1885,8 +1897,10 @@ export function stopChrome({ port = DEFAULT_PORT, clean = false, dryRun = false,
       const killSafety = verifyManagedChromeProcess({ pid, port: normalizedPort, state });
       if (killSafety.ok) {
         process.kill(pid, 'SIGKILL');
-        waitForProcessExit(pid, 1000);
-        status = 'killed';
+        status = forcedKillStatus(waitForProcessExit(pid, 1000));
+        if (status === 'failed') {
+          error = new Error('Managed Chrome remained alive after SIGKILL');
+        }
       } else {
         status = 'failed';
         error = new Error(`Refusing SIGKILL after failed safety recheck: ${killSafety.reason}`);
@@ -1898,6 +1912,13 @@ export function stopChrome({ port = DEFAULT_PORT, clean = false, dryRun = false,
       status = 'failed';
       error = e;
     }
+  }
+
+  // A failed stop means the browser may still own its process and clone. Keep every lifecycle handle
+  // so the owner can retry and the process inventory can still classify it. Removing them here turns
+  // a shutdown failure into the same invisible orphan this cleanup path exists to prevent.
+  if (status === 'failed') {
+    return { status, port: normalizedPort, pid, cleaned: false, error, ...(ownership.reclaimedUnowned ? { reclaimedUnowned: true } : {}) };
   }
 
   rmSync(paths.pidFile, { force: true });
@@ -2010,10 +2031,19 @@ function processStartIdentity(pid) {
   return createHash('sha256').update(identity, 'utf8').digest('hex');
 }
 
+function processIsZombie(pid) {
+  const result = spawnSync('ps', ['-p', String(pid), '-o', 'state='], { encoding: 'utf-8' });
+  if (result.error || result.status !== 0) return false;
+  return result.stdout.trim().startsWith('Z');
+}
+
 function processExists(pid) {
   try {
     process.kill(pid, 0);
-    return true;
+    // A directly spawned child stays in the process table as a zombie until Node's event loop can
+    // reap it. Signals cannot affect it, so treating it as alive causes synchronous shutdown to
+    // report failure and retain lifecycle data for a browser that has already exited.
+    return !processIsZombie(pid);
   } catch (e) {
     return e.code !== 'ESRCH';
   }
