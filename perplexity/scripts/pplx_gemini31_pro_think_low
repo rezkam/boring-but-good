@@ -1,4 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec uv run "$DIR/perplexity_tool.py" "pplx_gemini31_pro_think_low" "$@"

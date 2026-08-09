@@ -3,7 +3,7 @@
 Shell-script and workflow skills that give AI coding agents (Claude Code, etc.) the ability to
 interact with engineering systems. Each skill is a directory with a `SKILL.md`. Some keep their
 executables in a `scripts/` folder (the `workflow-tools/` skills, `browser-tools`, `ai-chat`,
-`codex`, `finance`, `perplexity`, `skanetrafiken`), others at the skill root
+`codex`, `skanetrafiken`), others at the skill root
 (`coordinator/dispatch-audit.sh`, `pr-ready/pr-state.sh`), and several are prose only.
 
 This file deliberately does not inventory the skills or the test suites. Run `ls` and read

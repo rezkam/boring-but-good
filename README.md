@@ -17,7 +17,6 @@ Skills that give AI coding agents (Claude Code, etc.) the ability to interact wi
 | [**skanetrafiken**](skanetrafiken/) | Plan public transport journeys in southern Sweden with real-time delays. |
 | [**java-21-to-25-migration**](java-21-to-25-migration/) | Migrate a Java project from JDK 21 to JDK 25 with a phased plan covering all breaking changes. |
 | [**browser-tools**](browser-tools/) | Control managed Chrome, record visual interactions, capture HAR or raw CDP events, and extract generic page content. |
-| [**finance**](finance/) | Fetch browser-authenticated market and macroeconomic data through Browser Tools managed Chrome. |
 | [**ai-chat**](ai-chat/) | Query browser-authenticated AI providers through Browser Tools managed Chrome. |
 | [**codex**](codex/) | Run non-interactive Codex code review sessions, track long-running jobs, and continue review threads with extra prompts. |
 
