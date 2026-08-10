@@ -335,16 +335,22 @@ These are the tiers that will be enforced. Position one is what to reach for; th
 ${renderTiers(tiers)}`;
 	}
 
-	const staleMinutes = campaign.lastStatusAt === null ? null : Math.floor((now - campaign.lastStatusAt) / 60_000);
-	const openLanes = campaign.lanes.filter((lane) => lane.state !== "integrated");
+	// This string is appended to the system prompt on before_agent_start, which fires once
+	// per turn, and pi marks the system prompt as a cache breakpoint. So it must depend only
+	// on what the user set when the campaign started: a clock reading, a slice count or a
+	// lane list here re-reads the whole context at uncached prices on every turn. The live
+	// numbers reach the coordinator through every coordinator_campaign result and the status
+	// line, neither of which is part of the cached prefix. `now` is kept in the signature
+	// because callers pass it and the armed-only branch may yet need it.
+	void now;
 
-	return `Coordinator guard: campaign ${campaign.slug} is ${campaign.status}.
+	return `Coordinator guard: campaign ${campaign.slug} is registered.
 
 Worktree: ${campaign.worktree}
 Plan: ${campaign.planPath ?? "unrecorded"}
-Slices: ${campaign.slicesDone} done of ${campaign.slicesTotal}
-Open lanes: ${laneSummary(campaign)}
-Last status block: ${staleMinutes === null ? "never" : `${staleMinutes} minutes ago`}
+Slice counts, open lanes and status-block staleness are not repeated here, because this text
+is a cached prefix. Read them from any coordinator_campaign result, which always returns the
+current campaign, and from the status line.
 
 This campaign is the goal. It continues across turns and survives a provider error, so a
 failed turn is retried rather than treated as an ending. Do not park it: marking a goal
@@ -380,7 +386,8 @@ ${reviewTable(tiers)}
 - At most ${config.laneCap} open writer lanes; a returned lane counts until you record it integrated with coordinator_lane.
 - A launch while the status block is older than ${config.statusMaxAgeMs / 60_000} minutes fails. Print the block, then launch in the same turn.
 - The same run can be steered ${config.steerCap} times; past that, stop it, split into serial milestones, and re-dispatch.
-${openLanes.length > 0 ? "\nAgents are in flight. Ending your turn without reporting on them is not an option: report, then keep working." : ""}`;
+
+While any agent is in flight, ending your turn without reporting on it is not an option: report, then keep working.`;
 }
 
 export function continuationPrompt(campaign: Campaign): string {

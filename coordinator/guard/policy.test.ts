@@ -548,16 +548,44 @@ test("laneSummary hides integrated lanes and reports the open ones", () => {
 	);
 });
 
-test("the injected contract carries the live campaign state, and nothing once closed", () => {
+test("the injected contract is a cache-stable prefix", () => {
+	// pi marks the system prompt as a cache breakpoint, and before_agent_start fires once
+	// per turn, so anything that moves here re-reads the whole context at uncached prices.
+	const live = campaign({
+		slicesDone: 2,
+		lanes: [{ key: "s3", kind: "implement", model: "m:high", startedAt: 1, state: "running" }],
+	});
+
+	const early = contractPrompt(live, true, 1_000);
+	const muchLater = contractPrompt(live, true, 1_000 + 45 * 60_000);
+	assert.equal(early, muchLater, "the wall clock must not move the prefix");
+
+	const advanced = contractPrompt(
+		{
+			...live,
+			slicesDone: 3,
+			lanes: [{ key: "s9", kind: "review", model: "other:low", startedAt: 2, state: "returned" }],
+		},
+		true,
+		1_000,
+	);
+	assert.equal(early, advanced, "campaign progress must not move the prefix");
+});
+
+test("the injected contract carries the campaign's fixed identity and rules, and nothing once closed", () => {
 	const text = contractPrompt(
 		campaign({ slicesDone: 2, lanes: [{ key: "s3", kind: "implement", model: "m:high", startedAt: 1, state: "running" }] }),
 		true,
 		1_000,
 	);
-	assert.match(text, /2 done of 4/);
-	assert.match(text, /s3 \(implement/);
 	assert.match(text, /ROUTE: <key> \| class <1\|2\|3>/);
-	assert.match(text, /Agents are in flight/);
+	assert.match(text, /agent is in flight/);
+
+	// The moving numbers are deliberately absent: they would invalidate the cached prefix
+	// every turn, and every coordinator_campaign result already returns them.
+	assert.doesNotMatch(text, /2 done of 4/);
+	assert.doesNotMatch(text, /s3 \(implement/);
+	assert.doesNotMatch(text, /minutes ago/);
 
 	assert.equal(contractPrompt(null, false, 1_000), "");
 	assert.equal(contractPrompt(campaign({ status: "closed" }), false, 1_000), "");
