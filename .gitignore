@@ -27,6 +27,9 @@ browser-tools/.tmp-*.mjs
 browser-tools/*.tmp.mjs
 browser-tools/v2-*.mjs
 browser-tools/dashboard-shots.mjs
+skills/finance/config/*.local.json
+skills/ai-chat/config/*.local.json
+# Keep legacy locations ignored while existing checkouts migrate local config files.
 finance/config/*.local.json
 ai-chat/config/*.local.json
 

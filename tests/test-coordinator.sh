@@ -6,7 +6,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/forbidden.sh"
 # providers and paths, so it reproduces pi's record shapes without any real session data.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-COORD_DIR="${SCRIPT_DIR}/../coordinator"
+COORD_DIR="${SCRIPT_DIR}/../skills/coordinator"
 AUDIT="${COORD_DIR}/dispatch-audit.sh"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'

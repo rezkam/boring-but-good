@@ -3,4 +3,4 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-exec "$SCRIPT_DIR/../codex/tests/run-tests.sh" --offline
+exec "$SCRIPT_DIR/../skills/codex/tests/run-tests.sh" --offline

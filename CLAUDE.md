@@ -1,15 +1,15 @@
 # boring-but-good
 
-Shell-script and workflow skills that give AI coding agents (Claude Code, etc.) the ability to
-interact with engineering systems. Each skill is a directory with a `SKILL.md`. Some keep their
-executables in a `scripts/` folder (the `workflow-tools/` skills, `browser-tools`, `ai-chat`,
-`codex`, `finance`, `perplexity`, `skanetrafiken`), others at the skill root
-(`coordinator/dispatch-audit.sh`, `pr-ready/pr-state.sh`), and several are prose only.
+Shell-script and workflow skills that give coding agents the ability to interact with engineering
+systems. Publishable skills live under `skills/<skill-name>/`, and each has a `SKILL.md`.
+`browser-tools/` is the deliberate exception because it is also an npm workspace. Some skills
+keep executables in a `scripts/` folder, others keep them at the skill root, and several are
+prose only.
 
-This file deliberately does not inventory the skills or the test suites. Run `ls` and read
+This file deliberately does not inventory the skills or the test suites. Run `ls skills` and read
 `tests/test-all.sh` for the current list: every previous attempt to keep an inventory here went
-stale and misled the next reader. Not everything at the top level is a skill: `code-review/` is
-a prompt and rubric set, `hooks/` ships a PreToolUse guard, and `tests/` is the suite runner.
+stale and misled the next reader. `code-review/` is a prompt and rubric set, `hooks/` ships a
+PreToolUse guard, and `tests/` is the suite runner.
 
 ## Architecture
 
@@ -56,8 +56,8 @@ Run: `bash tests/test-all.sh`. It invokes every suite in `tests/` and aggregates
   `jenkins-test-failures.sh` must **not** have `set -e` (it handles 404s with `|| true`), and
   `tests/test-jenkins.sh` fails if it gains one. Check the skill's own suite before adding or
   removing the line.
-- **Shebangs are mixed.** Both `#!/bin/bash` and `#!/usr/bin/env bash` are in use; `codex/`,
-  `hooks/`, `setup.sh`, `pr-ready/pr-state.sh`, and `coordinator/dispatch-audit.sh` take the
+- **Shebangs are mixed.** Both `#!/bin/bash` and `#!/usr/bin/env bash` are in use; `skills/codex/`,
+  `hooks/`, `setup.sh`, `skills/pr-ready/pr-state.sh`, and `skills/coordinator/dispatch-audit.sh` take the
   `env` form. Match the directory you are editing. Scripts should also pass `zsh -n`, which the
   jira, argocd, and coordinator suites check.
 - Config: `~/.boring/<skill>/` with separate files per value (not a single config file)

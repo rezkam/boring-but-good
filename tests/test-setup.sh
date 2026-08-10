@@ -27,6 +27,44 @@ if bash -n "$SETUP" 2>/dev/null; then pass "bash syntax OK"; else fail "bash syn
 if head -1 "$SETUP" | grep -qE '^#!/.*(bash|sh)'; then pass "Has shebang"; else fail "Missing shebang"; fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
+header "Setup: Canonical skills layout"
+# ═══════════════════════════════════════════════════════════════════════════════
+
+if grep -q 'SKILLS_SRC="${SCRIPT_DIR}/skills"' "$SETUP"; then
+    pass "setup.sh reads skills from skills/"
+else
+    fail "setup.sh should read skills from skills/"
+fi
+
+for skill in ai-chat argocd codex commit coordinator dependency-track finance java-21-to-25-migration jenkins jira perplexity pr-ready skanetrafiken sonarqube tdd to-tasks verify; do
+    if [ -f "${REPO_DIR}/skills/${skill}/SKILL.md" ]; then
+        pass "${skill} is under skills/"
+    else
+        fail "${skill} should be under skills/"
+    fi
+done
+
+if [ -f "${REPO_DIR}/browser-tools/SKILL.md" ]; then
+    pass "browser-tools remains at the repository root"
+else
+    fail "browser-tools should remain at the repository root"
+fi
+
+INVALID_SKILL_PATHS=""
+while IFS= read -r skill_path; do
+    if [ "$skill_path" = "browser-tools/SKILL.md" ] || printf '%s\n' "$skill_path" | grep -qE '^skills/[^/]+/SKILL\.md$'; then
+        continue
+    fi
+    INVALID_SKILL_PATHS="${INVALID_SKILL_PATHS}${skill_path}\n"
+done < <(git -C "$REPO_DIR" ls-files '*SKILL.md')
+
+if [ -z "$INVALID_SKILL_PATHS" ]; then
+    pass "Every tracked skill uses the canonical layout"
+else
+    fail "Tracked skills found outside skills/ and browser-tools/" "$(printf '%b' "$INVALID_SKILL_PATHS")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
 header "Setup: Zsh safety"
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -423,7 +461,7 @@ fi
 header "Setup: java-21-to-25-migration source directory"
 # ═══════════════════════════════════════════════════════════════════════════════
 
-JAVA_MIG_DIR="${REPO_DIR}/java-21-to-25-migration"
+JAVA_MIG_DIR="${REPO_DIR}/skills/java-21-to-25-migration"
 
 if [ -d "$JAVA_MIG_DIR" ]; then
     pass "java-21-to-25-migration/ directory exists"
@@ -539,7 +577,7 @@ header "Setup: No duplicate agent file in agents/ directory"
 if [ -f "$REPO_DIR/agents/java-21-to-25-migration.md" ]; then
     fail "Duplicate agent file still exists in agents/"
 else
-    pass "No duplicate in agents/ (single source in java-21-to-25-migration/SKILL.md)"
+    pass "No duplicate in agents/ (single source in skills/java-21-to-25-migration/SKILL.md)"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -658,12 +696,7 @@ header "Setup: All skills have source directories"
 # ═══════════════════════════════════════════════════════════════════════════════
 
 for skill in dependency-track jenkins jira to-tasks sonarqube argocd skanetrafiken java-21-to-25-migration codex; do
-    skill_dir="${REPO_DIR}/${skill}"
-    case " ${skill} " in
-        " dependency-track "|" jenkins "|" jira "|" sonarqube "|" argocd ")
-            skill_dir="${REPO_DIR}/workflow-tools/${skill}"
-            ;;
-    esac
+    skill_dir="${REPO_DIR}/skills/${skill}"
     if [ -d "$skill_dir" ]; then
         pass "${skill}/ directory exists"
     else
