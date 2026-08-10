@@ -11,8 +11,7 @@ RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; BLUE=$'\033[0;34m'
 CYAN=$'\033[0;36m'; BOLD=$'\033[1m'; DIM=$'\033[2m'; RESET=$'\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SKILLS_SRC="${SCRIPT_DIR}"
-WORKFLOW_TOOL_SKILLS="argocd dependency-track jenkins jira sonarqube"
+SKILLS_SRC="${SCRIPT_DIR}/skills"
 BORING_DIR="${HOME}/.boring"
 
 # ── Output helpers ──────────────────────────────────────────────────────────
@@ -356,7 +355,7 @@ check_and_install_deps() {
         fi
 
         if [ "$INSTALL_JIRA" = "true" ]; then
-            local jira_scripts="${SKILLS_SRC}/workflow-tools/jira/scripts"
+            local jira_scripts="${SKILLS_SRC}/jira/scripts"
             if ! has_cmd npm; then
                 warn "Skipping jira skill (requires npm for ADF conversion helpers)."
                 INSTALL_JIRA=false
@@ -541,10 +540,7 @@ select_install_path() {
 # Usage: _link_skill_to <name> <target_dir>
 _skill_source() {
     local name="$1"
-    case " ${WORKFLOW_TOOL_SKILLS} " in
-        *" ${name} "*) printf "%s/workflow-tools/%s" "$SKILLS_SRC" "$name" ;;
-        *) printf "%s/%s" "$SKILLS_SRC" "$name" ;;
-    esac
+    printf "%s/%s" "$SKILLS_SRC" "$name"
 }
 
 _link_skill_to() {

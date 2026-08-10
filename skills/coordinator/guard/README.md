@@ -49,7 +49,7 @@ Symlink this directory into pi's extension directory, so the installed copy is t
 repository rather than a duplicate that drifts:
 
 ```bash
-ln -sfn "$PWD/coordinator/guard" ~/.pi/agent/extensions/coordinator-guard
+ln -sfn "$PWD/skills/coordinator/guard" ~/.pi/agent/extensions/coordinator-guard
 ```
 
 Link the directory, not `pi-extension.ts`. pi's loader resolves relative imports against

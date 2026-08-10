@@ -45,7 +45,7 @@ By default, AI Chat copies and uses Chrome profile `Default`, so normal logged-i
 
 ## Examples
 
-Run commands from `ai-chat/`.
+Run commands from the skill directory, which is `skills/ai-chat/` in this repository.
 
 ```bash
 # ChatGPT identities are provider IDs only. New writes use the visible UI; reads use authenticated same-origin network requests.

@@ -196,11 +196,11 @@ server_out: $OUT_FILE
 server_err: $ERR_FILE
 
 Send a turn (first turn starts the conversation thread):
-  codex/scripts/codex-mcp-send.sh $RUN_ID "Your prompt"
+  $SCRIPT_DIR/codex-mcp-send.sh $RUN_ID "Your prompt"
 
 Check server and conversation state:
-  codex/scripts/codex-mcp-status.sh $RUN_ID
+  $SCRIPT_DIR/codex-mcp-status.sh $RUN_ID
 
 Stop the server when done:
-  codex/scripts/codex-mcp-stop.sh $RUN_ID
+  $SCRIPT_DIR/codex-mcp-stop.sh $RUN_ID
 EOF
