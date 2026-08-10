@@ -297,25 +297,47 @@ test('pi extension renders terminal failures as one themed tool-row line', () =>
   assert.deepEqual(rendered.render(80).map(line => line.trimEnd()), ['✗ Gemini search failed.']);
 });
 
-test('pi extension keeps a multi-query call compact until the tool row is expanded', () => {
+test('pi extension previews every query and expands to each full prompt', () => {
   let tool;
   createGeminiSearchExtension()({ registerTool(definition) { tool = definition; }, on() {} });
-  const args = { queries: ['first research angle', 'second research angle', 'third research angle'] };
+  const args = { queries: [
+    'first research angle with enough detail to require truncation FIRST_FULL_END',
+    'second research angle with enough detail to require truncation SECOND_FULL_END',
+    'third research angle with enough detail to require truncation THIRD_FULL_END',
+  ] };
 
   const collapsed = tool.renderCall(args, theme, { expanded: false });
-  assert.equal(collapsed.render(80).length, 1);
-  assert.match(collapsed.render(80)[0], /3 queries/);
-  assert.doesNotMatch(collapsed.render(80)[0], /first research angle/);
+  const collapsedText = collapsed.render(100).join('\n');
+  assert.match(collapsedText, /3 queries/);
+  assert.match(collapsedText, /first research angle/);
+  assert.match(collapsedText, /second research angle/);
+  assert.match(collapsedText, /third research angle/);
+  assert.doesNotMatch(collapsedText, /FIRST_FULL_END|SECOND_FULL_END|THIRD_FULL_END/);
 
   const expanded = tool.renderCall(args, theme, { expanded: true, lastComponent: collapsed });
+  const expandedText = expanded.render(100).join('\n');
   assert.equal(expanded, collapsed);
-  assert.match(expanded.render(80).join('\n'), /first research angle/);
-  assert.match(expanded.render(80).join('\n'), /third research angle/);
+  assert.match(expandedText, /FIRST_FULL_END/);
+  assert.match(expandedText, /SECOND_FULL_END/);
+  assert.match(expandedText, /THIRD_FULL_END/);
 
   const deduplicated = tool.renderCall({
     queries: ['first research angle', 'first research angle', 'second research angle'],
   }, theme, { expanded: false });
   assert.match(deduplicated.render(80)[0], /2 queries/);
+});
+
+test('pi extension expands a single full prompt', () => {
+  let tool;
+  createGeminiSearchExtension()({ registerTool(definition) { tool = definition; }, on() {} });
+  const query = 'single research prompt with enough detail to hide its distinctive SINGLE_FULL_END';
+
+  const collapsed = tool.renderCall({ query }, theme, { expanded: false });
+  assert.doesNotMatch(collapsed.render(100).join('\n'), /SINGLE_FULL_END/);
+
+  const expanded = tool.renderCall({ query }, theme, { expanded: true, lastComponent: collapsed });
+  assert.equal(expanded, collapsed);
+  assert.match(expanded.render(100).join('\n'), /SINGLE_FULL_END/);
 });
 
 test('pi extension registers a file-backed multi-query Gemini search tool', async () => {

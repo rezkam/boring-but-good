@@ -214,17 +214,19 @@ export function createGeminiSearchExtension(
           return text;
         }
         if (queries.length === 1) {
-          const query = queries[0].length > 64 ? `${queries[0].slice(0, 61)}...` : queries[0];
+          const query = context.expanded || queries[0].length <= 64
+            ? queries[0]
+            : `${queries[0].slice(0, 61)}...`;
           text.setText(theme.fg('toolTitle', theme.bold('gemini search ')) + theme.fg('accent', `"${query}"`));
           return text;
         }
 
         const lines = [theme.fg('toolTitle', theme.bold('gemini search ')) + theme.fg('accent', `${queries.length} queries`)];
-        if (context.expanded) {
-          for (const query of queries) {
-            const display = query.length > 56 ? `${query.slice(0, 53)}...` : query;
-            lines.push(theme.fg('muted', `  ${display}`));
-          }
+        for (const [index, query] of queries.entries()) {
+          const display = context.expanded || query.length <= 56
+            ? query
+            : `${query.slice(0, 53)}...`;
+          lines.push(theme.fg('muted', `  ${index + 1}. ${display}`));
         }
         text.setText(lines.join('\n'));
         return text;
