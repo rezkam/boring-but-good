@@ -549,27 +549,56 @@ test("laneSummary hides integrated lanes and reports the open ones", () => {
 });
 
 test("the injected contract is a cache-stable prefix", () => {
-	// pi marks the system prompt as a cache breakpoint, and before_agent_start fires once
-	// per turn, so anything that moves here re-reads the whole context at uncached prices.
-	const live = campaign({
-		slicesDone: 2,
-		lanes: [{ key: "s3", kind: "implement", model: "m:high", startedAt: 1, state: "running" }],
-	});
+	// pi marks the system prompt as a cache breakpoint and before_agent_start fires once per
+	// turn, so anything that moves here re-reads the whole context at uncached prices. The
+	// clock is gone from the signature, so only campaign state can still move it. These two
+	// campaigns differ in every field the campaign changes on its own, and agree only on what
+	// the user fixed at /campaign start.
+	const fixed = {
+		version: 1 as const,
+		slug: "demo",
+		worktree: WORKTREE,
+		planPath: `${WORKTREE}/plan.html`,
+		authorized: "implement approved slices; commit; push; open and update the PR",
+		startedAt: 1_000,
+	};
 
-	const early = contractPrompt(live, true, 1_000);
-	const muchLater = contractPrompt(live, true, 1_000 + 45 * 60_000);
-	assert.equal(early, muchLater, "the wall clock must not move the prefix");
+	const fresh: Campaign = {
+		...fixed,
+		status: "active",
+		slicesTotal: 4,
+		slicesDone: 0,
+		lanes: [],
+		routes: [],
+		steers: {},
+		lastStatusAt: null,
+	};
 
-	const advanced = contractPrompt(
-		{
-			...live,
-			slicesDone: 3,
-			lanes: [{ key: "s9", kind: "review", model: "other:low", startedAt: 2, state: "returned" }],
-		},
-		true,
-		1_000,
+	const underway: Campaign = {
+		...fixed,
+		status: "blocked",
+		blockedOn: "an owner decision on the state store",
+		slicesTotal: 9,
+		slicesDone: 7,
+		lanes: [
+			{ key: "s3", kind: "implement", model: "m:high", startedAt: 1, state: "running" },
+			{ key: "s4", kind: "review", model: "other:low", startedAt: 2, state: "returned" },
+		],
+		routes: [{ key: "s3", axis: "class", cls: 3, model: "m:high", reason: "cross-layer" }],
+		steers: { s3: 2 },
+		grants: { forcePush: ["feat/demo"] },
+		lastStatusAt: 900_000,
+		lastStatusProblem: "the block named no open lane",
+	};
+
+	assert.equal(
+		contractPrompt(fresh, true),
+		contractPrompt(underway, true),
+		"no field the campaign changes on its own may move the cached prefix",
 	);
-	assert.equal(early, advanced, "campaign progress must not move the prefix");
+
+	// The armed-but-unregistered branch is a prefix too, and it is reached twice per campaign.
+	assert.equal(contractPrompt(null, true), contractPrompt(null, true));
 });
 
 test("the injected contract carries the campaign's fixed identity and rules, and nothing once closed", () => {
@@ -587,9 +616,9 @@ test("the injected contract carries the campaign's fixed identity and rules, and
 	assert.doesNotMatch(text, /s3 \(implement/);
 	assert.doesNotMatch(text, /minutes ago/);
 
-	assert.equal(contractPrompt(null, false, 1_000), "");
-	assert.equal(contractPrompt(campaign({ status: "closed" }), false, 1_000), "");
-	assert.match(contractPrompt(null, true, 1_000), /coordinator_campaign/);
+	assert.equal(contractPrompt(null, false), "");
+	assert.equal(contractPrompt(campaign({ status: "closed" }), false), "");
+	assert.match(contractPrompt(null, true), /coordinator_campaign/);
 });
 
 test("the automatic continuation names the lanes and orders liveness before new work", () => {
