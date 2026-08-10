@@ -4,6 +4,7 @@ import { Type, type Static } from 'typebox';
 
 import {
   DEFAULT_GEMINI_SEARCH_TIMEOUT_SECONDS,
+  hasGeminiSearchProviderRunInFlight,
   runGeminiSearchBatch,
   stopOwnedAiChatBrowser,
 } from './runtime.mjs';
@@ -33,6 +34,11 @@ type GeminiSearchProgress = {
   error?: string;
 };
 
+type GeminiSearchProgressState = GeminiSearchProgress & {
+  successfulQueries: number;
+  failedQueries: number;
+};
+
 type GeminiSearchBatch = {
   queryCount: number;
   successfulQueries: number;
@@ -42,7 +48,7 @@ type GeminiSearchBatch = {
   failures: Array<{ query: string; error: string }>;
 };
 
-type GeminiSearchDetails = GeminiSearchProgress | GeminiSearchBatch;
+type GeminiSearchDetails = GeminiSearchProgressState | GeminiSearchBatch;
 type RunBatch = (
   params: GeminiSearchInput & { signal?: AbortSignal },
   deps: { onProgress: (progress: GeminiSearchProgress) => void },
@@ -52,9 +58,9 @@ function displayQueries(args: GeminiSearchInput): string[] {
   const values = Array.isArray(args.queries) && args.queries.length > 0
     ? args.queries
     : [args.query];
-  return values
+  return [...new Set(values
     .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
-    .map(value => value.trim());
+    .map(value => value.trim()))];
 }
 
 function resultText(batch: GeminiSearchBatch): string {
@@ -63,8 +69,11 @@ function resultText(batch: GeminiSearchBatch): string {
     'Read the full results from:',
     ...batch.files.map((file, index) => `${index + 1}. ${file.path}`),
   ];
-  if (batch.cancelled) lines.push('Cancellation was applied before the next query started.');
-  if (batch.failedQueries > 0) lines.push(`${batch.failedQueries} queries failed. Expand the tool result for details.`);
+  if (batch.cancelled) lines.push('Cancellation stopped the active search batch.');
+  if (batch.failedQueries > 0) {
+    const label = batch.failedQueries === 1 ? 'query' : 'queries';
+    lines.push(`${batch.failedQueries} ${label} failed. Expand the tool result for details.`);
+  }
   return lines.join('\n');
 }
 
@@ -78,14 +87,19 @@ export function createGeminiSearchExtension(
   {
     runBatch = runGeminiSearchBatch as RunBatch,
     stopOwnedBrowser = stopOwnedAiChatBrowser,
-  }: { runBatch?: RunBatch; stopOwnedBrowser?: () => Promise<unknown> } = {},
+    hasProviderRunInFlight = hasGeminiSearchProviderRunInFlight,
+  }: {
+    runBatch?: RunBatch;
+    stopOwnedBrowser?: () => Promise<unknown>;
+    hasProviderRunInFlight?: () => boolean;
+  } = {},
 ): ExtensionFactory {
   return function geminiSearchExtension(pi: ExtensionAPI) {
     let queue: Promise<unknown> = Promise.resolve();
     let searchesInFlight = 0;
 
     pi.on('session_shutdown', async () => {
-      if (searchesInFlight === 0) return;
+      if (searchesInFlight === 0 && !hasProviderRunInFlight()) return;
       await stopOwnedBrowser();
     });
     const runExclusive = <T>(operation: () => Promise<T>, signal?: AbortSignal, cancelResult?: () => T): Promise<T> => {
@@ -130,26 +144,33 @@ export function createGeminiSearchExtension(
 
       async execute(_toolCallId, params, signal, onUpdate) {
         const completed: Array<{ query: string; path: string }> = [];
+        const failures: Array<{ query: string; error: string }> = [];
+        let failedQueries = 0;
+        let executionSettled = false;
         const queryCount = Math.max(1, displayQueries(params).length);
-        return runExclusive(async () => {
-          searchesInFlight += 1;
-          try {
-            return await runSearch();
-          } finally {
-            searchesInFlight -= 1;
-          }
-        }, signal, () => {
-          if (completed.length === 0) throw abortError('Gemini search was cancelled.');
-          const batch: GeminiSearchBatch = {
-            queryCount,
-            successfulQueries: completed.length,
-            failedQueries: 0,
-            cancelled: true,
-            files: [...completed],
-            failures: [],
-          };
-          return { content: [{ type: 'text' as const, text: resultText(batch) }], details: batch };
-        });
+        try {
+          return await runExclusive(async () => {
+            searchesInFlight += 1;
+            try {
+              return await runSearch();
+            } finally {
+              searchesInFlight -= 1;
+            }
+          }, signal, () => {
+            if (completed.length === 0) throw abortError('Gemini search was cancelled.');
+            const batch: GeminiSearchBatch = {
+              queryCount,
+              successfulQueries: completed.length,
+              failedQueries,
+              cancelled: true,
+              files: [...completed],
+              failures: [...failures],
+            };
+            return { content: [{ type: 'text' as const, text: resultText(batch) }], details: batch };
+          });
+        } finally {
+          executionSettled = true;
+        }
 
         async function runSearch() {
           const batch = await runBatch({
@@ -160,10 +181,20 @@ export function createGeminiSearchExtension(
           }, {
             onProgress(progress) {
               if (progress.phase === 'complete' && progress.path) completed.push({ query: progress.query, path: progress.path });
-              onUpdate?.({
-                content: [{ type: 'text', text: `${progress.phase}: ${progress.query}` }],
-                details: progress,
-              });
+              if (progress.phase === 'failed') {
+                failedQueries += 1;
+                failures.push({ query: progress.query, error: progress.error || 'Gemini search failed.' });
+              }
+              if (!executionSettled) {
+                onUpdate?.({
+                  content: [{ type: 'text', text: `${progress.phase}: ${progress.query}` }],
+                  details: {
+                    ...progress,
+                    successfulQueries: completed.length,
+                    failedQueries,
+                  },
+                });
+              }
             },
           });
           return {
@@ -173,35 +204,52 @@ export function createGeminiSearchExtension(
         }
       },
 
-      renderCall(args, theme) {
+      renderCall(args, theme, context) {
+        const text = context.lastComponent instanceof Text
+          ? context.lastComponent
+          : new Text('', 0, 0);
         const queries = displayQueries(args);
         if (queries.length === 0) {
-          return new Text(theme.fg('toolTitle', theme.bold('gemini search ')) + theme.fg('error', '(no query)'), 0, 0);
+          text.setText(theme.fg('toolTitle', theme.bold('gemini search ')) + theme.fg('error', '(no query)'));
+          return text;
         }
         if (queries.length === 1) {
           const query = queries[0].length > 64 ? `${queries[0].slice(0, 61)}...` : queries[0];
-          return new Text(theme.fg('toolTitle', theme.bold('gemini search ')) + theme.fg('accent', `"${query}"`), 0, 0);
+          text.setText(theme.fg('toolTitle', theme.bold('gemini search ')) + theme.fg('accent', `"${query}"`));
+          return text;
         }
+
         const lines = [theme.fg('toolTitle', theme.bold('gemini search ')) + theme.fg('accent', `${queries.length} queries`)];
-        for (const query of queries) {
-          const display = query.length > 56 ? `${query.slice(0, 53)}...` : query;
-          lines.push(theme.fg('muted', `  ${display}`));
+        if (context.expanded) {
+          for (const query of queries) {
+            const display = query.length > 56 ? `${query.slice(0, 53)}...` : query;
+            lines.push(theme.fg('muted', `  ${display}`));
+          }
         }
-        return new Text(lines.join('\n'), 0, 0);
+        text.setText(lines.join('\n'));
+        return text;
       },
 
       renderResult(result, { expanded, isPartial }, theme, context) {
+        const text = context?.lastComponent instanceof Text
+          ? context.lastComponent
+          : new Text('', 0, 0);
         const details = result.details;
-        if (!details && context?.isError) return new Text(theme.fg('warning', 'Gemini search stopped.'), 0, 0);
+        if (!details) {
+          const message = result.content.find(item => item.type === 'text')?.text || 'Gemini search stopped.';
+          text.setText(theme.fg(context?.isError ? 'error' : 'warning', `${context?.isError ? '✗ ' : ''}${message}`));
+          return text;
+        }
+
         if (isPartial && 'phase' in details) {
           const total = Math.max(1, details.total);
-          const finished = details.phase === 'searching' ? details.index : details.index + 1;
-          const progress = Math.max(0, Math.min(1, finished / total));
-          const filled = Math.floor(progress * 10);
+          const finished = Math.max(0, Math.min(total, details.successfulQueries + details.failedQueries));
+          const filled = Math.floor((finished / total) * 10);
           const bar = `${'█'.repeat(filled)}${'░'.repeat(10 - filled)}`;
-          const display = details.query.length > 48 ? `${details.query.slice(0, 45)}...` : details.query;
-          const color = details.phase === 'failed' ? 'warning' : 'accent';
-          return new Text(theme.fg(color, `[${bar}] ${details.phase}: ${display}`), 0, 0);
+          const display = details.query.length > 28 ? `${details.query.slice(0, 25)}...` : details.query;
+          const color = details.phase === 'failed' || details.phase === 'cancelled' ? 'warning' : 'accent';
+          text.setText(theme.fg(color, `[${bar}] ${finished}/${total} · ${details.phase} · ${display}`));
+          return text;
         }
 
         if ('queryCount' in details) {
@@ -217,10 +265,12 @@ export function createGeminiSearchExtension(
           } else if (details.files.length > 0) {
             lines.push(theme.fg('dim', 'Expand to show result paths.'));
           }
-          return new Text(lines.join('\n'), 0, 0);
+          text.setText(lines.join('\n'));
+          return text;
         }
 
-        return new Text(theme.fg('accent', 'Starting Gemini search.'), 0, 0);
+        text.setText(theme.fg('accent', 'Starting Gemini search.'));
+        return text;
       },
     });
   };

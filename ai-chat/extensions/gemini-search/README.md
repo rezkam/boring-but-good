@@ -84,6 +84,4 @@ Gemini responses, prompts, account metadata, cookies, and profile labels must no
 
 The tool row shows per-query progress while pi waits. The extension does not write to the footer status, the widget area, or any other shared chrome, so the editor keeps its normal shape and stays usable during a search. Expanded results show file paths and sanitized per-query failures.
 
-Escape cancels a search. A queued search stops before it acquires the browser, and an in-flight search returns immediately while its browser session is still allowed to close. If pi exits while a search is running, the extension stops the browser that search started.
-
-A queued search cancels immediately before it acquires the managed browser. An active invocation reports cancellation immediately, while its underlying Gemini browser request continues only until its own cleanup finishes. The next search remains queued until that cleanup is complete, so browsers cannot overlap. Completed result paths remain available.
+Escape cancels a search. A queued search stops before it acquires the managed browser. An active invocation reports cancellation immediately, while the provider run continues only until its cleanup finishes. The next search remains queued until that cleanup completes, so browsers cannot overlap. If pi exits while either the tool call or provider cleanup is active, the extension stops the browser it started. Completed result paths remain available.
