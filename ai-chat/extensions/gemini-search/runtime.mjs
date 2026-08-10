@@ -102,9 +102,24 @@ async function writePrivateResult({ resultDir, query, answer, capturedAt }) {
   return path;
 }
 
+function canonicalUrl(value) {
+  try {
+    const url = new URL(value);
+    url.hash = '';
+    if ((url.protocol === 'https:' && url.port === '443') || (url.protocol === 'http:' && url.port === '80')) url.port = '';
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
 function hasSourceUrl(text, query) {
-  const queryUrls = new Set(String(query).match(/https?:\/\/[^\s)\]}>,]+/gi) || []);
-  const citations = [...String(text).matchAll(/\[[^\]]+\]\((https?:\/\/[^\s)\]}>,]+)\)/gi)].map(match => match[1]);
+  const queryUrls = new Set(
+    (String(query).match(/https?:\/\/[^\s)\]}>,]+/gi) || []).map(canonicalUrl).filter(Boolean),
+  );
+  const citations = [...String(text).matchAll(/\[[^\]]+\]\((https?:\/\/[^\s)\]}>,]+)\)/gi)]
+    .map(match => canonicalUrl(match[1]))
+    .filter(Boolean);
   return citations.some(url => !queryUrls.has(url));
 }
 
@@ -113,6 +128,14 @@ function publicResultPath(path) {
   return path === home || path.startsWith(`${home}/`)
     ? `~${path.slice(home.length)}`
     : path;
+}
+
+function withTimeout(operation, timeoutSeconds) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('Gemini search timed out.')), timeoutSeconds * 1000);
+  });
+  return Promise.race([operation, timeout]).finally(() => clearTimeout(timer));
 }
 
 function sanitizeRuntimeError(error) {
@@ -184,15 +207,22 @@ export async function stopOwnedAiChatBrowser({
   browserStateFile,
   readBrowserState = readAiChatBrowserState,
   browserTools = { browserWSEndpoint, stopChrome },
+  wait = ms => new Promise(resolve => setTimeout(resolve, ms)),
 } = {}) {
   const stateFile = resolveAiChatBrowserStateFile({}, browserStateFile ? { browserStateFile } : {});
-  const state = readBrowserState(stateFile);
-  const port = state?.port;
-  const ownerToken = state?.ownerToken;
-  if (!port || !ownerToken || state.status === 'stopped') return false;
-  const result = browserTools.stopChrome({ port, ownerToken, clean: false });
-  if (result?.status === 'stopped' || result?.status === 'already-gone') return true;
-  return !(await browserTools.browserWSEndpoint(port));
+  // Browser Tools starts detached. Give AI Chat a short bounded window to record the owner token.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const state = readBrowserState(stateFile);
+    const port = state?.port;
+    const ownerToken = state?.ownerToken;
+    if (port && ownerToken && state.status !== 'stopped') {
+      const result = browserTools.stopChrome({ port, ownerToken, clean: false });
+      if (result?.status === 'stopped' || result?.status === 'already-gone') return true;
+      return !(await browserTools.browserWSEndpoint(port));
+    }
+    if (attempt < 4) await wait(100);
+  }
+  return false;
 }
 
 export async function runGeminiSearchBatch(params = {}, deps = {}) {
@@ -221,7 +251,10 @@ export async function runGeminiSearchBatch(params = {}, deps = {}) {
     }
     onProgress({ phase: 'searching', index, total: queries.length, query });
     try {
-      const response = await queryGemini(buildGeminiSearchPrompt(query), { timeoutSeconds });
+      const response = await withTimeout(
+        queryGemini(buildGeminiSearchPrompt(query), { timeoutSeconds }),
+        timeoutSeconds,
+      );
       if (response.model !== GEMINI_SEARCH_MODEL || response.modelUiVerified !== true || response.temporary !== true) {
         throw new Error('Gemini search result did not satisfy the required UI mode and temporary-mode contract.');
       }

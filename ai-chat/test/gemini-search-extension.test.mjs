@@ -42,6 +42,18 @@ test('Gemini search rejects a response that contains no source URL', async () =>
   );
 });
 
+test('Gemini search applies timeoutSeconds to the whole query operation', async () => {
+  const resultDir = await mkdtemp(join(tmpdir(), 'gemini-search-timeout-'));
+  const startedAt = Date.now();
+  await assert.rejects(
+    () => runGeminiSearchBatch({ query: 'query', resultDir, timeoutSeconds: 0.01 }, {
+      queryGemini: async () => new Promise(() => {}),
+    }),
+    /timed out/i,
+  );
+  assert.ok(Date.now() - startedAt < 250);
+});
+
 test('Gemini search returns home-relative result paths to the agent', async () => {
   const privateRoot = ['.ag', 'ents'].join('');
   const absolutePath = join(homedir(), privateRoot, 'tmp', 'gemini-search', 'result.md');
@@ -97,11 +109,11 @@ test('Gemini shutdown attempts the owner-checked stop before probing DevTools', 
 
 test('Gemini search rejects a citation copied only from the query', async () => {
   const resultDir = await mkdtemp(join(tmpdir(), 'gemini-search-echoed-link-'));
-  const query = 'Summarize https://example.test/input';
+  const query = 'Summarize https://EXAMPLE.test:443/input#fragment';
   await assert.rejects(
     () => runGeminiSearchBatch({ query, resultDir }, {
       queryGemini: async () => ({
-        text: `I cannot verify this, but here is the input: ${query.match(/https:\/\/\S+/)[0]}`,
+        text: 'I cannot verify this, but here is the input: [source](https://example.test/input)',
         model: GEMINI_SEARCH_MODEL,
         temporary: true,
         modelUiVerified: true,
