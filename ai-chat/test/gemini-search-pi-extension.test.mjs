@@ -133,6 +133,55 @@ test('pi extension abandons an in-flight search on abort without leaving the bro
   assert.deepEqual(started, ['first', 'second']);
 });
 
+test('pi extension ignores late progress after a cancelled tool call settles', async () => {
+  let tool;
+  let reportProgress;
+  const updates = [];
+  const runBatch = async (_params, deps) => {
+    reportProgress = deps.onProgress;
+    reportProgress({ phase: 'complete', index: 0, total: 2, query: 'completed query', path: '/result-store/result.md' });
+    return new Promise(() => {});
+  };
+  createGeminiSearchExtension({ runBatch })({ registerTool(definition) { tool = definition; }, on() {} });
+  const controller = new AbortController();
+  const search = tool.execute('call-1', {
+    queries: ['completed query', 'late query'],
+  }, controller.signal, update => updates.push(update), { hasUI: true, ui: strictUi() });
+  await Promise.resolve();
+  controller.abort();
+  await search;
+  const settledUpdateCount = updates.length;
+
+  reportProgress({ phase: 'failed', index: 1, total: 2, query: 'late query', error: 'late failure' });
+  assert.equal(updates.length, settledUpdateCount);
+});
+
+test('pi extension cancellation keeps completed and failed query counts', async () => {
+  let tool;
+  const runBatch = async (_params, deps) => {
+    deps.onProgress({ phase: 'failed', index: 0, total: 2, query: 'failed query', error: 'failed safely' });
+    deps.onProgress({ phase: 'complete', index: 1, total: 2, query: 'completed query', path: '/result-store/result.md' });
+    return new Promise(() => {});
+  };
+  createGeminiSearchExtension({ runBatch })({ registerTool(definition) { tool = definition; }, on() {} });
+  const controller = new AbortController();
+  const search = tool.execute('call-1', {
+    queries: ['failed query', 'completed query'],
+  }, controller.signal, undefined, { hasUI: true, ui: strictUi() });
+  await Promise.resolve();
+  controller.abort();
+
+  const result = await search;
+  assert.equal(result.details.queryCount, 2);
+  assert.equal(result.details.successfulQueries, 1);
+  assert.equal(result.details.failedQueries, 1);
+  assert.deepEqual(result.details.failures, [{ query: 'failed query', error: 'failed safely' }]);
+  assert.equal(result.details.cancelled, true);
+
+  const expanded = tool.renderResult(result, { expanded: true, isPartial: false }, theme, {});
+  assert.match(expanded.render(100).join('\n'), /failed query: failed safely/);
+});
+
 test('pi extension stops a browser left running when the session shuts down mid-search', async () => {
   let tool;
   const handlers = new Map();
@@ -158,6 +207,21 @@ test('pi extension stops a browser left running when the session shuts down mid-
 
   releaseSearch();
   await search;
+});
+
+test('pi extension stops a provider run that outlives the settled tool call', async () => {
+  const handlers = new Map();
+  const stopped = [];
+  createGeminiSearchExtension({
+    hasProviderRunInFlight: () => true,
+    stopOwnedBrowser: async () => { stopped.push('stopped'); },
+  })({
+    registerTool() {},
+    on(event, handler) { handlers.set(event, handler); },
+  });
+
+  await handlers.get('session_shutdown')({ reason: 'quit' }, { hasUI: true, ui: strictUi() });
+  assert.deepEqual(stopped, ['stopped']);
 });
 
 test('pi extension leaves the browser alone when no search is running at shutdown', async () => {
@@ -221,6 +285,39 @@ test('pi extension reports progress in its own tool row without touching shared 
   assert.match(updates[0].content[0].text, /searching: only query/);
 });
 
+test('pi extension renders terminal failures as one themed tool-row line', () => {
+  let tool;
+  createGeminiSearchExtension()({ registerTool(definition) { tool = definition; }, on() {} });
+
+  const rendered = tool.renderResult({
+    content: [{ type: 'text', text: 'Gemini search failed.' }],
+    details: undefined,
+  }, { expanded: false, isPartial: false }, theme, { isError: true });
+
+  assert.deepEqual(rendered.render(80).map(line => line.trimEnd()), ['✗ Gemini search failed.']);
+});
+
+test('pi extension keeps a multi-query call compact until the tool row is expanded', () => {
+  let tool;
+  createGeminiSearchExtension()({ registerTool(definition) { tool = definition; }, on() {} });
+  const args = { queries: ['first research angle', 'second research angle', 'third research angle'] };
+
+  const collapsed = tool.renderCall(args, theme, { expanded: false });
+  assert.equal(collapsed.render(80).length, 1);
+  assert.match(collapsed.render(80)[0], /3 queries/);
+  assert.doesNotMatch(collapsed.render(80)[0], /first research angle/);
+
+  const expanded = tool.renderCall(args, theme, { expanded: true, lastComponent: collapsed });
+  assert.equal(expanded, collapsed);
+  assert.match(expanded.render(80).join('\n'), /first research angle/);
+  assert.match(expanded.render(80).join('\n'), /third research angle/);
+
+  const deduplicated = tool.renderCall({
+    queries: ['first research angle', 'first research angle', 'second research angle'],
+  }, theme, { expanded: false });
+  assert.match(deduplicated.render(80)[0], /2 queries/);
+});
+
 test('pi extension registers a file-backed multi-query Gemini search tool', async () => {
   let tool;
   const updates = [];
@@ -263,11 +360,35 @@ test('pi extension registers a file-backed multi-query Gemini search tool', asyn
     text: 'Completed 2/2 Gemini searches in temporary chats.\nRead the full results from:\n1. /result-store/result-1.md\n2. /result-store/result-2.md',
   }]);
   assert.equal(updates.length, 3);
+  assert.equal(updates[0].details.successfulQueries, 0);
+  assert.equal(updates[1].details.successfulQueries, 1);
+  assert.equal(updates[2].details.successfulQueries, 1);
 
-  const partial = tool.renderResult(updates[0], { expanded: false, isPartial: true }, theme);
-  assert.match(partial.render(80).join('\n'), /first query/);
+  const partial = tool.renderResult(updates[0], { expanded: false, isPartial: true }, theme, {});
+  assert.equal(partial.render(80).length, 1);
+  assert.match(partial.render(80).join('\n'), /0\/2.*searching.*first query/i);
 
-  const collapsed = tool.renderResult(result, { expanded: false, isPartial: false }, theme);
+  const updatedPartial = tool.renderResult(updates[2], { expanded: false, isPartial: true }, theme, {
+    lastComponent: partial,
+  });
+  assert.equal(updatedPartial, partial);
+  assert.equal(updatedPartial.render(80).length, 1);
+  assert.match(updatedPartial.render(80).join('\n'), /1\/2.*searching.*second query/i);
+
+  const narrowPartial = tool.renderResult({
+    content: [{ type: 'text', text: 'searching' }],
+    details: {
+      phase: 'searching',
+      index: 1,
+      total: 2,
+      query: 'a deliberately long research query that would otherwise wrap inside the tool shell',
+      successfulQueries: 1,
+      failedQueries: 0,
+    },
+  }, { expanded: false, isPartial: true }, theme, {});
+  assert.equal(narrowPartial.render(68).length, 1);
+
+  const collapsed = tool.renderResult(result, { expanded: false, isPartial: false }, theme, {});
   assert.match(collapsed.render(80).join('\n'), /2\/2 results ready/);
 
   const expanded = tool.renderResult(result, { expanded: true, isPartial: false }, theme);

@@ -1,16 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, lstat, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { access, chmod, lstat, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 
-import {
+import * as geminiSearchRuntime from '../extensions/gemini-search/runtime.mjs';
+
+const {
   GEMINI_SEARCH_MODEL,
   queryGeminiWithAiChat,
   buildGeminiSearchPrompt,
   runGeminiSearchBatch,
   stopOwnedAiChatBrowser,
-} from '../extensions/gemini-search/runtime.mjs';
+} = geminiSearchRuntime;
 
 test('Gemini search rejects results without exact UI mode verification', async () => {
   const resultDir = await mkdtemp(join(tmpdir(), 'gemini-search-model-'));
@@ -45,13 +49,48 @@ test('Gemini search rejects a response that contains no source URL', async () =>
 test('Gemini search applies timeoutSeconds to the whole query operation', async () => {
   const resultDir = await mkdtemp(join(tmpdir(), 'gemini-search-timeout-'));
   const startedAt = Date.now();
+  let calls = 0;
   await assert.rejects(
-    () => runGeminiSearchBatch({ query: 'query', resultDir, timeoutSeconds: 0.01 }, {
-      queryGemini: async () => new Promise(() => {}),
+    () => runGeminiSearchBatch({ queries: ['first query', 'second query'], resultDir, timeoutSeconds: 0.01 }, {
+      queryGemini: async () => {
+        calls += 1;
+        return new Promise(() => {});
+      },
     }),
     /timed out/i,
   );
+  assert.equal(calls, 1);
   assert.ok(Date.now() - startedAt < 250);
+});
+
+test('Gemini search reports queries skipped after a provider timeout', async () => {
+  const resultDir = await mkdtemp(join(tmpdir(), 'gemini-search-timeout-partial-'));
+  let calls = 0;
+  const result = await runGeminiSearchBatch({
+    queries: ['completed query', 'timed out query', 'skipped query'],
+    resultDir,
+    timeoutSeconds: 0.01,
+  }, {
+    queryGemini: async () => {
+      calls += 1;
+      if (calls === 2) return new Promise(() => {});
+      return {
+        text: 'answer [source](https://example.test/source)',
+        model: GEMINI_SEARCH_MODEL,
+        temporary: true,
+        modelUiVerified: true,
+      };
+    },
+    writeResult: async () => '/result-store/result.md',
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(result.successfulQueries, 1);
+  assert.equal(result.failedQueries, 2);
+  assert.deepEqual(result.failures, [
+    { query: 'timed out query', error: 'The Gemini search timed out.' },
+    { query: 'skipped query', error: 'Skipped after a previous Gemini search timed out.' },
+  ]);
 });
 
 test('Gemini search returns home-relative result paths to the agent', async () => {
@@ -123,6 +162,89 @@ test('Gemini search rejects a citation copied only from the query', async () => 
   );
 });
 
+test('Gemini search keeps Browser Tools startup diagnostics out of the terminal', () => {
+  assert.equal(typeof geminiSearchRuntime.startChromeWithoutTerminalOutput, 'function');
+
+  const run = spawnSync(process.execPath, [
+    fileURLToPath(new URL('./fixtures/run-quiet-browser-start.mjs', import.meta.url)),
+  ], { encoding: 'utf8' });
+
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stderr, '');
+  assert.deepEqual(JSON.parse(run.stdout), {
+    status: 'started',
+    port: 43125,
+    ownerToken: 'fixture-owner-token',
+  });
+});
+
+test('Gemini search cancels a stalled isolated browser startup without orphaning Chrome', async () => {
+  const markerDir = await mkdtemp(join(tmpdir(), 'gemini-search-browser-cancel-'));
+  const markerPath = join(markerDir, 'stopped');
+  const startedMarkerPath = join(markerDir, 'started');
+  const controller = new AbortController();
+  const started = geminiSearchRuntime.startChromeWithoutTerminalOutput({ port: 43126, markerPath, startedMarkerPath }, {
+    moduleUrl: new URL('./fixtures/stalled-browser-start.mjs', import.meta.url).href,
+    signal: controller.signal,
+    timeoutMs: 500,
+  });
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      await access(startedMarkerPath);
+      break;
+    } catch {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  }
+  controller.abort();
+
+  await assert.rejects(started, error => error?.name === 'AbortError');
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      await access(markerPath);
+      break;
+    } catch {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  }
+  assert.equal(await readFile(markerPath, 'utf8'), 'stopped');
+});
+
+test('Gemini search bounds an isolated startup child after cancellation', async () => {
+  const markerDir = await mkdtemp(join(tmpdir(), 'gemini-search-browser-deadline-'));
+  const startedMarkerPath = join(markerDir, 'started');
+  const pidMarkerPath = join(markerDir, 'pid');
+  const controller = new AbortController();
+  const started = geminiSearchRuntime.startChromeWithoutTerminalOutput({
+    port: 43127,
+    startedMarkerPath,
+    pidMarkerPath,
+    delayMs: 500,
+  }, {
+    moduleUrl: new URL('./fixtures/stalled-browser-start.mjs', import.meta.url).href,
+    signal: controller.signal,
+    timeoutMs: 1000,
+    cleanupDeadlineMs: 50,
+  });
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      await access(startedMarkerPath);
+      break;
+    } catch {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  }
+  controller.abort();
+  await assert.rejects(started, error => error?.name === 'AbortError');
+  await new Promise(resolve => setTimeout(resolve, 100));
+
+  const pid = Number(await readFile(pidMarkerPath, 'utf8'));
+  assert.throws(
+    () => process.kill(pid, 0),
+    error => error?.code === 'ESRCH',
+  );
+});
+
 test('Gemini search supplies a private logger without replacing process stderr', async () => {
   const original = process.stderr.write;
   let capturedLogger;
@@ -141,6 +263,69 @@ test('Gemini search supplies a private logger without replacing process stderr',
   assert.equal(process.stderr.write, original);
   assert.equal(typeof capturedLogger.error, 'function');
   assert.equal(result.text, 'answer https://example.test/source');
+});
+
+test('Gemini search tracks the real provider lifetime after caller cancellation', async () => {
+  assert.equal(typeof geminiSearchRuntime.hasGeminiSearchProviderRunInFlight, 'function');
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const controller = new AbortController();
+  const running = queryGeminiWithAiChat('tracked prompt', {
+    signal: controller.signal,
+    run: async () => {
+      await gate;
+      return {
+        result: { text: 'answer https://example.test/source', modelUsed: GEMINI_SEARCH_MODEL },
+        metadata: { model: GEMINI_SEARCH_MODEL, provider_state: { is_temporary: true, model_ui_verified: true } },
+      };
+    },
+  });
+  await Promise.resolve();
+  assert.equal(geminiSearchRuntime.hasGeminiSearchProviderRunInFlight(), true);
+
+  controller.abort();
+  await assert.rejects(running, error => error?.name === 'AbortError');
+  assert.equal(geminiSearchRuntime.hasGeminiSearchProviderRunInFlight(), true);
+
+  release();
+  for (let attempt = 0; attempt < 20 && geminiSearchRuntime.hasGeminiSearchProviderRunInFlight(); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.equal(geminiSearchRuntime.hasGeminiSearchProviderRunInFlight(), false);
+});
+
+test('Gemini search serializes abandoned provider runs before starting another query', async () => {
+  let releaseFirst;
+  const gate = new Promise(resolve => { releaseFirst = resolve; });
+  const starts = [];
+  const run = async request => {
+    starts.push(request.prompt);
+    if (starts.length === 1) await gate;
+    return {
+      result: { text: 'answer https://example.test/source', modelUsed: GEMINI_SEARCH_MODEL },
+      metadata: { model: GEMINI_SEARCH_MODEL, provider_state: { is_temporary: true, model_ui_verified: true } },
+    };
+  };
+
+  const controller = new AbortController();
+  const first = queryGeminiWithAiChat('first prompt', { run, signal: controller.signal });
+  await Promise.resolve();
+  controller.abort();
+  await assert.rejects(first, error => error?.name === 'AbortError');
+
+  let secondStarted = false;
+  const second = queryGeminiWithAiChat('second prompt', {
+    run,
+    onStarted: () => { secondStarted = true; },
+  });
+  await Promise.resolve();
+  assert.equal(starts.length, 1);
+  assert.equal(secondStarted, false);
+
+  releaseFirst();
+  await second;
+  assert.equal(starts.length, 2);
+  assert.equal(secondStarted, true);
 });
 
 test('Gemini search redacts unexpected result-directory filesystem errors', async () => {
@@ -217,11 +402,13 @@ test('Gemini search runs multiple queries and writes private result files', asyn
   const resultDir = await mkdtemp(join(tmpdir(), 'gemini-search-extension-'));
   const calls = [];
   const updates = [];
+  const controller = new AbortController();
 
   const result = await runGeminiSearchBatch({
     queries: ['latest runtime release', 'current browser support'],
     resultDir,
     timeoutSeconds: 90,
+    signal: controller.signal,
   }, {
     queryGemini: async (prompt, options) => {
       calls.push({ prompt, options });
@@ -235,10 +422,11 @@ test('Gemini search runs multiple queries and writes private result files', asyn
   assert.equal(result.files.length, 2);
   assert.equal(calls.length, 2);
   assert.equal(calls[0].prompt, buildGeminiSearchPrompt('latest runtime release'));
-  assert.deepEqual(calls.map(call => call.options), [
-    { timeoutSeconds: 90 },
-    { timeoutSeconds: 90 },
-  ]);
+  assert.deepEqual(calls.map(call => call.options.timeoutSeconds), [90, 90]);
+  assert.ok(calls.every(call => call.options.signal instanceof AbortSignal));
+  assert.ok(calls.every(call => call.options.signal.aborted === false));
+  controller.abort();
+  assert.ok(calls.every(call => call.options.signal.aborted === true));
   assert.deepEqual(updates.map(update => update.phase), [
     'searching', 'complete', 'searching', 'complete',
   ]);

@@ -1,7 +1,9 @@
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, open } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { browserWSEndpoint, stopChrome } from '@rezkam/browser-tools';
 import { resolveTaskProfile } from '@rezkam/browser-tools';
@@ -130,11 +132,19 @@ function publicResultPath(path) {
     : path;
 }
 
-function withTimeout(operation, timeoutSeconds) {
+function withTimeout(createOperation, timeoutSeconds, onTimeout, { startImmediately = true } = {}) {
   let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error('Gemini search timed out.')), timeoutSeconds * 1000);
-  });
+  let rejectTimeout;
+  const timeout = new Promise((_, reject) => { rejectTimeout = reject; });
+  const startTimeout = () => {
+    if (timer) return;
+    timer = setTimeout(() => {
+      rejectTimeout(new Error('Gemini search timed out.'));
+      onTimeout?.();
+    }, timeoutSeconds * 1000);
+  };
+  const operation = createOperation(startTimeout);
+  if (startImmediately) startTimeout();
   return Promise.race([operation, timeout]).finally(() => clearTimeout(timer));
 }
 
@@ -154,9 +164,89 @@ function sanitizeRuntimeError(error) {
   return 'Gemini search failed.';
 }
 
+const BROWSER_START_CHILD_PATH = fileURLToPath(new URL('./browser-start-child.mjs', import.meta.url));
+const DEFAULT_BROWSER_START_TIMEOUT_MS = 120000;
+
+export function startChromeWithoutTerminalOutput(options, {
+  moduleUrl = import.meta.resolve('@rezkam/browser-tools'),
+  signal,
+  timeoutMs = DEFAULT_BROWSER_START_TIMEOUT_MS,
+  cleanupDeadlineMs = 30000,
+} = {}) {
+  if (signal?.aborted) {
+    const error = new Error('Browser Tools startup was cancelled.');
+    error.name = 'AbortError';
+    return Promise.reject(error);
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [BROWSER_START_CHILD_PATH], {
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+    });
+    let settled = false;
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const fail = error => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (!child.killed) child.kill('SIGTERM');
+      child.unref();
+      child.channel?.unref();
+      reject(error);
+    };
+    const onAbort = () => {
+      const error = new Error('Browser Tools startup was cancelled.');
+      error.name = 'AbortError';
+      fail(error);
+    };
+    const timer = setTimeout(() => {
+      fail(new Error('Browser Tools startup timed out.'));
+    }, timeoutMs);
+
+    signal?.addEventListener('abort', onAbort, { once: true });
+    child.once('error', fail);
+    child.once('exit', code => {
+      if (!settled) fail(new Error(`Browser Tools startup process exited before returning a result (code ${code ?? 'unknown'}).`));
+    });
+    child.once('message', message => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (message?.ok) {
+        resolve(message.result);
+        return;
+      }
+      const error = new Error(message?.error?.message || 'Browser Tools failed to start Chrome.');
+      error.name = message?.error?.name || 'Error';
+      if (message?.error?.code) error.code = message.error.code;
+      reject(error);
+    });
+    child.send({ moduleUrl, options, cleanupDeadlineMs });
+  });
+}
+
+let aiChatSearchQueue = Promise.resolve();
+let geminiSearchProviderRunsInFlight = 0;
+
+export function hasGeminiSearchProviderRunInFlight() {
+  return geminiSearchProviderRunsInFlight > 0;
+}
+
+function runtimeAbortError(message) {
+  const error = new Error(message);
+  error.name = 'AbortError';
+  return error;
+}
+
 export async function queryGeminiWithAiChat(prompt, {
   timeoutSeconds = DEFAULT_GEMINI_SEARCH_TIMEOUT_SECONDS,
   run = runAiChat,
+  signal,
+  onStarted,
 } = {}) {
   const browserProfileName = process.env.GEMINI_SEARCH_BROWSER_PROFILE || resolveTaskProfile('gemini') || null;
   const request = buildAiChatRequest({
@@ -178,14 +268,43 @@ export async function queryGeminiWithAiChat(prompt, {
     },
   });
 
-  const outcome = await run(request, {
-    io: {
-      stdout() {},
-      writeFile() {},
-    },
-    // AI Chat's progress belongs to this private tool invocation, not pi's terminal renderer.
-    logger: { error() {} },
-  });
+  if (signal?.aborted) throw runtimeAbortError('Gemini search was cancelled.');
+  const start = async () => {
+    if (signal?.aborted) throw runtimeAbortError('Gemini search was cancelled.');
+    onStarted?.();
+    geminiSearchProviderRunsInFlight += 1;
+    try {
+      return await run(request, {
+        io: {
+          stdout() {},
+          writeFile() {},
+        },
+        // AI Chat and Browser Tools progress belongs to this private tool invocation, not pi's terminal renderer.
+        logger: { error() {} },
+        startChrome: options => startChromeWithoutTerminalOutput(options, { signal }),
+      });
+    } finally {
+      geminiSearchProviderRunsInFlight -= 1;
+    }
+  };
+  const running = aiChatSearchQueue.then(start, start);
+  aiChatSearchQueue = running.catch(() => undefined);
+
+  let outcome;
+  if (!signal) {
+    outcome = await running;
+  } else {
+    let onAbort;
+    const aborted = new Promise((_, reject) => {
+      onAbort = () => reject(runtimeAbortError('Gemini search was cancelled.'));
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      outcome = await Promise.race([running, aborted]);
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
   const text = outcome?.result?.text?.trim();
   const model = outcome?.metadata?.model || outcome?.result?.modelUsed || null;
   const temporary = outcome?.metadata?.provider_state?.is_temporary === true;
@@ -251,9 +370,19 @@ export async function runGeminiSearchBatch(params = {}, deps = {}) {
     }
     onProgress({ phase: 'searching', index, total: queries.length, query });
     try {
+      const timeoutController = new AbortController();
+      const querySignal = params.signal
+        ? AbortSignal.any([params.signal, timeoutController.signal])
+        : timeoutController.signal;
       const response = await withTimeout(
-        queryGemini(buildGeminiSearchPrompt(query), { timeoutSeconds }),
+        startTimeout => queryGemini(buildGeminiSearchPrompt(query), {
+          timeoutSeconds,
+          signal: querySignal,
+          onStarted: startTimeout,
+        }),
         timeoutSeconds,
+        () => timeoutController.abort(),
+        { startImmediately: queryGemini !== queryGeminiWithAiChat },
       );
       if (response.model !== GEMINI_SEARCH_MODEL || response.modelUiVerified !== true || response.temporary !== true) {
         throw new Error('Gemini search result did not satisfy the required UI mode and temporary-mode contract.');
@@ -270,6 +399,21 @@ export async function runGeminiSearchBatch(params = {}, deps = {}) {
       const message = sanitizeRuntimeError(error);
       failures.push({ query, error: message });
       onProgress({ phase: 'failed', index, total: queries.length, query, error: message });
+      if (/timed out/i.test(message)) {
+        for (let skippedIndex = index + 1; skippedIndex < queries.length; skippedIndex += 1) {
+          const skippedQuery = queries[skippedIndex];
+          const skippedError = 'Skipped after a previous Gemini search timed out.';
+          failures.push({ query: skippedQuery, error: skippedError });
+          onProgress({
+            phase: 'failed',
+            index: skippedIndex,
+            total: queries.length,
+            query: skippedQuery,
+            error: skippedError,
+          });
+        }
+        break;
+      }
     }
   }
 
