@@ -88,8 +88,8 @@ export function createGeminiSearchExtension(
       if (searchesInFlight === 0) return;
       await stopOwnedBrowser();
     });
-    const runExclusive = <T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> => {
-      if (signal?.aborted) return Promise.reject(abortError('Gemini search was cancelled.'));
+    const runExclusive = <T>(operation: () => Promise<T>, signal?: AbortSignal, cancelResult?: () => T): Promise<T> => {
+      if (signal?.aborted) return cancelResult ? Promise.resolve(cancelResult()) : Promise.reject(abortError('Gemini search was cancelled.'));
       const start = () => {
         if (signal?.aborted) throw abortError('Gemini search was cancelled before it acquired the browser.');
         return operation();
@@ -102,8 +102,11 @@ export function createGeminiSearchExtension(
       running.catch(() => undefined);
 
       let onAbort: (() => void) | undefined;
-      const aborted = new Promise<T>((_resolve, reject) => {
-        onAbort = () => reject(abortError('Gemini search was cancelled.'));
+      const aborted = new Promise<T>((resolve, reject) => {
+        onAbort = () => {
+          if (!cancelResult) return reject(abortError('Gemini search was cancelled.'));
+          try { resolve(cancelResult()); } catch (error) { reject(error); }
+        };
         signal.addEventListener('abort', onAbort, { once: true });
       });
       return Promise.race([running, aborted]).finally(() => {
@@ -126,6 +129,8 @@ export function createGeminiSearchExtension(
       executionMode: 'sequential',
 
       async execute(_toolCallId, params, signal, onUpdate) {
+        const completed: Array<{ query: string; path: string }> = [];
+        const queryCount = Math.max(1, displayQueries(params).length);
         return runExclusive(async () => {
           searchesInFlight += 1;
           try {
@@ -133,7 +138,18 @@ export function createGeminiSearchExtension(
           } finally {
             searchesInFlight -= 1;
           }
-        }, signal);
+        }, signal, () => {
+          if (completed.length === 0) throw abortError('Gemini search was cancelled.');
+          const batch: GeminiSearchBatch = {
+            queryCount,
+            successfulQueries: completed.length,
+            failedQueries: 0,
+            cancelled: true,
+            files: [...completed],
+            failures: [],
+          };
+          return { content: [{ type: 'text' as const, text: resultText(batch) }], details: batch };
+        });
 
         async function runSearch() {
           const batch = await runBatch({
@@ -143,6 +159,7 @@ export function createGeminiSearchExtension(
             signal,
           }, {
             onProgress(progress) {
+              if (progress.phase === 'complete' && progress.path) completed.push({ query: progress.query, path: progress.path });
               onUpdate?.({
                 content: [{ type: 'text', text: `${progress.phase}: ${progress.query}` }],
                 details: progress,
