@@ -320,7 +320,6 @@ export function openReview(campaign: Campaign): { ok: true } | { ok: false; erro
 export function contractPrompt(
 	liveOrClosed: Campaign | null,
 	armed: boolean,
-	now: number,
 	config: GuardConfig = DEFAULT_CONFIG,
 	tiers: TierLists = DEFAULT_TIERS,
 ): string {
@@ -336,21 +335,19 @@ ${renderTiers(tiers)}`;
 	}
 
 	// This string is appended to the system prompt on before_agent_start, which fires once
-	// per turn, and pi marks the system prompt as a cache breakpoint. So it must depend only
+	// per turn, and pi marks the system prompt as a cache breakpoint. So it may depend only
 	// on what the user set when the campaign started: a clock reading, a slice count or a
-	// lane list here re-reads the whole context at uncached prices on every turn. The live
-	// numbers reach the coordinator through every coordinator_campaign result and the status
-	// line, neither of which is part of the cached prefix. `now` is kept in the signature
-	// because callers pass it and the armed-only branch may yet need it.
-	void now;
+	// lane list here re-reads the whole context at uncached prices on every turn. That is why
+	// this function takes no clock. The live numbers reach the coordinator through every
+	// coordinator_campaign result, which is not part of the cached prefix.
 
 	return `Coordinator guard: campaign ${campaign.slug} is registered.
 
 Worktree: ${campaign.worktree}
 Plan: ${campaign.planPath ?? "unrecorded"}
-Slice counts, open lanes and status-block staleness are not repeated here, because this text
-is a cached prefix. Read them from any coordinator_campaign result, which always returns the
-current campaign, and from the status line.
+Slice counts, open lanes and status-block staleness are not repeated here, because this text is
+a cached prefix. Every coordinator_campaign result returns the current campaign, including all
+three.
 
 This campaign is the goal. It continues across turns and survives a provider error, so a
 failed turn is retried rather than treated as an ending. Do not park it: marking a goal

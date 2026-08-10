@@ -466,7 +466,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (event) => {
-		const contract = contractPrompt(campaign, armed, Date.now(), undefined, tiers);
+		const contract = contractPrompt(campaign, armed, undefined, tiers);
 		if (!contract) return;
 		return { systemPrompt: `${event.systemPrompt}\n\n${contract}` };
 	});
@@ -530,7 +530,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 					updateStatusLine(ctx);
 					// Arming silently once meant a campaign could route for an hour before anyone saw
 					// which models were enforceable.
-					notice(`Coordinator guard armed.\n\n${contractPrompt(null, true, Date.now(), undefined, tiers)}`);
+					notice(`Coordinator guard armed.\n\n${contractPrompt(null, true, undefined, tiers)}`);
 				}
 				return;
 			}
@@ -916,7 +916,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			}
 			persist();
 			updateStatusLine(ctx);
-			const view = campaign ? { ...campaign, contract: contractPrompt(campaign, armed, now, undefined, tiers) } : null;
+			const view = campaign ? { ...campaign, contract: contractPrompt(campaign, armed, undefined, tiers) } : null;
 			return {
 				content: [{ type: "text", text: JSON.stringify(view, null, 2) }],
 				details: view,
@@ -1035,9 +1035,9 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 				case "":
 					show(
 						campaign
-							? contractPrompt(campaign, armed, Date.now(), undefined, tiers)
+							? contractPrompt(campaign, armed, undefined, tiers)
 							: armed
-								? contractPrompt(null, true, Date.now(), undefined, tiers)
+								? contractPrompt(null, true, undefined, tiers)
 								: "Coordinator guard inert, no campaign registered.",
 					);
 					break;
@@ -1049,7 +1049,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 					}
 					armed = command === "arm";
 					persist();
-					show(armed ? `Coordinator guard armed.\n\n${contractPrompt(null, true, Date.now(), undefined, tiers)}` : "Coordinator guard disarmed.");
+					show(armed ? `Coordinator guard armed.\n\n${contractPrompt(null, true, undefined, tiers)}` : "Coordinator guard disarmed.");
 					break;
 				case "close":
 					if (campaign) campaign.status = "closed";
