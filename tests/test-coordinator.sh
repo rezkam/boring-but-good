@@ -7,6 +7,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/forbidden.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 COORD_DIR="${SCRIPT_DIR}/../skills/coordinator"
+COORD_HOOK_DIR="${COORD_DIR}/hooks"
+ROOT_HOOK_DIR="${SCRIPT_DIR}/../hooks"
 AUDIT="${COORD_DIR}/dispatch-audit.sh"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'
@@ -28,6 +30,16 @@ header "Coordinator: skill structure"
 SKILLMD="${COORD_DIR}/SKILL.md"
 if [ -f "$SKILLMD" ]; then pass "SKILL.md exists"; else fail "SKILL.md missing"; fi
 if grep -q '^name: coordinator' "$SKILLMD"; then pass "Name field is 'coordinator'"; else fail "Name field missing or wrong"; fi
+if [ -x "$COORD_HOOK_DIR/guard-output.sh" ] && [ -x "$COORD_HOOK_DIR/test-guard-output.sh" ]; then
+  pass "coordinator owns its output hook and hook suite"
+else
+  fail "coordinator owns its output hook and hook suite" "expected executable files under $COORD_HOOK_DIR"
+fi
+if [ ! -e "$ROOT_HOOK_DIR/guard-output.sh" ] && [ ! -e "$ROOT_HOOK_DIR/test-guard-output.sh" ]; then
+  pass "coordinator hooks are absent from the repository root"
+else
+  fail "coordinator hooks are absent from the repository root" "move root hooks into the coordinator skill"
+fi
 
 # Every local link must resolve, or a rule lives in a file nobody can reach. A pi
 # campaign followed the skill body and never opened dispatch.md at all, so the rules
@@ -280,6 +292,26 @@ else
         else
             fail "guard policy suite" "$(printf '%s' "$GUARD_OUT" | grep -E '^. (fail|not ok)' | head -5)"
         fi
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
+header "Coordinator hooks: output guard"
+# ═══════════════════════════════════════════════════════════════════════════════
+
+HOOK_TEST="${COORD_HOOK_DIR}/test-guard-output.sh"
+if [ ! -x "$HOOK_TEST" ]; then
+    fail "output hook tests are present" "missing $HOOK_TEST"
+elif ! command -v jq >/dev/null 2>&1; then
+    skip "output hook tests (jq not installed)"
+else
+    HOOK_OUT=$("$HOOK_TEST" 2>&1)
+    HOOK_RC=$?
+    HOOK_PASS=$(printf '%s' "$HOOK_OUT" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' | tail -1)
+    if [ "$HOOK_RC" -eq 0 ]; then
+        pass "output hook suite (${HOOK_PASS:-0} assertions)"
+    else
+        fail "output hook suite" "$(printf '%s' "$HOOK_OUT" | grep 'FAIL' | head -5)"
     fi
 fi
 
