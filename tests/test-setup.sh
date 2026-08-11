@@ -44,24 +44,25 @@ for skill in ai-chat argocd codex commit coordinator dependency-track finance ja
     fi
 done
 
-if [ -f "${REPO_DIR}/browser-tools/SKILL.md" ]; then
-    pass "browser-tools remains at the repository root"
+if [ ! -e "${REPO_DIR}/browser-tools" ]; then
+    pass "browser-tools is absent from the repository root"
 else
-    fail "browser-tools should remain at the repository root"
+    fail "browser-tools should not exist at the repository root"
 fi
 
 INVALID_SKILL_PATHS=""
 while IFS= read -r skill_path; do
-    if [ "$skill_path" = "browser-tools/SKILL.md" ] || printf '%s\n' "$skill_path" | grep -qE '^skills/[^/]+/SKILL\.md$'; then
+    [ -f "${REPO_DIR}/${skill_path}" ] || continue
+    if printf '%s\n' "$skill_path" | grep -qE '^skills/[^/]+/SKILL\.md$'; then
         continue
     fi
     INVALID_SKILL_PATHS="${INVALID_SKILL_PATHS}${skill_path}\n"
 done < <(git -C "$REPO_DIR" ls-files '*SKILL.md')
 
 if [ -z "$INVALID_SKILL_PATHS" ]; then
-    pass "Every tracked skill uses the canonical layout"
+    pass "Every tracked skill uses the canonical skills/<name>/ layout"
 else
-    fail "Tracked skills found outside skills/ and browser-tools/" "$(printf '%b' "$INVALID_SKILL_PATHS")"
+    fail "Tracked skills found outside skills/<name>/" "$(printf '%b' "$INVALID_SKILL_PATHS")"
 fi
 
 SKANE_README="${REPO_DIR}/skills/skanetrafiken/README.md"
