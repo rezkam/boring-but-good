@@ -60,8 +60,8 @@ transcripts, kept out of the repo by `.gitignore`).
 ## Long-session decay modes (from one very long campaign)
 
 One session produced all five. They are grouped because they share a cause: every rule in this skill was prose, read
-once, and nothing compared the rules to the calls. They are now refused at the tool boundary by `../guard/`, whose
-codes map onto this list.
+once, and nothing compared the rules to the calls. They are now refused at the tool boundary by the
+[coordinator guard](../../../extensions/coordinator-guard/README.md), whose codes map onto this list.
 
 10. **pin-decay-over-session-length.** Pinning discipline present in hour one vanished by hour three and stayed gone
     for roughly seventy launches, every one inheriting the session's most expensive model at its highest effort; five

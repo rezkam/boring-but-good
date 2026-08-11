@@ -1,9 +1,9 @@
 # boring-but-good
 
 Shell-script and workflow skills that give coding agents the ability to interact with engineering
-systems. Publishable skills live under `skills/<skill-name>/`, and each has a `SKILL.md`. Some
-skills keep executables in a `scripts/` folder, others keep them at the skill root, and several
-are prose only.
+systems. Publishable skills live under `skills/<skill-name>/`, and each has a `SKILL.md`. Pi
+extensions live separately under `extensions/<extension-name>/`. Some skills keep executables
+in a `scripts/` folder, others keep them at the skill root, and several are prose only.
 
 This file deliberately does not inventory the skills or the test suites. Run `ls skills` and read
 `tests/test-all.sh` for the current list: every previous attempt to keep an inventory here went
@@ -40,7 +40,8 @@ If you add a live test, verify the full call chain to confirm nothing writes to 
 Run: `bash tests/test-all.sh`. It invokes every suite in `tests/` and aggregates the results.
 
 The coordinator suite runs `skills/coordinator/hooks/test-guard-output.sh`, which covers the
-PreToolUse output guard alongside the coordinator dispatch guard.
+PreToolUse output guard alongside the coordinator dispatch guard. Run `npm --prefix extensions
+run validate` for the full Pi extension unit and typecheck suite.
 
 **The Jira arg-validation mock:** go-jira may not be installed. The tests create a stub `jira` binary (just `exit 1`) and a mock `$HOME` with `~/.jira.d/config.yml` so `_config.sh` passes. This lets scripts reach their own argument validation code. The stub isn't testing go-jira, it's bypassing the "go-jira not installed" gate.
 

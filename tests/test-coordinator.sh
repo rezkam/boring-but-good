@@ -8,6 +8,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/forbidden.sh"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 COORD_DIR="${SCRIPT_DIR}/../skills/coordinator"
 COORD_HOOK_DIR="${COORD_DIR}/hooks"
+COORD_GUARD_DIR="${SCRIPT_DIR}/../extensions/coordinator-guard"
 ROOT_HOOK_DIR="${SCRIPT_DIR}/../hooks"
 AUDIT="${COORD_DIR}/dispatch-audit.sh"
 
@@ -60,8 +61,8 @@ done
 # field typed 1|2|3. Skipped when npx cannot fetch TypeScript (offline CI).
 if command -v npx >/dev/null 2>&1; then
   # policy.ts is pure and imports nothing from the host, so it must typecheck with zero
-  # errors. pi-extension.ts cannot: it imports host packages and needs Node's own types.
-  TSC_OUT=$(cd "$COORD_DIR/guard" && npx --yes -p typescript@latest tsc --noEmit --strict --module nodenext --target es2022 --skipLibCheck --allowImportingTsExtensions policy.ts 2>&1)
+  # errors even when the extension package dependencies are not installed.
+  TSC_OUT=$(cd "$COORD_GUARD_DIR" && npx --yes -p typescript@latest tsc --noEmit --strict --module nodenext --target es2022 --skipLibCheck --allowImportingTsExtensions --ignoreConfig policy.ts 2>&1)
   if printf '%s' "$TSC_OUT" | grep -q 'error TS'; then
     fail "guard policy typechecks clean" "$(printf '%s' "$TSC_OUT" | grep -m1 'error TS')"
   else
@@ -273,7 +274,7 @@ fi
 header "Coordinator guard: dispatch policy"
 # ═══════════════════════════════════════════════════════════════════════════════
 
-GUARD_TEST="${COORD_DIR}/guard/policy.test.ts"
+GUARD_TEST="${COORD_GUARD_DIR}/policy.test.ts"
 if [ ! -f "$GUARD_TEST" ]; then
     fail "guard policy tests are present" "missing $GUARD_TEST"
 elif ! command -v node >/dev/null 2>&1; then
@@ -284,7 +285,7 @@ else
     if [ "$NODE_OK" != "1" ]; then
         skip "guard policy tests (node $(node -p 'process.versions.node') predates type stripping)"
     else
-        GUARD_OUT=$(cd "${COORD_DIR}/guard" && node --test policy.test.ts judge.test.ts templates.test.ts shadows.test.ts throughput.test.ts 2>&1)
+        GUARD_OUT=$(cd "$COORD_GUARD_DIR" && node --test policy.test.ts judge.test.ts templates.test.ts shadows.test.ts throughput.test.ts 2>&1)
         GUARD_RC=$?
         GUARD_PASS=$(printf '%s' "$GUARD_OUT" | grep -oE '^. pass [0-9]+' | grep -oE '[0-9]+' | tail -1)
         if [ "$GUARD_RC" -eq 0 ]; then

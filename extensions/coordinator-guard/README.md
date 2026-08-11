@@ -63,9 +63,10 @@ Symlink this directory into pi's extension directory, so the installed copy is t
 repository rather than a duplicate that drifts:
 
 ```bash
-ln -sfn "$PWD/skills/coordinator/guard" ~/.pi/agent/extensions/coordinator-guard
+ln -sfn "$PWD/extensions/coordinator-guard" ~/.pi/agent/extensions/coordinator-guard
 ```
 
+The extension lives at the repository extension root, separately from the coordinator skill.
 Link the directory, not `pi-extension.ts`. pi's loader resolves relative imports against
 the symlink path rather than the real path, so a single-file link fails with
 `Cannot find module './policy.ts'`, and a broken extension path is a hard pi startup

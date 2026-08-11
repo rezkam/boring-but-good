@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 
 import { JUDGE_SYSTEM_PROMPT } from "./judge.ts";
 
-const COORDINATOR_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
+const COORDINATOR_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "skills", "coordinator");
 
 function read(name: string): string {
 	return readFileSync(join(COORDINATOR_DIR, name), "utf8");

@@ -9,6 +9,7 @@ import {
   managedBrowserSafetyForPort,
   normalizePort,
   readManagedStateForPort,
+  resolveTaskProfile,
   requiredOptionValue as optionValue,
   hasFlag,
   startChrome,
@@ -1970,4 +1971,4 @@ export const defaultBrowserStateFs = {
   rm: rmSync,
 };
 
-export { aiChatProviders };
+export { aiChatProviders, browserWSEndpoint, resolveTaskProfile, stopChrome };

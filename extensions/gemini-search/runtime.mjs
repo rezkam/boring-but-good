@@ -5,14 +5,15 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { browserWSEndpoint, stopChrome } from '@rezkam/browser-tools';
-import { resolveTaskProfile } from '@rezkam/browser-tools';
 import {
+  browserWSEndpoint,
   buildAiChatRequest,
   readAiChatBrowserState,
   resolveAiChatBrowserStateFile,
+  resolveTaskProfile,
   runAiChat,
-} from '../../scripts/ai-chat/module.mjs';
+  stopChrome,
+} from '../../skills/ai-chat/scripts/ai-chat/module.mjs';
 
 export const GEMINI_SEARCH_MODEL = 'gemini-3.6-flash-extended-thinking';
 export const DEFAULT_GEMINI_SEARCH_TIMEOUT_SECONDS = 300;
