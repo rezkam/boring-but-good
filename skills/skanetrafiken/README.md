@@ -40,4 +40,4 @@ See [SKILL.md](SKILL.md) for complete usage guide, LLM workflow, query formattin
 
 ## License
 
-Apache License 2.0 — see [LICENSE](../LICENSE) in the repo root.
+Apache License 2.0. See [LICENSE](../../LICENSE) in the repository root.

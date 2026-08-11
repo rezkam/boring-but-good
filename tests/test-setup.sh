@@ -64,6 +64,35 @@ else
     fail "Tracked skills found outside skills/ and browser-tools/" "$(printf '%b' "$INVALID_SKILL_PATHS")"
 fi
 
+SKANE_README="${REPO_DIR}/skills/skanetrafiken/README.md"
+SKANE_LICENSE_REF=$(grep -oE '\]\((\.\./)+LICENSE\)' "$SKANE_README" | head -1 | sed 's/^](//; s/)$//')
+if [ -n "$SKANE_LICENSE_REF" ] && [ -f "$(dirname "$SKANE_README")/${SKANE_LICENSE_REF}" ]; then
+    pass "skanetrafiken README license link resolves"
+else
+    fail "skanetrafiken README license link should resolve to the repository license"
+fi
+
+if grep -q '^migrate_legacy_skill_links()' "$SETUP"; then
+    pass "setup.sh has moved-skill symlink migration"
+else
+    fail "setup.sh should migrate symlinks for moved skills"
+fi
+
+if sed -n '/^main()/,/^}/p' "$SETUP" | grep -q 'migrate_legacy_skill_links'; then
+    pass "main runs moved-skill symlink migration"
+else
+    fail "main should run moved-skill symlink migration"
+fi
+
+MOVED_SKILLS_LINE=$(grep '^MOVED_SKILLS=' "$SETUP" || true)
+for skill in ai-chat argocd codex commit coordinator dependency-track finance java-21-to-25-migration jenkins jira perplexity pr-ready skanetrafiken sonarqube tdd to-tasks verify; do
+    if printf '%s\n' "$MOVED_SKILLS_LINE" | grep -q " ${skill}\|\"${skill} \| ${skill}\""; then
+        pass "Migration includes ${skill}"
+    else
+        fail "Migration should include ${skill}"
+    fi
+done
+
 # ═══════════════════════════════════════════════════════════════════════════════
 header "Setup: Zsh safety"
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -587,6 +616,56 @@ header "Setup: Sandbox — symlink behavior (non-destructive)"
 # Create a temp sandbox to test symlink logic without touching real system
 SANDBOX=$(mktemp -d)
 trap 'rm -rf "$SANDBOX"' EXIT
+
+REFRESH_LINK_FN=$(sed -n '/^_refresh_legacy_link()/,/^}/p' "$SETUP")
+if [ -n "$REFRESH_LINK_FN" ]; then
+    mkdir -p "$SANDBOX/legacy-source" "$SANDBOX/new-source" "$SANDBOX/install"
+    ln -s "$SANDBOX/legacy-source" "$SANDBOX/install/example"
+    if (
+        eval "$REFRESH_LINK_FN"
+        _refresh_legacy_link "$SANDBOX/install/example" "$SANDBOX/legacy-source" "$SANDBOX/new-source"
+        [ "$(readlink "$SANDBOX/install/example")" = "$SANDBOX/new-source" ]
+    ); then
+        pass "Sandbox: moved-skill migration refreshes an exact legacy symlink"
+    else
+        fail "Sandbox: moved-skill migration should refresh an exact legacy symlink"
+    fi
+else
+    fail "Sandbox: _refresh_legacy_link helper missing"
+fi
+
+MIGRATION_FNS=$(sed -n '/^_skill_source()/,/^_link_skill_to()/p' "$SETUP" | sed '$d')
+if [ -n "$MIGRATION_FNS" ] && (
+    SCRIPT_DIR="$SANDBOX/repository"
+    SKILLS_SRC="$SCRIPT_DIR/skills"
+    INSTALL_DIR="$SANDBOX/pi-skills"
+    AGENT_HARNESS="pi"
+    BOLD=""
+    RESET=""
+    eval "$(grep '^MOVED_SKILLS=' "$SETUP")"
+    eval "$(grep '^LEGACY_WORKFLOW_TOOL_SKILLS=' "$SETUP")"
+    header() { :; }
+    info() { :; }
+    success() { :; }
+    warn() { :; }
+    ask_yn() { eval "$1=true"; }
+    eval "$MIGRATION_FNS"
+    mkdir -p "$INSTALL_DIR"
+    for skill in $MOVED_SKILLS; do
+        old_target="$(_legacy_skill_source "$skill")"
+        new_target="$(_skill_source "$skill")"
+        mkdir -p "$old_target" "$new_target"
+        ln -s "$old_target" "$INSTALL_DIR/$skill"
+    done
+    migrate_legacy_skill_links
+    for skill in $MOVED_SKILLS; do
+        [ "$(readlink "$INSTALL_DIR/$skill")" = "$(_skill_source "$skill")" ] || exit 1
+    done
+); then
+    pass "Sandbox: migration refreshes every moved Pi skill link"
+else
+    fail "Sandbox: migration should refresh every moved Pi skill link"
+fi
 
 # Source only the helper functions from setup.sh (no main execution)
 # We extract and test the symlinking logic directly
