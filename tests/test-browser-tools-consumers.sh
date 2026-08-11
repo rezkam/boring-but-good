@@ -47,6 +47,7 @@ NODE
     fi
 
     if node - "$consumer_dir" <<'NODE'
+const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const root = process.argv[2];
@@ -61,15 +62,14 @@ const fallbackPatterns = [
   /(?:\.\.[\\/])+browser-tools[\\/]/,
   /browser-tools[\\/]scripts[\\/]/,
 ];
-function sourceFiles(dir) {
-  if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
-    const target = path.join(dir, entry.name);
-    return entry.isDirectory() ? sourceFiles(target) : [target];
-  });
-}
-const files = ['scripts', 'extensions'].flatMap(name => sourceFiles(path.join(root, name)));
-for (const file of files) {
+const repo = path.resolve(root, '..', '..');
+const consumer = path.basename(root);
+const trackedFiles = execFileSync(
+  'git',
+  ['-C', repo, 'ls-files', '--', `skills/${consumer}/scripts`, `skills/${consumer}/extensions`],
+  { encoding: 'utf8' },
+).trim().split('\n').filter(Boolean).map(file => path.join(repo, file));
+for (const file of trackedFiles) {
   const source = fs.readFileSync(file, 'utf8');
   if (fallbackPatterns.some(pattern => pattern.test(source))) process.exit(1);
 }
