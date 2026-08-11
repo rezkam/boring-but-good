@@ -1,8 +1,5 @@
 #!/usr/bin/env node
-import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { connectBrowser, startChrome, stopChrome } from '@rezkam/browser-tools';
 
 const API_BASE_URL = 'https://www.perplexity.ai';
 const COOKIE_NAME = '__Secure-next-auth.session-token';
@@ -18,26 +15,6 @@ function envFlag(name, fallback = false) {
   const value = process.env[name];
   if (value === undefined) return fallback;
   return !['0', 'false', 'no', 'off'].includes(String(value).trim().toLowerCase());
-}
-
-function resolveBrowserToolsDir() {
-  const candidates = [
-    process.env.BROWSER_TOOLS_DIR,
-    join(homedir(), '.claude', 'skills', 'browser-tools'),
-    join(homedir(), '.pi', 'agent', 'skills', 'browser-tools'),
-    join(homedir(), 'Code', 'git', 'boring-but-good', 'browser-tools'),
-  ].filter(Boolean);
-
-  for (const dir of candidates) {
-    if (existsSync(join(dir, 'scripts', 'browser-control.mjs'))) return dir;
-  }
-
-  fail('Browser Tools skill not found. Set BROWSER_TOOLS_DIR to the browser-tools skill directory.', 2);
-}
-
-async function importBrowserTools() {
-  const dir = resolveBrowserToolsDir();
-  return import(pathToFileURL(join(dir, 'scripts', 'browser-control.mjs')).href);
 }
 
 function parsePort(value) {
@@ -75,13 +52,12 @@ async function readTokenFromBrowser(browser) {
 }
 
 async function withBrowser(callback) {
-  const tools = await importBrowserTools();
   const existingPort = parsePort(process.env.PPLX_BROWSER_TOOLS_PORT || process.env.BROWSER_TOOLS_PORT || process.env.BROWSER_PORT);
   const existingOwnerToken = process.env.BROWSER_TOOLS_OWNER_TOKEN || null;
 
   if (existingPort) {
     if (!existingOwnerToken) fail('BROWSER_TOOLS_OWNER_TOKEN is required when using an existing Browser Tools port.', 2);
-    const browser = await tools.connectBrowser(existingPort, { ownerToken: existingOwnerToken });
+    const browser = await connectBrowser(existingPort, { ownerToken: existingOwnerToken });
     try {
       return await callback(browser);
     } finally {
@@ -95,7 +71,7 @@ async function withBrowser(callback) {
   const ownerToken = process.env.BROWSER_TOOLS_OWNER_TOKEN || null;
   const ownerId = process.env.BROWSER_TOOLS_OWNER_ID || DEFAULT_OWNER_ID;
 
-  const started = await tools.startChrome({
+  const started = await startChrome({
     profileName: taskName ? null : profileName,
     taskName,
     forceProfileSync,
@@ -106,11 +82,11 @@ async function withBrowser(callback) {
 
   let browser;
   try {
-    browser = await tools.connectBrowser(started.port, { ownerToken: started.ownerToken });
+    browser = await connectBrowser(started.port, { ownerToken: started.ownerToken });
     return await callback(browser);
   } finally {
     if (browser) browser.disconnect();
-    tools.stopChrome({ port: started.port, ownerToken: started.ownerToken });
+    stopChrome({ port: started.port, ownerToken: started.ownerToken });
   }
 }
 
