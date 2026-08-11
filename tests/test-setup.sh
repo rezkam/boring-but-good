@@ -65,6 +65,25 @@ else
     fail "Tracked skills found outside skills/<name>/" "$(printf '%b' "$INVALID_SKILL_PATHS")"
 fi
 
+# Pi extensions are package resources, not skill implementation details. Keeping them at
+# the repository extension root lets pi discover and install them independently of skills.
+header "Setup: Canonical extension layout"
+EXTENSIONS_DIR="${REPO_DIR}/extensions"
+for extension in coordinator-guard gemini-search; do
+    if [ -f "${EXTENSIONS_DIR}/${extension}/index.ts" ]; then
+        pass "${extension} is under extensions/"
+    else
+        fail "${extension} should be under extensions/"
+    fi
+done
+
+MISPLACED_EXTENSIONS=$(find "${REPO_DIR}/skills" -path '*/node_modules' -prune -o -type f \( -path '*/extensions/*' -o -name 'pi-extension.ts' \) -print)
+if [ -z "$MISPLACED_EXTENSIONS" ]; then
+    pass "No Pi extensions are nested inside skills"
+else
+    fail "Pi extensions should not be nested inside skills" "$MISPLACED_EXTENSIONS"
+fi
+
 SKANE_README="${REPO_DIR}/skills/skanetrafiken/README.md"
 SKANE_LICENSE_REF=$(grep -oE '\]\((\.\./)+LICENSE\)' "$SKANE_README" | head -1 | sed 's/^](//; s/)$//')
 if [ -n "$SKANE_LICENSE_REF" ] && [ -f "$(dirname "$SKANE_README")/${SKANE_LICENSE_REF}" ]; then

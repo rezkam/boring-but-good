@@ -1,4 +1,4 @@
-import { startChromeWithoutTerminalOutput } from '../../extensions/gemini-search/runtime.mjs';
+import { startChromeWithoutTerminalOutput } from '../../runtime.mjs';
 
 const result = await startChromeWithoutTerminalOutput({ port: 43125 }, {
   moduleUrl: new URL('./noisy-browser-start.mjs', import.meta.url).href,

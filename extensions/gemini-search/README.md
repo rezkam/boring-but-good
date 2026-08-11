@@ -13,19 +13,21 @@ It is a small wrapper around the AI Chat Gemini provider. Every query uses:
 
 ## Install
 
-From this repository checkout:
+Install the AI Chat runtime dependencies, then link the skill and extension from this repository checkout:
 
 ```bash
-cd ai-chat
-npm install
-pi install .
+npm --prefix skills/ai-chat install
+ln -sfn "$PWD/skills/ai-chat" ~/.pi/agent/skills/ai-chat
+ln -sfn "$PWD/extensions/gemini-search" ~/.pi/agent/extensions/gemini-search
 ```
 
-For a one-session test without installing:
+The extension is separate from the skill, but imports the installed AI Chat runtime. Link both directories from the same repository checkout so their relative layout stays intact.
+
+For a one-session test without installing the extension:
 
 ```bash
-cd ai-chat
-pi -e .
+npm --prefix skills/ai-chat install
+pi -e ./extensions/gemini-search/index.ts
 ```
 
 ## Browser profile

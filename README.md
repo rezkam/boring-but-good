@@ -17,7 +17,7 @@ Skills that give coding agents the ability to interact with real engineering sys
 | [**skanetrafiken**](skills/skanetrafiken/) | Plan public transport journeys in southern Sweden with real-time delays. |
 | [**java-21-to-25-migration**](skills/java-21-to-25-migration/) | Migrate a Java project from JDK 21 to JDK 25 with a phased plan covering all breaking changes. |
 | [**finance**](skills/finance/) | Fetch browser-authenticated market and macroeconomic data through Browser Tools managed Chrome. |
-| [**ai-chat**](skills/ai-chat/) | Query browser-authenticated AI providers and add the file-backed `gemini_search` pi extension. |
+| [**ai-chat**](skills/ai-chat/) | Query browser-authenticated AI providers and power the file-backed `gemini_search` pi extension. |
 | [**codex**](skills/codex/) | Run non-interactive Codex code review sessions, track long-running jobs, and continue review threads with extra prompts. |
 | [**commit**](skills/commit/) | Stage and commit only the intended changes. |
 | [**coordinator**](skills/coordinator/) | Drive multi-slice coding campaigns from an approved plan to a merge-ready pull request. |
@@ -25,6 +25,8 @@ Skills that give coding agents the ability to interact with real engineering sys
 | [**pr-ready**](skills/pr-ready/) | Commit, push, open, and verify a merge-ready pull request without merging it. |
 | [**tdd**](skills/tdd/) | Write a failing test first, prove it detects the behavior, then make it pass. |
 | [**verify**](skills/verify/) | Run the changed behavior and report concrete verification evidence. |
+
+Pi extensions live separately under [`extensions/`](extensions/). This keeps executable harness integrations independent from the skills that document their workflows.
 
 [**Browser Tools**](https://github.com/rezkam/browser-tools) is an external companion for managed Chrome automation. Install its package with `npm install @rezkam/browser-tools`, or install its skill from the standalone repository with `npx skills add rezkam/browser-tools`.
 

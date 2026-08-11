@@ -6,7 +6,7 @@ import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 
-import * as geminiSearchRuntime from '../extensions/gemini-search/runtime.mjs';
+import * as geminiSearchRuntime from '../runtime.mjs';
 
 const {
   GEMINI_SEARCH_MODEL,

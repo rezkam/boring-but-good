@@ -14,7 +14,7 @@ below exist because each one has already cost a full session.
 Read [harness.md](harness.md) once at campaign start. It resolves the places where the
 host agent's own rules pull against a running campaign, and it differs per harness.
 
-On a harness where [guard/README.md](guard/README.md) is installed, the mechanical half of
+On a harness where the [coordinator guard](../../extensions/coordinator-guard/README.md) is installed, the mechanical half of
 this skill is enforced at the tool boundary: an unpinned dispatch, a premature reviewer, a
 delegated commit, or a launch behind a stale status block fails rather than proceeding.
 Register the campaign before the first dispatch so those rules can apply. A refusal names
