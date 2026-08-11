@@ -1,6 +1,12 @@
 # Perplexity Reference
 
-Run commands from the Perplexity skill directory:
+Perplexity consumes `@rezkam/browser-tools` from `package.json` and requires installed npm dependencies. From the Perplexity skill directory, install them once with:
+
+```bash
+npm ci
+```
+
+Then run commands from the same directory:
 
 ```bash
 uv run scripts/pplx.py <command> [options]

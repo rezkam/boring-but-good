@@ -1,10 +1,9 @@
 # boring-but-good
 
 Shell-script and workflow skills that give coding agents the ability to interact with engineering
-systems. Publishable skills live under `skills/<skill-name>/`, and each has a `SKILL.md`.
-`browser-tools/` is the deliberate exception because it is also an npm workspace. Some skills
-keep executables in a `scripts/` folder, others keep them at the skill root, and several are
-prose only.
+systems. Publishable skills live under `skills/<skill-name>/`, and each has a `SKILL.md`. Some
+skills keep executables in a `scripts/` folder, others keep them at the skill root, and several
+are prose only.
 
 This file deliberately does not inventory the skills or the test suites. Run `ls skills` and read
 `tests/test-all.sh` for the current list: every previous attempt to keep an inventory here went

@@ -1,12 +1,20 @@
 ---
 name: perplexity
 description: Search, research, chat, and analyze files through Perplexity WebUI. Use when the user asks to use Perplexity, Perplexity WebUI, GPT thinking models through Perplexity, current-news research, cited web research, source-focused search, or file analysis.
-compatibility: Requires uv, internet access, a Perplexity Pro account, Browser Tools, macOS Chrome, and a logged-in copied Chrome profile or explicit session token.
+compatibility: Requires uv, npm dependencies installed from package.json, internet access, a Perplexity Pro account, macOS Chrome, and a logged-in copied Chrome profile or explicit session token. Browser Tools is provided by @rezkam/browser-tools.
 ---
 
 # Perplexity
 
 Use the bundled scripts for all Perplexity work. Max-tier models are removed.
+
+## Setup
+
+Install the Browser Tools dependency declared in `package.json`:
+
+```bash
+npm ci
+```
 
 ## Token safety
 

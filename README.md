@@ -4,7 +4,7 @@ I was bored. So I wrote some scripts to make my AI agents actually useful at the
 
 ## What's in here
 
-Skills that give coding agents the ability to interact with real engineering systems through shell scripts and workflow instructions. Publishable skills live under `skills/<skill-name>/`, matching the standard skills repository layout. `browser-tools/` remains at the repository root because it is also an npm workspace.
+Skills that give coding agents the ability to interact with real engineering systems through shell scripts and workflow instructions. Publishable skills live under `skills/<skill-name>/`, matching the standard skills repository layout.
 
 | Skill | What it does |
 |-------|-------------|
@@ -16,7 +16,6 @@ Skills that give coding agents the ability to interact with real engineering sys
 | [**argocd**](skills/argocd/) | Check app sync status, trigger syncs, view resources, read pod logs, rollback deployments. |
 | [**skanetrafiken**](skills/skanetrafiken/) | Plan public transport journeys in southern Sweden with real-time delays. |
 | [**java-21-to-25-migration**](skills/java-21-to-25-migration/) | Migrate a Java project from JDK 21 to JDK 25 with a phased plan covering all breaking changes. |
-| [**browser-tools**](browser-tools/) | Control managed Chrome, record visual interactions, capture HAR or raw CDP events, and extract generic page content. |
 | [**finance**](skills/finance/) | Fetch browser-authenticated market and macroeconomic data through Browser Tools managed Chrome. |
 | [**ai-chat**](skills/ai-chat/) | Query browser-authenticated AI providers and add the file-backed `gemini_search` pi extension. |
 | [**codex**](skills/codex/) | Run non-interactive Codex code review sessions, track long-running jobs, and continue review threads with extra prompts. |
@@ -26,6 +25,8 @@ Skills that give coding agents the ability to interact with real engineering sys
 | [**pr-ready**](skills/pr-ready/) | Commit, push, open, and verify a merge-ready pull request without merging it. |
 | [**tdd**](skills/tdd/) | Write a failing test first, prove it detects the behavior, then make it pass. |
 | [**verify**](skills/verify/) | Run the changed behavior and report concrete verification evidence. |
+
+[**Browser Tools**](https://github.com/rezkam/browser-tools) is an external companion for managed Chrome automation. Install its package with `npm install @rezkam/browser-tools`, or install its skill from the standalone repository with `npx skills add rezkam/browser-tools`.
 
 ## Getting started
 

@@ -20,13 +20,7 @@ sama_dm_thread_chat_view.html
 .tech-debt-audit/
 *-workspace/
 
-# Local browser and AI provider configuration and scratch scripts
-browser-tools/artifacts/
-browser-tools/config/*.local.json
-browser-tools/.tmp-*.mjs
-browser-tools/*.tmp.mjs
-browser-tools/v2-*.mjs
-browser-tools/dashboard-shots.mjs
+# Local browser and AI provider configuration
 skills/finance/config/*.local.json
 skills/ai-chat/config/*.local.json
 # Keep legacy locations ignored while existing checkouts migrate local config files.
