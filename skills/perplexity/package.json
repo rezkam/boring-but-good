@@ -1,0 +1,15 @@
+{
+  "name": "perplexity-skill",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@rezkam/browser-tools": "^1.0.2"
+  }
+}
