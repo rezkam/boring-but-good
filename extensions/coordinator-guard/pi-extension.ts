@@ -263,7 +263,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		if (!model) return null;
 		// Clamp to what this model actually supports rather than sending a level it will reject.
 		const clamped = effort ? (clampThinkingLevel(model, effort as ThinkingLevel) as ThinkingLevel) : undefined;
-		return { model, effort: clamped === "off" ? undefined : clamped };
+		return { model, effort: clamped };
 	}
 
 	function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "info"): void {
@@ -645,6 +645,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 					coordinatorGitWork: "none" as const,
 					unrenderedPlaceholders: [],
 					classJustification: "substantive" as const,
+					modelUnavailability: "absent" as const,
 				},
 			})),
 		);
@@ -720,8 +721,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		if (!campaign || event.message.role !== "assistant") return;
 		const content = Array.isArray(event.message.content) ? event.message.content : [];
 		const assistantText = content
-			.filter((part: { type?: string }) => part.type === "text")
-			.map((part: { text?: string }) => part.text ?? "")
+			.map((part) => (part.type === "text" ? part.text : ""))
 			.join("\n");
 		if (!/^[ \t>*-]*CAMPAIGN\b/im.test(assistantText)) return;
 		const block = readStatusBlock(assistantText);

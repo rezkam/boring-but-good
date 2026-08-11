@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createGeminiSearchExtension } from '../extensions/gemini-search/index.ts';
+import { createGeminiSearchExtension } from '../index.ts';
 
 const theme = {
   fg: (_name, text) => text,

@@ -12,7 +12,7 @@ Use this skill when the task is about using AI provider web sessions as tools. D
 
 ## Pi Gemini Search extension
 
-The package manifest exposes `extensions/gemini-search/index.ts` as a pi extension. It registers `gemini_search`, a file-backed web research tool fixed to Gemini 3.6 Flash Extended Thinking and verified temporary chats. It accepts one query or up to five queries, shows progress while each browser request runs, and returns private result-file paths for pi's `read` tool. See [extensions/gemini-search/README.md](extensions/gemini-search/README.md) for setup and usage.
+The companion extension lives separately at [`extensions/gemini-search/`](../../extensions/gemini-search/README.md). It registers `gemini_search`, a file-backed web research tool fixed to Gemini 3.6 Flash Extended Thinking and verified temporary chats. It accepts one query or up to five queries, shows progress while each browser request runs, and returns private result-file paths for pi's `read` tool. The extension imports this skill's runtime, so install both from the same repository checkout.
 
 ## Browser lifecycle contract
 

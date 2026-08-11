@@ -120,7 +120,7 @@ that the audit would reject.
 ## pi
 
 **The guard extension enforces this skill mechanically here, and it owns the pi
-mechanics.** `guard/` blocks tool calls that break the dispatch rules, and once a
+mechanics.** The top-level `extensions/coordinator-guard/` extension blocks tool calls that break the dispatch rules, and once a
 campaign is registered it re-injects the full contract into the system prompt every
 turn, so the mechanics survive compaction without this file. If the
 `coordinator_campaign` tool is absent, the guard is not installed: stop and tell the
@@ -129,7 +129,7 @@ user, because nothing below is enforced without it.
 Register the campaign before the first dispatch: `coordinator_campaign` action `start`
 with slug, worktree, plan path, slice count, and the authorization scope. Record slices
 with `set-slices`, lanes with `coordinator_lane`, and open the single review pass with
-`open-review`. See [guard/README.md](guard/README.md) for the refusal codes. When a call
+`open-review`. See the [guard documentation](../../extensions/coordinator-guard/README.md) for the refusal codes. When a call
 is blocked, the refusal names the fix: correct it and retry in the same turn. Never work
 around a refusal by routing through bash.
 
@@ -139,8 +139,8 @@ judge fails closed, so a dispatch it cannot read is refused rather than assumed
 compliant.
 
 **Campaign dispatches use the guard's own roles, never pi's builtins.** The guard ships
-`campaign-worker`, `campaign-reviewer`, and `campaign-scout` in `guard/agents/` and
-registers them with pi-subagents at load. Their prompts are versioned with this skill,
+`campaign-worker`, `campaign-reviewer`, and `campaign-scout` in `extensions/coordinator-guard/agents/` and
+registers them with pi-subagents at load. Their prompts are versioned with this repository,
 so what a dispatched agent is told is part of what the guard guarantees. The builtins
 are refused during a campaign for cause: pi's `reviewer` carries edit and write tools
 and is told to apply fixes, `worker` forks your whole conversation into the child, and
