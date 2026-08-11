@@ -12,6 +12,8 @@ CYAN=$'\033[0;36m'; BOLD=$'\033[1m'; DIM=$'\033[2m'; RESET=$'\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILLS_SRC="${SCRIPT_DIR}/skills"
+MOVED_SKILLS="ai-chat argocd codex commit coordinator dependency-track finance java-21-to-25-migration jenkins jira perplexity pr-ready skanetrafiken sonarqube tdd to-tasks verify"
+LEGACY_WORKFLOW_TOOL_SKILLS="argocd dependency-track jenkins jira sonarqube"
 BORING_DIR="${HOME}/.boring"
 
 # ── Output helpers ──────────────────────────────────────────────────────────
@@ -541,6 +543,90 @@ select_install_path() {
 _skill_source() {
     local name="$1"
     printf "%s/%s" "$SKILLS_SRC" "$name"
+}
+
+_legacy_skill_source() {
+    local name="$1"
+    case " ${LEGACY_WORKFLOW_TOOL_SKILLS} " in
+        *" ${name} "*) printf "%s/workflow-tools/%s" "$SCRIPT_DIR" "$name" ;;
+        *) printf "%s/%s" "$SCRIPT_DIR" "$name" ;;
+    esac
+}
+
+_refresh_legacy_link() {
+    local dest="$1" old_target="$2" new_target="$3" current_target
+    [ -L "$dest" ] || return 1
+    current_target=$(readlink "$dest" 2>/dev/null || true)
+    [ "$current_target" = "$old_target" ] || return 1
+    ln -sfn "$new_target" "$dest"
+}
+
+_count_legacy_skill_links_in() {
+    local target_dir="$1" name dest old_target count=0
+    [ -n "$target_dir" ] || { printf "0"; return; }
+
+    for name in $MOVED_SKILLS; do
+        dest="${target_dir}/${name}"
+        old_target="$(_legacy_skill_source "$name")"
+        if [ -L "$dest" ] && [ "$(readlink "$dest" 2>/dev/null || true)" = "$old_target" ]; then
+            count=$((count + 1))
+        fi
+    done
+    printf "%s" "$count"
+}
+
+_refresh_legacy_skill_links_in() {
+    local target_dir="$1" name dest old_target new_target
+    [ -n "$target_dir" ] || return 0
+
+    for name in $MOVED_SKILLS; do
+        dest="${target_dir}/${name}"
+        old_target="$(_legacy_skill_source "$name")"
+        new_target="$(_skill_source "$name")"
+        if _refresh_legacy_link "$dest" "$old_target" "$new_target"; then
+            success "Refreshed ${BOLD}${name}${RESET} link at ${dest}"
+        fi
+    done
+}
+
+migrate_legacy_skill_links() {
+    local count primary_count pi_count refresh
+    count=0
+    primary_count="$(_count_legacy_skill_links_in "$INSTALL_DIR")"
+    count=$((count + primary_count))
+
+    if [ "$AGENT_HARNESS" = "both" ]; then
+        pi_count="$(_count_legacy_skill_links_in "$PI_SKILLS_DIR")"
+        count=$((count + pi_count))
+    fi
+
+    local agent_dest="" old_agent_target="" new_agent_target=""
+    if [ "$AGENT_HARNESS" = "claude-code" ] || [ "$AGENT_HARNESS" = "both" ]; then
+        agent_dest="${AGENT_DIR}/java-21-to-25-migration.md"
+        old_agent_target="${SCRIPT_DIR}/java-21-to-25-migration/SKILL.md"
+        new_agent_target="${SKILLS_SRC}/java-21-to-25-migration/SKILL.md"
+        if [ -L "$agent_dest" ] && [ "$(readlink "$agent_dest" 2>/dev/null || true)" = "$old_agent_target" ]; then
+            count=$((count + 1))
+        fi
+    fi
+
+    [ "$count" -gt 0 ] || return 0
+
+    header "Refresh Moved Skill Links"
+    info "Found ${count} existing link(s) that still point to the previous repository layout."
+    ask_yn refresh "Refresh these links to skills/?" "y"
+    if [ "$refresh" != "true" ]; then
+        warn "Kept existing links. They may remain broken after this update."
+        return 0
+    fi
+
+    _refresh_legacy_skill_links_in "$INSTALL_DIR"
+    if [ "$AGENT_HARNESS" = "both" ]; then
+        _refresh_legacy_skill_links_in "$PI_SKILLS_DIR"
+    fi
+    if [ -n "$agent_dest" ] && _refresh_legacy_link "$agent_dest" "$old_agent_target" "$new_agent_target"; then
+        success "Refreshed ${BOLD}java-21-to-25-migration${RESET} agent link at ${agent_dest}"
+    fi
 }
 
 _link_skill_to() {
@@ -1276,6 +1362,8 @@ main() {
     if ! detect_and_select_harness; then
         exit 0
     fi
+    select_install_path
+    migrate_legacy_skill_links
     check_and_install_deps
 
     # Re-check: skills may have been disabled due to missing tools
@@ -1296,8 +1384,6 @@ main() {
         info "Install the missing tools and re-run this script."
         exit 0
     fi
-
-    select_install_path
 
     # Each configure function links the skill at the end
     [ "$INSTALL_DTRACK"   = "true" ] && configure_dtrack
