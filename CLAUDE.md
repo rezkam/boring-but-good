@@ -8,8 +8,8 @@ prose only.
 
 This file deliberately does not inventory the skills or the test suites. Run `ls skills` and read
 `tests/test-all.sh` for the current list: every previous attempt to keep an inventory here went
-stale and misled the next reader. `code-review/` is a prompt and rubric set, `hooks/` ships a
-PreToolUse guard, and `tests/` is the suite runner.
+stale and misled the next reader. `code-review/` is a prompt and rubric set, and `tests/` is
+the suite runner. Coordinator hooks live under `skills/coordinator/hooks/`.
 
 ## Architecture
 
@@ -40,8 +40,8 @@ If you add a live test, verify the full call chain to confirm nothing writes to 
 
 Run: `bash tests/test-all.sh`. It invokes every suite in `tests/` and aggregates the results.
 
-**Not in the runner:** `hooks/test-guard-output.sh` covers the PreToolUse guard and
-`tests/test-all.sh` does not call it. Run it by hand after touching `hooks/guard-output.sh`.
+The coordinator suite runs `skills/coordinator/hooks/test-guard-output.sh`, which covers the
+PreToolUse output guard alongside the coordinator dispatch guard.
 
 **The Jira arg-validation mock:** go-jira may not be installed. The tests create a stub `jira` binary (just `exit 1`) and a mock `$HOME` with `~/.jira.d/config.yml` so `_config.sh` passes. This lets scripts reach their own argument validation code. The stub isn't testing go-jira, it's bypassing the "go-jira not installed" gate.
 
@@ -57,7 +57,7 @@ Run: `bash tests/test-all.sh`. It invokes every suite in `tests/` and aggregates
   `tests/test-jenkins.sh` fails if it gains one. Check the skill's own suite before adding or
   removing the line.
 - **Shebangs are mixed.** Both `#!/bin/bash` and `#!/usr/bin/env bash` are in use; `skills/codex/`,
-  `hooks/`, `setup.sh`, `skills/pr-ready/pr-state.sh`, and `skills/coordinator/dispatch-audit.sh` take the
+  `skills/coordinator/hooks/`, `setup.sh`, `skills/pr-ready/pr-state.sh`, and `skills/coordinator/dispatch-audit.sh` take the
   `env` form. Match the directory you are editing. Scripts should also pass `zsh -n`, which the
   jira, argocd, and coordinator suites check.
 - Config: `~/.boring/<skill>/` with separate files per value (not a single config file)

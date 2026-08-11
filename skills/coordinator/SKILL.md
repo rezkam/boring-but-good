@@ -20,6 +20,9 @@ delegated commit, or a launch behind a stale status block fails rather than proc
 Register the campaign before the first dispatch so those rules can apply. A refusal names
 the fix; correct it and retry in the same turn.
 
+The authoring hook under [hooks/README.md](hooks/README.md) keeps repository output rules with
+the coordinator resources that apply them during file, git, and pull request work.
+
 ## 1. Do not stall
 
 Record the authorization scope in the notes file at campaign start and restate it in every
