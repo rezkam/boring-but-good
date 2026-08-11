@@ -38,7 +38,7 @@ check 2 "git commit -am"                    "$(b 'git commit -am wip')"
 check 0 "git commit --amend --no-edit"      "$(b 'git commit --amend --no-edit')"
 check 2 "draft PR"                          "$(b 'gh pr create --draft --title x')"
 check 2 "staging the notes file"            "$(b 'git add implementation-notes-x.md')"
-check 0 "ordinary bash is not inspected"    "$(b 'ls -la /Users/someone/Code')"
+check 0 "ordinary bash is not inspected"    "$(b 'ls -la "$HOME/Code"')"
 
 echo "commands that can open an editor and hang"
 check 2 "git rebase --continue bare"        "$(b 'git rebase --continue')"
