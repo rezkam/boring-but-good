@@ -550,6 +550,71 @@ export function parseTierEntries(raw: string): { ok: true; entries: string[] } |
 }
 
 /**
+ * A judge pin. Looser than a tier pin on purpose: the effort is optional, because a model
+ * with no thinking levels is still a judge, and any provider the local harness spells is
+ * accepted rather than a fixed list. What it refuses is the shape that only fails later, a
+ * bare model with no provider or a misspelled effort. Both resolve to nothing at dispatch
+ * time, and the judge fails closed, so the campaign refuses instead of the command.
+ */
+export function parseJudgePin(raw: string): { ok: true; model: string } | { ok: false; error: string } {
+	const spec = raw.trim();
+	if (!spec) return { ok: false, error: "Name a model as provider/model[:effort]." };
+	if (!spec.includes("/")) {
+		return {
+			ok: false,
+			error: `"${spec}" has no provider prefix. Write it the way the local harness spells it, for example openai-codex/gpt-5.6-luna:low.`,
+		};
+	}
+	const colon = spec.lastIndexOf(":");
+	if (colon > spec.indexOf("/")) {
+		const effort = spec.slice(colon + 1);
+		if (!THINKING_LEVELS.some((level) => level === effort)) {
+			return { ok: false, error: `"${effort}" is not an effort. Use one of ${THINKING_LEVELS.join(", ")}, or leave the suffix off.` };
+		}
+	}
+	return { ok: true, model: spec };
+}
+
+/** Every form of `/campaign models`, parsed away from the extension so it can be tested. */
+export type ModelsCommand =
+	| { kind: "show" }
+	| { kind: "reset" }
+	| { kind: "preset"; preset: "gpt" | "claude" }
+	| { kind: "auto" }
+	| { kind: "judge"; model: string }
+	| { kind: "tier"; axis: "class" | "review"; cls: number; entries: string[] }
+	| { kind: "error"; message: string };
+
+export const MODELS_USAGE =
+	"Usage: /campaign models [gpt | claude | judge <provider/model[:effort]> | class <1|2|3> <pins> | review <1|2> <pins> | auto | reset]. GPT or Claude selects all calibrated defaults for that provider, including the judge. Pins are comma separated, as provider/model:effort.";
+
+export function parseModelsCommand(argument: string): ModelsCommand {
+	const trimmed = argument.trim();
+	if (trimmed === "") return { kind: "show" };
+	if (trimmed === "reset") return { kind: "reset" };
+	if (trimmed === "auto") return { kind: "auto" };
+	if (["gpt", "openai", "openai-codex"].includes(trimmed.toLowerCase())) return { kind: "preset", preset: "gpt" };
+	if (["claude", "anthropic", "claude-bridge"].includes(trimmed.toLowerCase())) return { kind: "preset", preset: "claude" };
+
+	const judge = /^judge\b\s*(.*)$/i.exec(trimmed);
+	if (judge) {
+		const pin = parseJudgePin(judge[1] ?? "");
+		return pin.ok ? { kind: "judge", model: pin.model } : { kind: "error", message: pin.error };
+	}
+
+	const match = /^(class|review)\s+([123])\s+(.+)$/i.exec(trimmed);
+	if (!match) return { kind: "error", message: MODELS_USAGE };
+
+	const axis = match[1].toLowerCase() as "class" | "review";
+	const cls = Number(match[2]);
+	if (axis === "review" && cls > 2) return { kind: "error", message: "The review axis has two classes: review 1 and review 2." };
+
+	const parsed = parseTierEntries(match[3]);
+	if (!parsed.ok) return { kind: "error", message: parsed.error };
+	return { kind: "tier", axis, cls, entries: parsed.entries };
+}
+
+/**
  * Whether these entries already belong to another class on the same axis. classFrom returns
  * the first match, so a duplicate would make the command report one class while dispatches
  * are graded as another.

@@ -43,6 +43,20 @@ something the parser cannot read whole refuses the dispatch (CG018), because an 
 prompt is an unchecked one. `/campaign judge off` turns it off; that is the user's decision,
 not the agent's, and the structural rules keep running without it.
 
+### Reaching the judge model
+
+The judge goes through `ctx.modelRegistry`, never pi-ai's stateless `complete`. Only the
+registry holds the composed providers, so an api contributed by another pi extension exists
+nowhere else. Resolving one through the builtin api table throws `No API provider registered
+for api: <name>`, and against a fail-closed judge that refuses every dispatch in the campaign
+while the same model runs the session fine.
+
+Some providers will not take a system prompt of our own. `claude-bridge` bridges to Claude
+Code and matches the system prompt against a capture of what pi assembled, so a judge's own
+prompt matches nothing and the call is refused. When a provider refuses on those grounds the
+judge folds its rules into the user turn and retries, once, and remembers for the rest of the
+session. The rules are never dropped: an unread prompt is an unchecked one.
+
 ## Install on pi
 
 Symlink this directory into pi's extension directory, so the installed copy is this
@@ -112,9 +126,16 @@ are accepted, so one provider outage does not stall a campaign on refusals.
 /campaign models claude                             select every Claude default, including the judge
 /campaign models class <1|2|3> <pin>[, <pin>]       replace an implementation class
 /campaign models review <1|2> <pin>[, <pin>]        replace a review class
+/campaign models judge <provider/model[:effort]>    repoint the judge on its own
 /campaign models auto                               reorder each class fastest-measured first
-/campaign models reset                              back to defaults
+/campaign models reset                              back to defaults, tiers and judge
 ```
+
+Every axis takes any model the local harness spells, not a fixed list. Tier pins carry an
+effort because a class *is* a model at an effort; the judge's is optional, since a model
+with no thinking levels still reads prose. A pin with no provider, or an effort that is not
+one of the seven levels, is refused at the command rather than at dispatch, where the judge
+fails closed and the refusal would read as a broken campaign.
 
 Throughput comes from pi's own session files, as output tokens over the gap to the
 previous entry. That gap also holds tool and queue time, so it ranks rather than

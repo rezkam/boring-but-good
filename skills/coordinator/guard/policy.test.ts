@@ -10,6 +10,7 @@ import {
 	continuationDecision,
 	DEFAULT_TIERS,
 	findTierClash,
+	parseModelsCommand,
 	parseTierEntries,
 	recordIntegration,
 	withTierList,
@@ -871,6 +872,57 @@ test("parseTierEntries refuses what the pin rule exists to prevent", () => {
 	assert.equal(parseTierEntries("").ok, false, "nothing at all");
 	const good = parseTierEntries("openai-codex/gpt-5.6-luna:high, claude-bridge/claude-sonnet-5:medium");
 	assert.deepEqual(good.ok && good.entries, ["openai-codex/gpt-5.6-luna:high", "claude-bridge/claude-sonnet-5:medium"]);
+});
+
+test("/campaign models judge sets the judge on its own, without touching the tiers", () => {
+	// The judge was only settable wholesale, by the gpt or claude preset. A campaign whose
+	// tiers are right and whose judge is unreachable refuses every dispatch, so the judge
+	// belongs on the same command surface as the classes it grades.
+	assert.deepEqual(parseModelsCommand("judge claude-bridge/claude-sonnet-5:low"), {
+		kind: "judge",
+		model: "claude-bridge/claude-sonnet-5:low",
+	});
+	// Any provider the harness spells, not a fixed list.
+	assert.deepEqual(parseModelsCommand("judge some-vendor/some-model-9:medium"), {
+		kind: "judge",
+		model: "some-vendor/some-model-9:medium",
+	});
+	// An effort is optional, because a model with no thinking levels is still a judge.
+	assert.deepEqual(parseModelsCommand("judge openai-codex/gpt-5.5"), { kind: "judge", model: "openai-codex/gpt-5.5" });
+});
+
+test("/campaign models judge refuses a pin that would only fail at dispatch time", () => {
+	const noProvider = parseModelsCommand("judge claude-sonnet-5:low");
+	assert.equal(noProvider.kind, "error");
+	assert.match(noProvider.kind === "error" ? noProvider.message : "", /provider/i);
+
+	const badEffort = parseModelsCommand("judge claude-bridge/claude-sonnet-5:medum");
+	assert.equal(badEffort.kind, "error");
+	assert.match(badEffort.kind === "error" ? badEffort.message : "", /medum/);
+
+	assert.equal(parseModelsCommand("judge").kind, "error");
+});
+
+test("every other models form still parses, including a tier pin on any provider", () => {
+	assert.deepEqual(parseModelsCommand(""), { kind: "show" });
+	assert.deepEqual(parseModelsCommand("reset"), { kind: "reset" });
+	assert.deepEqual(parseModelsCommand("auto"), { kind: "auto" });
+	assert.deepEqual(parseModelsCommand("gpt"), { kind: "preset", preset: "gpt" });
+	assert.deepEqual(parseModelsCommand("anthropic"), { kind: "preset", preset: "claude" });
+	assert.deepEqual(parseModelsCommand("class 2 some-vendor/some-model-9:high, openai-codex/gpt-5.6-terra:medium"), {
+		kind: "tier",
+		axis: "class",
+		cls: 2,
+		entries: ["some-vendor/some-model-9:high", "openai-codex/gpt-5.6-terra:medium"],
+	});
+	assert.deepEqual(parseModelsCommand("REVIEW 1 claude-bridge/claude-opus-5:high"), {
+		kind: "tier",
+		axis: "review",
+		cls: 1,
+		entries: ["claude-bridge/claude-opus-5:high"],
+	});
+	assert.match(parseModelsCommand("review 3 x/y:high").kind === "error" ? parseModelsCommand("review 3 x/y:high").message : "", /two classes/);
+	assert.equal(parseModelsCommand("nonsense").kind, "error");
 });
 
 test("a status block whose slice count contradicts the ledger is not a fresh block", () => {

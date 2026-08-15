@@ -110,7 +110,9 @@ class its own table gives that model: implementation classes for `campaign-worke
 
 Each class lists its models in order and the first is the default. Use `/campaign models gpt`
 or `/campaign models claude` to set every dispatched-agent and review tier, plus the judge,
-to that provider's calibrated default in one command. It does not change the continuing
+to that provider's calibrated default in one command, or `/campaign models judge
+<provider/model[:effort]>` to repoint the judge alone without touching the tiers. Any axis
+takes any model the local harness spells. It does not change the continuing
 coordinator session, which is pi's separate `/model` control. Taking a later one is allowed when the preferred model is
 unavailable, and the row's reason is where you say so
 ("claude-bridge rate-limited at 14:02"). A reason that does not explain the choice is
