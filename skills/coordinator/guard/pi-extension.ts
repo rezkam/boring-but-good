@@ -9,8 +9,7 @@
  */
 
 import { clampThinkingLevel } from "@earendil-works/pi-ai";
-import { complete, completeSimple } from "@earendil-works/pi-ai/compat";
-import type { Model, ThinkingLevel, UserMessage } from "@earendil-works/pi-ai";
+import type { Model, ThinkingLevel } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -18,7 +17,7 @@ import { Type } from "typebox";
 import { delimiter as pathDelimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { judgeCacheKey, judgeDispatch, type JudgeCall, type PromptVerdict } from "./judge.ts";
+import { createJudgeCall, judgeCacheKey, judgeDispatch, type JudgeModel, type JudgeModelRegistry, type PromptVerdict } from "./judge.ts";
 import { findRoleShadows } from "./shadows.ts";
 import { rateFor, readThroughput, reorderByThroughput, type Throughput } from "./throughput.ts";
 
@@ -41,7 +40,9 @@ import {
 	amendAuthorization,
 	declareBlocked,
 	grantForcePush,
-	parseTierEntries,
+	parseJudgePin,
+	parseModelsCommand,
+	MODELS_USAGE,
 	recordIntegration,
 	renderTiers,
 	withTierList,
@@ -242,25 +243,17 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(resolved.model);
 		if (!auth.ok) return { ok: false, error: `no credentials are configured for ${judgeModel}` };
 
-		const call: JudgeCall = async (systemPrompt, message) => {
-			const userMessage: UserMessage = { role: "user", content: [{ type: "text", text: message }], timestamp: Date.now() };
-			// Only the simple API maps a generic reasoning level; the raw one takes
-			// provider-specific fields, so a level passed there is silently dropped.
-			const options = {
-				apiKey: auth.apiKey,
-				headers: auth.headers,
-				signal: ctx.signal,
-				maxTokens: JUDGE_MAX_TOKENS,
-			};
-			const response = resolved.effort
-				? await completeSimple(resolved.model, { systemPrompt, messages: [userMessage] }, { ...options, reasoning: resolved.effort })
-				: await complete(resolved.model, { systemPrompt, messages: [userMessage] }, options);
-			const text = response.content
-				.filter((block): block is { type: "text"; text: string } => block.type === "text")
-				.map((block) => block.text)
-				.join("\n");
-			return { text, stopReason: response.stopReason };
-		};
+		// Through the registry, never pi-ai's stateless helpers: only the registry owns the
+		// composed providers, which is where an extension-supplied api such as claude-bridge
+		// lives. See createJudgeCall.
+		const call = createJudgeCall({
+			registry: ctx.modelRegistry as unknown as JudgeModelRegistry,
+			model: resolved.model as unknown as JudgeModel,
+			effort: resolved.effort,
+			auth,
+			maxTokens: JUDGE_MAX_TOKENS,
+			signal: ctx.signal,
+		});
 
 		const outcome = await judgeDispatch(call, request);
 		if (!outcome.ok) return { ok: false, error: outcome.error };
@@ -306,6 +299,9 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 				});
 			}
 		}
+		// The judge grades every dispatch these tiers describe, and an unreachable one
+		// refuses all of them, so it belongs in the same table rather than a separate command.
+		lines.push("judge", `  -> ${(judgeEnabled ? judgeModel : `${judgeModel} (off)`).padEnd(42)} reads every dispatch prompt`);
 		lines.push(
 			"",
 			tiers === DEFAULT_TIERS ? "These are the defaults." : "These include your overrides; /campaign models reset restores the defaults.",
@@ -313,67 +309,82 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			"",
 			"Set:   /campaign models class <1|2|3> <provider/model:effort>[, ...]",
 			"       /campaign models review <1|2> <provider/model:effort>[, ...]",
+			"       /campaign models judge <provider/model[:effort]>",
 			"GPT:    /campaign models gpt       set every tier and the judge to its OpenAI calibrated default",
 			"Claude: /campaign models claude    set every tier and the judge to its Claude calibrated default",
 			"Auto:   /campaign models auto      reorder each class by measured throughput, leaving unmeasured entries in place",
-			"Reset:  /campaign models reset",
+			"Reset:  /campaign models reset     tiers and the judge",
 		);
 		return lines.join("\n");
 	}
 
-	function handleModels(argument: string): string {
-		if (argument === "") return renderModels();
-
-		if (argument === "reset") {
-			tiers = DEFAULT_TIERS;
-			persist();
-			return `Tiers reset to the defaults.\n\n${renderTiers(tiers)}`;
-		}
-
-		if (["gpt", "openai", "openai-codex"].includes(argument.toLowerCase())) {
-			tiers = GPT_DEFAULT_TIERS;
-			judgeModel = DEFAULT_JUDGE_MODEL;
-			persist();
-			return `OpenAI GPT defaults selected for every implementation and review tier, and the judge is now ${judgeModel}. The current coordinator session model is unchanged: use /model to select it separately.\n\n${renderTiers(tiers)}`;
-		}
-
-		if (["claude", "anthropic", "claude-bridge"].includes(argument.toLowerCase())) {
-			tiers = CLAUDE_DEFAULT_TIERS;
-			judgeModel = CLAUDE_JUDGE_MODEL;
-			persist();
-			return `Claude defaults selected for every implementation and review tier, and the judge is now ${judgeModel}. The current coordinator session model is unchanged: use /model to select it separately.\n\n${renderTiers(tiers)}`;
-		}
-
-		if (argument === "auto") {
-			const measured = readThroughput();
-			const reordered = reorderByThroughput(tiers, measured);
-			if (reordered.changed.length === 0) {
-				return `No reordering: every class is already fastest-first, or has no measurement to go on.\n\n${renderTiers(tiers)}`;
-			}
-			tiers = reordered.tiers;
-			persist();
-			return `Reordered by measured throughput: ${reordered.changed.join(", ")}.\n\n${renderTiers(tiers)}`;
-		}
-
-		const match = /^(class|review)\s+([123])\s+(.+)$/i.exec(argument);
-		if (!match) {
-			return 'Usage: /campaign models [gpt | claude | class <1|2|3> <pins> | review <1|2> <pins> | auto | reset]. GPT or Claude selects all calibrated defaults for that provider, including the judge. Pins are comma separated, as provider/model:effort.';
-		}
-		const axis = match[1].toLowerCase() as "class" | "review";
-		const cls = Number(match[2]);
-		if (axis === "review" && cls > 2) return "The review axis has two classes: review 1 and review 2.";
-
-		const parsed = parseTierEntries(match[3]);
-		if (!parsed.ok) return `Not applied: ${parsed.error}`;
-
-		const clash = findTierClash(tiers, axis, cls, parsed.entries);
-		if (clash) {
-			return `Not applied: ${clash} A pin in two classes makes the table ambiguous, and the class actually enforced would be whichever is found first.`;
-		}
-
-		tiers = withTierList(tiers, axis, cls, parsed.entries);
+	/**
+	 * Point the judge at a model. Shared by `/campaign models judge` and `/campaign judge`,
+	 * because a judge set through one and reported by the other would be two truths.
+	 */
+	function setJudgeModel(ctx: ExtensionContext | null, model: string): string {
+		judgeModel = model;
+		judgeEnabled = true;
+		verdictCache.clear();
 		persist();
-		return `${axis} ${cls} is now ${parsed.entries.join(", ")}. Enforced from the next dispatch.\n\n${renderTiers(tiers)}`;
+		const resolved = ctx ? resolveJudgeModel(ctx) : null;
+		// Not a refusal: a provider can register its models later. But a judge that resolves
+		// to nothing refuses every dispatch, so it is said now rather than found at dispatch.
+		const warning = ctx && !resolved ? `\n\nWarning: ${model} does not resolve in this session's model registry yet. Until it does, every judged dispatch is refused CG018. /campaign judge off turns the judge off.` : "";
+		return `Judge model set to ${judgeModel}.${warning}`;
+	}
+
+	function handleModels(ctx: ExtensionContext | null, argument: string): string {
+		const command = parseModelsCommand(argument);
+
+		switch (command.kind) {
+			case "show":
+				return renderModels();
+
+			case "error":
+				return command.message === MODELS_USAGE ? command.message : `Not applied: ${command.message}`;
+
+			case "reset":
+				tiers = DEFAULT_TIERS;
+				judgeModel = DEFAULT_JUDGE_MODEL;
+				verdictCache.clear();
+				persist();
+				return `Tiers reset to the defaults, and the judge is back to ${judgeModel}.\n\n${renderTiers(tiers)}`;
+
+			case "judge":
+				return setJudgeModel(ctx, command.model);
+
+			case "preset": {
+				const gpt = command.preset === "gpt";
+				tiers = gpt ? GPT_DEFAULT_TIERS : CLAUDE_DEFAULT_TIERS;
+				judgeModel = gpt ? DEFAULT_JUDGE_MODEL : CLAUDE_JUDGE_MODEL;
+				verdictCache.clear();
+				persist();
+				const label = gpt ? "OpenAI GPT" : "Claude";
+				return `${label} defaults selected for every implementation and review tier, and the judge is now ${judgeModel}. Set the judge on its own with /campaign models judge <provider/model[:effort]>. The current coordinator session model is unchanged: use /model to select it separately.\n\n${renderTiers(tiers)}`;
+			}
+
+			case "auto": {
+				const measured = readThroughput();
+				const reordered = reorderByThroughput(tiers, measured);
+				if (reordered.changed.length === 0) {
+					return `No reordering: every class is already fastest-first, or has no measurement to go on.\n\n${renderTiers(tiers)}`;
+				}
+				tiers = reordered.tiers;
+				persist();
+				return `Reordered by measured throughput: ${reordered.changed.join(", ")}.\n\n${renderTiers(tiers)}`;
+			}
+
+			case "tier": {
+				const clash = findTierClash(tiers, command.axis, command.cls, command.entries);
+				if (clash) {
+					return `Not applied: ${clash} A pin in two classes makes the table ambiguous, and the class actually enforced would be whichever is found first.`;
+				}
+				tiers = withTierList(tiers, command.axis, command.cls, command.entries);
+				persist();
+				return `${command.axis} ${command.cls} is now ${command.entries.join(", ")}. Enforced from the next dispatch.\n\n${renderTiers(tiers)}`;
+			}
+		}
 	}
 
 	/** A guard notice in the transcript: shown now, and not sent to the model. */
@@ -997,7 +1008,8 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 					{ value: "models gpt", label: "models gpt", description: "OpenAI defaults for all tiers and the judge" },
 					{ value: "models claude", label: "models claude", description: "Claude defaults for all tiers and the judge" },
 					{ value: "models auto", label: "models auto", description: "reorder each class fastest-measured first" },
-					{ value: "models reset", label: "models reset", description: "back to the defaults" },
+					{ value: "models reset", label: "models reset", description: "back to the defaults, tiers and judge" },
+					{ value: `models judge ${judgeModel}`, label: "models judge", description: `currently ${judgeModel}` },
 				];
 				for (const cls of [1, 2, 3] as const) {
 					tierOptions.push({
@@ -1095,7 +1107,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 						break;
 					}
 					if (command === "models" || command.startsWith("models ")) {
-						show(handleModels(args.trim().slice("models".length).trim()));
+						show(handleModels(ctx, args.trim().slice("models".length).trim()));
 						break;
 					}
 					if (command === "judge" || command.startsWith("judge ")) {
@@ -1110,14 +1122,12 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 							judgeEnabled = true;
 							persist();
 							show(`Judge on, using ${judgeModel}.`);
-						} else if (argument.includes("/")) {
-							judgeModel = argument;
-							judgeEnabled = true;
-							verdictCache.clear();
-							persist();
-							show(`Judge model set to ${judgeModel}.`);
 						} else {
-							show("Usage: /campaign judge [on|off|<provider/model:effort>]");
+							// Validated here rather than at dispatch: an unusable judge is
+							// fail-closed, so a typo refuses the whole campaign silently.
+							const pin = parseJudgePin(argument);
+							if (!pin.ok) show(`Not applied: ${pin.error}\n\nUsage: /campaign judge [on|off|<provider/model[:effort]>]`);
+							else show(setJudgeModel(ctx, pin.model));
 						}
 						break;
 					}

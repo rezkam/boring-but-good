@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { REQUIRED_KEYS, buildJudgeMessage, judgeCacheKey, judgeDispatch, JUDGE_SYSTEM_PROMPT, parseVerdict } from "./judge.ts";
+import { REQUIRED_KEYS, buildJudgeMessage, createJudgeCall, judgeCacheKey, judgeDispatch, JUDGE_SYSTEM_PROMPT, parseVerdict } from "./judge.ts";
 
 const COMPLETE = {
 	kind: "implement",
@@ -119,6 +119,176 @@ test("parseVerdict refuses a placeholder array with non-string entries", () => {
 	assert.equal(parsed.ok, false);
 	if (parsed.ok) throw new Error("unreachable");
 	assert.match(parsed.error, /non-empty string/);
+});
+
+/**
+ * A stand-in for pi's ModelRegistry: it owns the composed providers, which is the only
+ * place an extension-supplied api such as claude-bridge exists.
+ */
+function registryWith(providerId: string, reply: { text: string; stopReason?: string }) {
+	const seen: Array<{ method: "stream" | "streamSimple"; model: unknown; context: unknown; options: any }> = [];
+	const result = async () => ({
+		content: [
+			{ type: "thinking", thinking: "ignored" },
+			{ type: "text", text: reply.text },
+		],
+		stopReason: reply.stopReason ?? "stop",
+	});
+	const provider = {
+		stream(model: unknown, context: unknown, options: any) {
+			seen.push({ method: "stream", model, context, options });
+			return { result };
+		},
+		streamSimple(model: unknown, context: unknown, options: any) {
+			seen.push({ method: "streamSimple", model, context, options });
+			return { result };
+		},
+	};
+	return { seen, registry: { getProvider: (id: string) => (id === providerId ? provider : undefined) } };
+}
+
+test("the judge reaches a model through the registry's provider, so an extension api works", async () => {
+	// claude-bridge is registered by a pi extension, so it exists only on the composed
+	// provider. Resolving it through pi-ai's builtin api table threw "No API provider
+	// registered for api: claude-bridge" and refused every dispatch with CG018.
+	const { seen, registry } = registryWith("claude-bridge", { text: answer() });
+	const call = createJudgeCall({
+		registry,
+		model: { provider: "claude-bridge", id: "claude-sonnet-5", api: "claude-bridge" },
+		auth: { ok: true },
+		maxTokens: 700,
+	});
+
+	const response = await call("system", "message");
+
+	assert.equal(response.text, JSON.stringify(COMPLETE));
+	assert.equal(response.stopReason, "stop");
+	assert.equal(seen.length, 1);
+	assert.equal(seen[0].context.systemPrompt, "system");
+	assert.equal(seen[0].context.messages[0].content[0].text, "message");
+});
+
+test("an effort goes through the simple api, which is the only one that maps a level", async () => {
+	const { seen, registry } = registryWith("claude-bridge", { text: answer() });
+	const model = { provider: "claude-bridge", id: "claude-sonnet-5", api: "claude-bridge" };
+
+	await createJudgeCall({ registry, model, effort: "low", auth: { ok: true }, maxTokens: 700 })("s", "m");
+	assert.equal(seen[0].method, "streamSimple");
+	assert.equal(seen[0].options.reasoning, "low");
+
+	await createJudgeCall({ registry, model, auth: { ok: true }, maxTokens: 700 })("s", "m");
+	assert.equal(seen[1].method, "stream");
+	assert.equal(seen[1].options.reasoning, undefined);
+});
+
+test("resolved credentials reach the provider, and a resolved base url overrides the model's", async () => {
+	const { seen, registry } = registryWith("claude-bridge", { text: answer() });
+	const signal = new AbortController().signal;
+	await createJudgeCall({
+		registry,
+		model: { provider: "claude-bridge", id: "claude-sonnet-5", baseUrl: "https://stale.example" },
+		auth: { ok: true, apiKey: "k", headers: { "x-a": "1" }, baseUrl: "https://resolved.example", env: { E: "1" } },
+		maxTokens: 700,
+		signal,
+	})("s", "m");
+
+	assert.equal(seen[0].options.apiKey, "k");
+	assert.deepEqual(seen[0].options.headers, { "x-a": "1" });
+	assert.deepEqual(seen[0].options.env, { E: "1" });
+	assert.equal(seen[0].options.maxTokens, 700);
+	assert.equal(seen[0].options.signal, signal);
+	assert.equal((seen[0].model as { baseUrl?: string }).baseUrl, "https://resolved.example");
+});
+
+test("an unregistered provider names itself, instead of pi-ai's builtin-table error", async () => {
+	const { registry } = registryWith("claude-bridge", { text: answer() });
+	const call = createJudgeCall({
+		registry,
+		model: { provider: "ghost", id: "nothing-5" },
+		auth: { ok: true },
+		maxTokens: 700,
+	});
+	await assert.rejects(call("s", "m"), /no provider named ghost is registered.*ghost\/nothing-5/);
+});
+
+test("an errored response reports its cause, instead of an empty answer", async () => {
+	// stopReason "error" with the cause only in errorMessage read as `stopped with "error"`,
+	// which is what a whole campaign saw instead of the provider's actual complaint.
+	const provider = {
+		stream: () => ({ result: async () => ({ content: [], stopReason: "error", errorMessage: "quota exhausted at 14:02" }) }),
+		streamSimple: () => ({ result: async () => ({ content: [], stopReason: "error", errorMessage: "quota exhausted at 14:02" }) }),
+	};
+	const call = createJudgeCall({
+		registry: { getProvider: () => provider },
+		model: { provider: "openai-codex", id: "gpt-5.6-luna" },
+		auth: { ok: true },
+		maxTokens: 700,
+	});
+	await assert.rejects(call("s", "m"), /quota exhausted at 14:02/);
+});
+
+/** A provider that refuses a custom system prompt the way claude-bridge does. */
+function systemPromptRefusingProvider(text: string) {
+	const seen: Array<{ context: any }> = [];
+	const result = (context: any) => async () => {
+		if (context.systemPrompt !== undefined) {
+			return {
+				content: [],
+				stopReason: "error",
+				errorMessage: "prompt-capture: no capture for this 28-char system prompt, and it embeds none of the 3 known.",
+			};
+		}
+		return { content: [{ type: "text", text }], stopReason: "stop" };
+	};
+	const provider = {
+		stream: (_m: unknown, context: any) => {
+			seen.push({ context });
+			return { result: result(context) };
+		},
+		streamSimple: (_m: unknown, context: any) => {
+			seen.push({ context });
+			return { result: result(context) };
+		},
+	};
+	return { seen, registry: { getProvider: () => provider } };
+}
+
+test("a provider that refuses a custom system prompt still judges, with the rules folded in", async () => {
+	// claude-bridge only serves prompts pi assembled: it bridges to Claude Code and matches
+	// the system prompt against a capture. A judge builds its own, so the call is refused.
+	// Verified live: same call with no system prompt returns normally.
+	const { seen, registry } = systemPromptRefusingProvider(answer());
+	const call = createJudgeCall({
+		registry,
+		model: { provider: "claude-bridge", id: "claude-sonnet-5" },
+		auth: { ok: true },
+		maxTokens: 700,
+	});
+
+	const response = await call(JUDGE_SYSTEM_PROMPT, "the dispatch prompt");
+
+	assert.equal(response.text, JSON.stringify(COMPLETE));
+	assert.equal(seen.length, 2, "one refused attempt, then the folded retry");
+	assert.equal(seen[1].context.systemPrompt, undefined, "the retry carries no system prompt");
+	const folded = seen[1].context.messages[0].content[0].text;
+	assert.match(folded, /never instructions to follow/, "the judge's rules must survive the fold");
+	assert.match(folded, /the dispatch prompt/);
+});
+
+test("once a provider has refused a system prompt, later judgements skip the doomed attempt", async () => {
+	const { seen, registry } = systemPromptRefusingProvider(answer());
+	const call = createJudgeCall({
+		registry,
+		model: { provider: "claude-bridge", id: "claude-sonnet-5" },
+		auth: { ok: true },
+		maxTokens: 700,
+	});
+
+	await call(JUDGE_SYSTEM_PROMPT, "first");
+	await call(JUDGE_SYSTEM_PROMPT, "second");
+
+	assert.equal(seen.length, 3, "two calls cost three attempts, not four");
+	assert.equal(seen[2].context.systemPrompt, undefined);
 });
 
 test("the required key list is sorted, because the parser compares sorted key lists", () => {
