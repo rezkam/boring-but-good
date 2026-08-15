@@ -179,6 +179,8 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 	let judgeEnabled = true;
 	let tiers: TierLists = DEFAULT_TIERS;
 	const verdictCache = new Map<string, PromptVerdict>();
+	/** Whether this judge's provider refuses a system prompt of ours. See createJudgeCall. */
+	let judgeFold: { model: string; folded: boolean } = { model: judgeModel, folded: false };
 	let noProgressContinuations = 0;
 	/** Errored turns in a row, so a failing provider stops the campaign but one blip does not. */
 	let consecutiveErrors = 0;
@@ -246,6 +248,10 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		// Through the registry, never pi-ai's stateless helpers: only the registry owns the
 		// composed providers, which is where an extension-supplied api such as claude-bridge
 		// lives. See createJudgeCall.
+		// A call is built per dispatch, so what the last one learned about this provider is
+		// held here instead of inside it. Reset when the judge is repointed, because it is a
+		// fact about the provider, not about the guard.
+		if (judgeFold.model !== judgeModel) judgeFold = { model: judgeModel, folded: false };
 		const call = createJudgeCall({
 			registry: ctx.modelRegistry as unknown as JudgeModelRegistry,
 			model: resolved.model as unknown as JudgeModel,
@@ -253,6 +259,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			auth,
 			maxTokens: JUDGE_MAX_TOKENS,
 			signal: ctx.signal,
+			fold: judgeFold,
 		});
 
 		const outcome = await judgeDispatch(call, request);

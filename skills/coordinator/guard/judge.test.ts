@@ -291,6 +291,29 @@ test("once a provider has refused a system prompt, later judgements skip the doo
 	assert.equal(seen[2].context.systemPrompt, undefined);
 });
 
+test("the fold outlives one dispatch, because the judge is rebuilt for every uncached prompt", async () => {
+	// judgePrompt constructs a fresh call per dispatch, so state kept inside one of them is
+	// no memory at all: every dispatch would re-send the request already known to fail.
+	const { seen, registry } = systemPromptRefusingProvider(answer());
+	const shared = { folded: false };
+	const build = () =>
+		createJudgeCall({
+			registry,
+			model: { provider: "claude-bridge", id: "claude-sonnet-5" },
+			auth: { ok: true },
+			maxTokens: 700,
+			fold: shared,
+		});
+
+	await build()(JUDGE_SYSTEM_PROMPT, "first");
+	assert.equal(seen.length, 2, "the first judge pays the probe");
+
+	await build()(JUDGE_SYSTEM_PROMPT, "second");
+	assert.equal(seen.length, 3, "a later judge does not pay it again");
+	assert.equal(seen[2].context.systemPrompt, undefined);
+	assert.equal(shared.folded, true);
+});
+
 test("the required key list is sorted, because the parser compares sorted key lists", () => {
 	// An unsorted entry made every well-formed verdict fail the exact-key-set check.
 	const sorted = [...REQUIRED_KEYS].sort();
