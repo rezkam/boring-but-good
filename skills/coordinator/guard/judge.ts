@@ -205,6 +205,118 @@ export interface JudgeCall {
 }
 
 /**
+ * The slice of pi's model layer the judge needs, written structurally so this file stays
+ * free of the SDK and testable without it.
+ */
+export interface JudgeStream {
+	result(): Promise<{ content: Array<{ type: string; text?: string }>; stopReason?: string; errorMessage?: string }>;
+}
+export interface JudgeProvider {
+	stream(model: unknown, context: unknown, options?: unknown): JudgeStream;
+	streamSimple(model: unknown, context: unknown, options?: unknown): JudgeStream;
+}
+export interface JudgeModelRegistry {
+	getProvider(provider: string): JudgeProvider | undefined;
+}
+export interface JudgeModel {
+	provider: string;
+	id: string;
+	api?: string;
+	baseUrl?: string;
+}
+/** What `ModelRegistry.getApiKeyAndHeaders` resolves to, which the provider needs applied. */
+export interface JudgeAuth {
+	ok: true;
+	apiKey?: string;
+	headers?: Record<string, string>;
+	baseUrl?: string;
+	env?: Record<string, string>;
+}
+
+/**
+ * Reach the judge model through the registry that owns it.
+ *
+ * pi-ai's stateless `complete`/`completeSimple` resolve a model against the builtin api
+ * table only. An api contributed by a pi extension, such as claude-bridge, is never in that
+ * table: it exists on the composed provider inside the registry. Calling the stateless
+ * helpers therefore threw "No API provider registered for api: claude-bridge" for every
+ * judged dispatch, and because the judge fails closed, every dispatch was refused CG018
+ * while the same model ran the session fine.
+ */
+export function createJudgeCall(deps: {
+	registry: JudgeModelRegistry;
+	model: JudgeModel;
+	effort?: string;
+	auth: JudgeAuth;
+	maxTokens: number;
+	signal?: AbortSignal;
+}): JudgeCall {
+	// Set once a provider has refused a custom system prompt, so the doomed attempt is paid
+	// for at most once per judge rather than on every dispatch.
+	let foldSystemPrompt = false;
+
+	return async (systemPrompt, message) => {
+		const provider = deps.registry.getProvider(deps.model.provider);
+		if (!provider) {
+			throw new Error(`no provider named ${deps.model.provider} is registered, so ${deps.model.provider}/${deps.model.id} cannot be reached`);
+		}
+		const model = deps.auth.baseUrl ? { ...deps.model, baseUrl: deps.auth.baseUrl } : deps.model;
+		const options = {
+			apiKey: deps.auth.apiKey,
+			headers: deps.auth.headers,
+			env: deps.auth.env,
+			signal: deps.signal,
+			maxTokens: deps.maxTokens,
+		};
+
+		const attempt = async (folded: boolean) => {
+			const context = folded
+				? { messages: [userText(`${systemPrompt}\n\n${message}`)] }
+				: { systemPrompt, messages: [userText(message)] };
+			// Only the simple API maps a generic reasoning level; the raw one takes
+			// provider-specific fields, so a level passed there is silently dropped.
+			const stream = deps.effort
+				? provider.streamSimple(model, context, { ...options, reasoning: deps.effort })
+				: provider.stream(model, context, options);
+			const response = await stream.result();
+			// A provider reports a failed request as a stopReason with the cause beside it.
+			// Left alone it arrives as an empty answer and the refusal says only
+			// `stopped with "error"`, which is what a whole campaign saw.
+			if (response.stopReason === "error") {
+				throw new Error(response.errorMessage ?? `${deps.model.provider}/${deps.model.id} returned an error with no message`);
+			}
+			const text = response.content
+				.filter((block): block is { type: "text"; text: string } => block.type === "text" && typeof block.text === "string")
+				.map((block) => block.text)
+				.join("\n");
+			return { text, stopReason: response.stopReason };
+		};
+
+		if (foldSystemPrompt) return attempt(true);
+		try {
+			return await attempt(false);
+		} catch (error) {
+			if (!refusesSystemPrompt(error)) throw error;
+			// claude-bridge serves only prompts pi assembled, matching the system prompt
+			// against a capture, so a judge's own is refused outright. The rules move into
+			// the user turn rather than being dropped: an unread prompt is an unchecked one.
+			foldSystemPrompt = true;
+			return attempt(true);
+		}
+	};
+}
+
+function userText(text: string) {
+	return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
+}
+
+/** Whether a provider rejected the request for carrying a system prompt it cannot account for. */
+function refusesSystemPrompt(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return /prompt-capture|system prompt/i.test(message);
+}
+
+/**
  * Ask, and retry once on unparseable output. A provider error or an exhausted retry is a
  * refusal, never a shrug.
  */
