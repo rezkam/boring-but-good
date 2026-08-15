@@ -250,10 +250,14 @@ export function createJudgeCall(deps: {
 	auth: JudgeAuth;
 	maxTokens: number;
 	signal?: AbortSignal;
+	/**
+	 * Remembers that this judge's provider refuses a system prompt of ours. Owned by the
+	 * caller because a call is built per dispatch, so state kept in here would be forgotten
+	 * between them and every dispatch would re-send the request already known to fail.
+	 */
+	fold?: { folded: boolean };
 }): JudgeCall {
-	// Set once a provider has refused a custom system prompt, so the doomed attempt is paid
-	// for at most once per judge rather than on every dispatch.
-	let foldSystemPrompt = false;
+	const fold = deps.fold ?? { folded: false };
 
 	return async (systemPrompt, message) => {
 		const provider = deps.registry.getProvider(deps.model.provider);
@@ -292,7 +296,7 @@ export function createJudgeCall(deps: {
 			return { text, stopReason: response.stopReason };
 		};
 
-		if (foldSystemPrompt) return attempt(true);
+		if (fold.folded) return attempt(true);
 		try {
 			return await attempt(false);
 		} catch (error) {
@@ -300,7 +304,7 @@ export function createJudgeCall(deps: {
 			// claude-bridge serves only prompts pi assembled, matching the system prompt
 			// against a capture, so a judge's own is refused outright. The rules move into
 			// the user turn rather than being dropped: an unread prompt is an unchecked one.
-			foldSystemPrompt = true;
+			fold.folded = true;
 			return attempt(true);
 		}
 	};

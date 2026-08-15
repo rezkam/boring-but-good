@@ -264,22 +264,29 @@ export function grantForcePush(campaign: Campaign, branch: string): Campaign {
  * whose targets are unclear is not a push that was approved.
  */
 export function forcePushTargets(command: string): string[] | null {
-	const match = /(?:^|[\s;&|(])git(?:\s+(?:-[cC]\s+\S+|--\S+|-[^-\s]\S*))*\s+push\s+([^;&|]*)/i.exec(command);
-	if (!match) return null;
-	const args = (match[1] ?? "").trim().split(/\s+/).filter(Boolean);
-	const positional = args.filter((arg) => !arg.startsWith("-"));
-	// The first positional is the remote; everything after it is a refspec.
-	const refspecs = positional.slice(1);
-	if (refspecs.length === 0) return null;
+	// Every push in the command, not the first: a granted push chained ahead of an ungranted
+	// one used to be read as the granted one, and the whole line ran.
+	const pattern = /(?:^|[\s;&|(])git(?:\s+(?:-[cC]\s+\S+|--\S+|-[^-\s]\S*))*\s+push\s+([^;&|]*)/gi;
 	const targets: string[] = [];
-	for (const spec of refspecs) {
-		const bare = spec.replace(/^\+/, "");
-		const destination = bare.includes(":") ? bare.slice(bare.lastIndexOf(":") + 1) : bare;
-		const name = destination.replace(/^refs\/heads\//, "").trim();
-		if (!name) return null;
-		targets.push(name);
+	let found = false;
+	for (const match of command.matchAll(pattern)) {
+		found = true;
+		const args = (match[1] ?? "").trim().split(/\s+/).filter(Boolean);
+		const positional = args.filter((arg) => !arg.startsWith("-"));
+		// The first positional is the remote; everything after it is a refspec.
+		const refspecs = positional.slice(1);
+		// One unreadable push makes the whole command unreadable. A push whose targets are
+		// unclear is not a push that was approved, and it sits in the same shell line.
+		if (refspecs.length === 0) return null;
+		for (const spec of refspecs) {
+			const bare = spec.replace(/^\+/, "");
+			const destination = bare.includes(":") ? bare.slice(bare.lastIndexOf(":") + 1) : bare;
+			const name = destination.replace(/^refs\/heads\//, "").trim();
+			if (!name) return null;
+			targets.push(name);
+		}
 	}
-	return targets;
+	return found ? targets : null;
 }
 
 /**
@@ -559,18 +566,27 @@ export function parseTierEntries(raw: string): { ok: true; entries: string[] } |
 export function parseJudgePin(raw: string): { ok: true; model: string } | { ok: false; error: string } {
 	const spec = raw.trim();
 	if (!spec) return { ok: false, error: "Name a model as provider/model[:effort]." };
-	if (!spec.includes("/")) {
+	const slash = spec.indexOf("/");
+	if (slash < 0) {
 		return {
 			ok: false,
 			error: `"${spec}" has no provider prefix. Write it the way the local harness spells it, for example openai-codex/gpt-5.6-luna:low.`,
 		};
 	}
 	const colon = spec.lastIndexOf(":");
-	if (colon > spec.indexOf("/")) {
+	const hasEffort = colon > slash;
+	if (hasEffort) {
 		const effort = spec.slice(colon + 1);
 		if (!THINKING_LEVELS.some((level) => level === effort)) {
 			return { ok: false, error: `"${effort}" is not an effort. Use one of ${THINKING_LEVELS.join(", ")}, or leave the suffix off.` };
 		}
+	}
+	// A slash is not a spec. Both halves have to be there, or the pin resolves to nothing and
+	// the failure lands on the next dispatch instead of on this command.
+	const provider = spec.slice(0, slash).trim();
+	const id = spec.slice(slash + 1, hasEffort ? colon : undefined).trim();
+	if (!provider || !id) {
+		return { ok: false, error: `"${spec}" needs both a provider and a model, as provider/model[:effort].` };
 	}
 	return { ok: true, model: spec };
 }
@@ -1366,8 +1382,10 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 		const status = text(input.status);
 		if (status !== "blocked" && status !== "complete") return { allow: true, judge: [] };
 		// A campaign that declared itself blocked has already said so where the user can see it,
-		// so the goal is allowed to follow the ledger rather than argue with it.
-		if (campaign.status === "blocked") return { allow: true, judge: [] };
+		// so the goal is allowed to follow the ledger rather than argue with it. Only for that
+		// transition: blocked is waiting on the owner, not finished, and completing here would
+		// still stop the loop one step before the mandatory final review.
+		if (campaign.status === "blocked" && status === "blocked") return { allow: true, judge: [] };
 		// Every slice counted is not the end. The mandatory final review runs after that, so a
 		// goal that completes here stops the loop one step before the step that catches things.
 		// A campaign that is genuinely over is closed, and a closed campaign leaves the guard
@@ -1396,6 +1414,16 @@ function evaluateStructureInner(request: GuardRequest): StructureDecision {
 			}
 		}
 		return { allow: true, judge: [] };
+	}
+
+	// Blocked is waiting on the owner. Continuation already stops there, so a lane launched
+	// now is a lane nothing carries: it returns to a campaign that is not running, and the
+	// user is not being asked about it. Management and resume are above this and stay open.
+	if (campaign?.status === "blocked") {
+		return deny(
+			"CG025",
+			`Campaign ${campaign.slug} is blocked on ${campaign.blockedOn ?? "the owner"}, so nothing carries a new lane: the continuation that integrates returned work does not run while the campaign is blocked. Wait for the decision, or have the user restart the campaign with /campaign resume. Inspecting, steering and stopping the runs already open still work.`,
+		);
 	}
 
 	if (action && (campaign || request.armed)) {

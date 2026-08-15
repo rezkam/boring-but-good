@@ -10,6 +10,7 @@ import {
 	continuationDecision,
 	DEFAULT_TIERS,
 	findTierClash,
+	forcePushTargets,
 	parseModelsCommand,
 	parseTierEntries,
 	recordIntegration,
@@ -896,6 +897,12 @@ test("/campaign models judge refuses a pin that would only fail at dispatch time
 	assert.equal(noProvider.kind, "error");
 	assert.match(noProvider.kind === "error" ? noProvider.message : "", /provider/i);
 
+	// A slash is not a spec: these all persist a judge that resolves to nothing, and every
+	// judged dispatch afterwards fails closed on CG018 until someone notices.
+	for (const half of ["/model", "provider/", "/", "openai-codex/:low", "/gpt-5.6-luna:low"]) {
+		assert.equal(parseModelsCommand(`judge ${half}`).kind, "error", `expected "${half}" to be refused`);
+	}
+
 	const badEffort = parseModelsCommand("judge claude-bridge/claude-sonnet-5:medum");
 	assert.equal(badEffort.kind, "error");
 	assert.match(badEffort.kind === "error" ? badEffort.message : "", /medum/);
@@ -1233,6 +1240,74 @@ test("a granted force push is allowed on the exact branch, and nothing else is",
 	assert.equal(structure(request({ tool: "bash", campaign: granted, input: { command: "git reset --hard origin/main" } })).code, "CG015");
 	// And an ungranted campaign is exactly where it was.
 	assert.equal(structure(request({ tool: "bash", campaign: campaign(), input: { command: push } })).code, "CG015");
+});
+
+test("a blocked campaign dispatches nothing, and can still be inspected and resumed", () => {
+	// Blocked stopped the continuation but not the launch path, so a later turn could start a
+	// lane the campaign would then never carry: no continuation fires while blocked, so the
+	// work returns to nobody.
+	const waiting = declareBlocked(campaign(), "the ADR deletion list");
+
+	const dispatched = structure(request({ tool: "subagent", campaign: waiting, input: { action: "run", async: true, ...launch() } }));
+	assert.equal(dispatched.code, "CG025");
+	assert.match(dispatched.reason, /the ADR deletion list/, "the refusal names what it is waiting on");
+	assert.match(dispatched.reason, /campaign resume/);
+
+	// Everything the user needs to unblock it keeps working.
+	for (const action of ["status", "list", "get", "steer", "stop"]) {
+		assert.deepEqual(
+			evaluateStructure(request({ tool: "subagent", campaign: waiting, input: { action, run_id: "r1" } })),
+			{ allow: true, judge: [] },
+			`${action} must stay available while blocked`,
+		);
+	}
+	// And once resumed it dispatches again.
+	const resumed = { ...waiting, status: "active" as const };
+	assert.equal(evaluateStructure(request({ tool: "subagent", campaign: resumed, input: { action: "run", async: true, ...launch() } })).allow, true);
+});
+
+test("being blocked lets the goal say blocked, and still not say complete", () => {
+	// Blocked means waiting on the owner, not finished. Letting the goal follow the ledger
+	// was meant for the blocked transition; it also let an unfinished campaign be marked
+	// complete, which stops the loop one step before the mandatory final review.
+	const waiting = declareBlocked({ ...campaign(), slicesTotal: 12, slicesDone: 3 }, "the ADR deletion list");
+
+	assert.deepEqual(evaluateStructure(request({ tool: "update_goal", campaign: waiting, input: { status: "blocked" } })), { allow: true, judge: [] });
+
+	const completed = structure(request({ tool: "update_goal", campaign: waiting, input: { status: "complete" } }));
+	assert.equal(completed.code, "CG023");
+	assert.match(completed.reason, /3 of 12/);
+});
+
+test("a grant covers one push, not every push chained behind it", () => {
+	// The target reader stopped at the first `git push`, so a granted push followed by an
+	// ungranted one in the same command line was read as the granted one and allowed.
+	const branch = "feat/demo";
+	const granted = grantForcePush(campaign(), branch);
+
+	assert.deepEqual(forcePushTargets(`git push -f origin HEAD:${branch} && git push -f origin HEAD:main`), [branch, "main"]);
+	assert.equal(
+		structure(request({ tool: "bash", campaign: granted, input: { command: `git push -f origin HEAD:${branch} && git push -f origin HEAD:main` } })).code,
+		"CG015",
+	);
+	// Every separator a shell honours, not just &&.
+	for (const chain of [";", "||", "|", "&"]) {
+		assert.equal(
+			structure(request({ tool: "bash", campaign: granted, input: { command: `git push -f origin HEAD:${branch} ${chain} git push -f origin HEAD:main` } })).code,
+			"CG015",
+			`expected ${chain} to be read as a second push`,
+		);
+	}
+	// A second push that is also on the grant stays allowed.
+	assert.deepEqual(
+		evaluateStructure(request({ tool: "bash", campaign: granted, input: { command: `git push -f origin HEAD:${branch} && git push -f origin HEAD:${branch}` } })),
+		{ allow: true, judge: [] },
+	);
+	// A chained push whose refspecs cannot be read is not a push that was approved.
+	assert.equal(
+		structure(request({ tool: "bash", campaign: granted, input: { command: `git push -f origin HEAD:${branch} && git push --force` } })).code,
+		"CG015",
+	);
 });
 
 test("a campaign can declare itself blocked on the owner, and that is not parking the goal", () => {
