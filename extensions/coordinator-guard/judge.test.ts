@@ -126,7 +126,7 @@ test("parseVerdict refuses a placeholder array with non-string entries", () => {
  * place an extension-supplied api such as claude-bridge exists.
  */
 function registryWith(providerId: string, reply: { text: string; stopReason?: string }) {
-	const seen: Array<{ method: "stream" | "streamSimple"; model: unknown; context: unknown; options: any }> = [];
+	const seen: Array<{ method: "stream" | "streamSimple"; model: unknown; context: any; options: any }> = [];
 	const result = async () => ({
 		content: [
 			{ type: "thinking", thinking: "ignored" },

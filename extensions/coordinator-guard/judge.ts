@@ -228,7 +228,8 @@ export interface JudgeModel {
 export interface JudgeAuth {
 	ok: true;
 	apiKey?: string;
-	headers?: Record<string, string>;
+	/** A null value clears an inherited header, which is why this is not Record<string, string>. */
+	headers?: Record<string, string | null>;
 	baseUrl?: string;
 	env?: Record<string, string>;
 }

@@ -693,6 +693,10 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 					unrenderedPlaceholders: [],
 					classJustification: "substantive" as const,
 					modelUnavailability: "absent" as const,
+					// The judge was off, so nothing was read. The card's other fields are
+					// neutral placeholders for the same reason; this one was simply missed
+					// when the question was added, which typechecking the extension caught.
+					describedScope: "mechanical" as const,
 				},
 			})),
 		);
