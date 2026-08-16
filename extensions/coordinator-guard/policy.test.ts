@@ -607,7 +607,6 @@ test("the injected contract carries the campaign's fixed identity and rules, and
 	const text = contractPrompt(
 		campaign({ slicesDone: 2, lanes: [{ key: "s3", kind: "implement", model: "m:high", startedAt: 1, state: "running" }] }),
 		true,
-		1_000,
 	);
 	assert.match(text, /ROUTE: <key> \| class <1\|2\|3>/);
 	assert.match(text, /agent is in flight/);
@@ -928,7 +927,9 @@ test("every other models form still parses, including a tier pin on any provider
 		cls: 1,
 		entries: ["claude-bridge/claude-opus-5:high"],
 	});
-	assert.match(parseModelsCommand("review 3 x/y:high").kind === "error" ? parseModelsCommand("review 3 x/y:high").message : "", /two classes/);
+	const tooManyReviewClasses = parseModelsCommand("review 3 x/y:high");
+	assert.equal(tooManyReviewClasses.kind, "error");
+	assert.match(tooManyReviewClasses.kind === "error" ? tooManyReviewClasses.message : "", /two classes/);
 	assert.equal(parseModelsCommand("nonsense").kind, "error");
 });
 
