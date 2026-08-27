@@ -969,11 +969,11 @@ export const chatgptProvider = {
       const pages = await browser.pages();
       const startupPage = pages.at(-1);
       const startupUrl = startupPage?.url?.();
-      // The provider picker does not open in a hidden background tab. Reuse only
-      // a known empty managed startup tab so the UI stays visible without focus churn.
+      // The provider picker does not open in a hidden background tab. Reuse the
+      // visible managed startup tab or explicitly open a new foreground tab.
       const page = ['about:blank', 'chrome://newtab/', 'chrome://new-tab-page/'].includes(startupUrl)
         ? startupPage
-        : await browser.newPage({ background: true });
+        : await browser.newPage({ background: false });
       await page.goto(this.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await sleep(3000);
       return page;

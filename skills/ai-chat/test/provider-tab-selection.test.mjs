@@ -46,7 +46,7 @@ function makeBrowser({ pages, newPage }) {
   };
 }
 
-test('ChatGPT tab selection ignores provider domains outside the hostname and opens a background tab', async () => withFastTimeouts(async () => {
+test('ChatGPT tab selection ignores provider domains outside the hostname and opens a foreground tab', async () => withFastTimeouts(async () => {
   const fakeQuery = makePage('https://evil.example/?q=chatgpt.com');
   const fakeFragment = makePage('https://evil.example/#chatgpt.com');
   const trustedNew = makePage('https://chatgpt.com/');
@@ -55,7 +55,7 @@ test('ChatGPT tab selection ignores provider domains outside the hostname and op
   const page = await chatgptProvider.findPage({ browser, continueChat: false, request: {} });
 
   assert.equal(page, trustedNew);
-  assert.deepEqual(browser.newPageCalls, [{ background: true }]);
+  assert.deepEqual(browser.newPageCalls, [{ background: false }]);
   assert.deepEqual(trustedNew.navigations, ['https://chatgpt.com']);
 }));
 
@@ -72,6 +72,19 @@ test('ChatGPT reuses the managed browser startup tab for visible UI interaction'
     assert.equal(page, startup);
     assert.deepEqual(startup.navigations, ['https://chatgpt.com']);
   }
+}));
+
+test('ChatGPT opens a foreground tab when a retained provider tab may be hidden', async () => withFastTimeouts(async () => {
+  const retained = makePage('https://chatgpt.com/c/example-thread');
+  const foreground = makePage('about:blank');
+  const browser = makeBrowser({ pages: [retained], newPage: foreground });
+
+  const page = await chatgptProvider.findPage({ browser, continueChat: false, request: {} });
+
+  assert.equal(page, foreground);
+  assert.deepEqual(browser.newPageCalls, [{ background: false }]);
+  assert.deepEqual(retained.navigations, []);
+  assert.deepEqual(foreground.navigations, ['https://chatgpt.com']);
 }));
 
 test('ChatGPT tab selection reuses a real provider host', async () => withFastTimeouts(async () => {
