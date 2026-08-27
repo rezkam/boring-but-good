@@ -57,11 +57,11 @@ function normalize(value) {
 }
 
 export const CHATGPT_MODEL_LEVELS = [
-  { id: 'instant', name: 'Instant', uiLabel: 'Instant', model: 'gpt-5-5-instant', thinking_effort: null },
-  { id: 'medium', name: 'Medium', uiLabel: 'Medium', model: 'gpt-5-6-thinking', thinking_effort: 'standard' },
-  { id: 'high', name: 'High', uiLabel: 'High', model: 'gpt-5-6-thinking', thinking_effort: 'extended' },
-  { id: 'extra-high', name: 'Extra High', uiLabel: 'Extra High', model: 'gpt-5-6-thinking', thinking_effort: 'max' },
-  { id: 'pro', name: 'Pro', uiLabel: 'Pro', model: 'gpt-5-6-pro', thinking_effort: 'standard' },
+  { id: 'instant', name: 'Instant', uiLabel: 'Instant', uiModelLabel: 'GPT-5.5', model: 'gpt-5-5-instant', thinking_effort: null },
+  { id: 'medium', name: 'Medium', uiLabel: 'Medium', uiModelLabel: 'GPT-5.6 Sol', model: 'gpt-5-6-thinking', thinking_effort: 'standard' },
+  { id: 'high', name: 'High', uiLabel: 'High', uiModelLabel: 'GPT-5.6 Sol', model: 'gpt-5-6-thinking', thinking_effort: 'extended' },
+  { id: 'extra-high', name: 'Extra High', uiLabel: 'Extra High', uiModelLabel: 'GPT-5.6 Sol', model: 'gpt-5-6-thinking', thinking_effort: 'max' },
+  { id: 'pro', name: 'Pro', uiLabel: 'Pro', uiModelLabel: 'GPT-5.6 Sol', model: 'gpt-5-6-pro', thinking_effort: 'standard' },
 ];
 
 export function resolveChatGptModel(modelName = 'default') {
@@ -451,121 +451,160 @@ export async function createChatGptNetworkTracker({ page, selectedModel, expecte
   };
 }
 
-export async function selectChatGptModelInUi(page, selectedModel) {
-  const model = resolveChatGptModel(selectedModel);
-  if (!model) throw new Error(`[chatgpt] Unknown model profile: ${selectedModel}`);
-  const label = model.uiLabel;
-  const labels = CHATGPT_MODEL_LEVELS.map(item => item.uiLabel);
-  const opened = await page.evaluate(knownLabels => {
+async function clickChatGptPickerTarget(page, target) {
+  const activation = await page.evaluate(({ kind, label, knownEfforts }) => {
     const visible = element => {
       const rect = element.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0;
     };
-    const firstLine = element => String(element.getAttribute('data-model-label') || element.getAttribute('aria-label') || element.textContent || '').split(/\r?\n/, 1)[0].trim();
-    const controls = [...document.querySelectorAll('button,[role="button"]')].filter(visible);
-    const opener = controls.find(element => /model/i.test(element.getAttribute('data-testid') || element.getAttribute('aria-label') || ''))
-      || controls.find(element => knownLabels.some(candidate => firstLine(element) === candidate));
-    if (!opener) return false;
-    opener.click();
-    return true;
-  }, labels);
-  if (!opened) throw new Error(`[chatgpt] Requested UI model ${label} is unavailable: model-picker-control-unavailable`);
+    const firstLine = element => String(element.getAttribute('data-model-label') || element.getAttribute('aria-label') || element.innerText || element.textContent || '').split(/\r?\n/, 1)[0].trim();
+    let candidates = [];
+    if (kind === 'picker') candidates = [...document.querySelectorAll('button,[role="button"]')].filter(element => knownEfforts.includes(firstLine(element)));
+    if (kind === 'advanced') candidates = [...document.querySelectorAll('[role="menuitem"]')].filter(element => element.getAttribute('aria-label') === 'Show advanced options');
+    if (kind === 'submenu') candidates = [...document.querySelectorAll('[role="menuitem"][data-has-submenu]')].filter(element => firstLine(element) === label);
+    if (kind === 'option') candidates = [...document.querySelectorAll('[role="menuitemradio"]')].filter(element => firstLine(element) === label);
+    const element = candidates.find(visible);
+    if (!element) return null;
+    // Nested Radix menu rows toggle closed under pointer activation. Their click
+    // semantics open or select them. The top-level picker needs a native pointer.
+    if (kind !== 'picker') {
+      element.click();
+      return { clicked: true };
+    }
+    const rect = element.getBoundingClientRect();
+    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+  }, { ...target, knownEfforts: CHATGPT_MODEL_LEVELS.map(item => item.uiLabel) });
+  if (!activation) return false;
+  if (activation.clicked) return true;
+  await page.mouse.click(activation.x, activation.y);
+  return true;
+}
 
-  const versionSubmenuReady = await page.waitForFunction(expected => {
+async function ensureChatGptAdvancedPicker(page, effortLabel) {
+  const ready = await page.waitForFunction(() => {
     const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
-    const firstLine = element => String(element.getAttribute('aria-label') || element.textContent || '').split(/\r?\n/, 1)[0].trim();
+    const firstLine = element => String(element.getAttribute('aria-label') || element.innerText || element.textContent || '').split(/\r?\n/, 1)[0].trim();
+    const items = [...document.querySelectorAll('[role="menuitem"]')].filter(visible);
+    return items.some(element => firstLine(element) === 'Model') && items.some(element => firstLine(element) === 'Effort')
+      ? 'advanced'
+      : (items.some(element => element.getAttribute('aria-label') === 'Show advanced options') ? 'compact' : false);
+  }, { timeout: UI_WAIT_TIMEOUT_MS }).then(handle => handle.jsonValue()).catch(() => false);
+  if (!ready) throw new Error(`[chatgpt] Requested UI model ${effortLabel} is unavailable: model-picker-menu-unavailable`);
+  if (ready === 'advanced') return;
+  if (!await clickChatGptPickerTarget(page, { kind: 'advanced' })) {
+    throw new Error(`[chatgpt] Requested UI model ${effortLabel} is unavailable: advanced-options-disappeared`);
+  }
+  const advanced = await page.waitForFunction(() => {
+    const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
+    const firstLine = element => String(element.innerText || element.textContent || '').split(/\r?\n/, 1)[0].trim();
+    const items = [...document.querySelectorAll('[role="menuitem"][data-has-submenu]')].filter(visible);
+    return items.some(element => firstLine(element) === 'Model') && items.some(element => firstLine(element) === 'Effort');
+  }, { timeout: UI_WAIT_TIMEOUT_MS }).then(() => true).catch(() => false);
+  if (!advanced) throw new Error(`[chatgpt] Requested UI model ${effortLabel} is unavailable: advanced-options-unavailable`);
+}
+
+export async function selectChatGptModelInUi(page, selectedModel) {
+  const model = resolveChatGptModel(selectedModel);
+  if (!model) throw new Error(`[chatgpt] Unknown model profile: ${selectedModel}`);
+  const effortLabel = model.uiLabel;
+  const modelLabel = model.uiModelLabel;
+
+  if (!await clickChatGptPickerTarget(page, { kind: 'picker' })) {
+    throw new Error(`[chatgpt] Requested UI model ${effortLabel} is unavailable: model-picker-control-unavailable`);
+  }
+  await ensureChatGptAdvancedPicker(page, effortLabel);
+
+  if (!await clickChatGptPickerTarget(page, { kind: 'submenu', label: 'Model' })) {
+    throw new Error(`[chatgpt] Requested UI model ${effortLabel} is unavailable: model-submenu-disappeared`);
+  }
+  const modelReady = await page.waitForFunction(expected => {
+    const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
+    const firstLine = element => String(element.innerText || element.textContent || '').split(/\r?\n/, 1)[0].trim();
+    return [...document.querySelectorAll('[role="menuitemradio"]')].filter(visible).some(element => firstLine(element) === expected);
+  }, { timeout: UI_WAIT_TIMEOUT_MS }, modelLabel).then(() => true).catch(() => false);
+  if (!modelReady) throw new Error(`[chatgpt] Requested UI model ${effortLabel} is unavailable: model-option-unavailable:${modelLabel}`);
+  if (!await clickChatGptPickerTarget(page, { kind: 'option', label: modelLabel })) {
+    throw new Error(`[chatgpt] Requested UI model ${effortLabel} is unavailable: model-option-disappeared:${modelLabel}`);
+  }
+
+  const afterModelSelection = await page.waitForFunction(({ knownEfforts, expectedModel }) => {
+    const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
+    const firstLine = element => String(element.innerText || element.textContent || '').split(/\r?\n/, 1)[0].trim();
+    const lines = element => String(element.innerText || element.textContent || '').split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+    const opener = [...document.querySelectorAll('button,[role="button"]')].filter(visible).find(element => knownEfforts.includes(firstLine(element)));
+    if (!opener) return false;
+    if (opener.getAttribute('aria-expanded') !== 'true') return 'closed';
+    const summary = [...document.querySelectorAll('[role="menuitem"][data-has-submenu]')]
+      .filter(visible)
+      .some(element => lines(element)[0] === 'Model' && lines(element)[1] === expectedModel);
+    const checked = [...document.querySelectorAll('[role="menuitemradio"]')]
+      .filter(visible)
+      .some(element => firstLine(element) === expectedModel && element.getAttribute('aria-checked') === 'true');
+    return summary && checked ? 'open-confirmed' : false;
+  }, { timeout: UI_WAIT_TIMEOUT_MS }, {
+    knownEfforts: CHATGPT_MODEL_LEVELS.map(item => item.uiLabel),
+    expectedModel: modelLabel,
+  }).then(handle => handle.jsonValue()).catch(() => false);
+  if (!afterModelSelection) throw new Error(`[chatgpt] Requested UI model ${effortLabel} is unavailable: model-selection-not-visible:${modelLabel}`);
+
+  if (afterModelSelection === 'closed') {
+    if (!await clickChatGptPickerTarget(page, { kind: 'picker' })) {
+      throw new Error(`[chatgpt] Requested UI model ${effortLabel} is unavailable: model-picker-control-unavailable-after-model`);
+    }
+    await ensureChatGptAdvancedPicker(page, effortLabel);
+  }
+  const modelConfirmed = await page.waitForFunction(expected => {
+    const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
+    const lines = element => String(element.innerText || element.textContent || '').split(/\r?\n/).map(value => value.trim()).filter(Boolean);
     return [...document.querySelectorAll('[role="menuitem"][data-has-submenu]')]
       .filter(visible)
-      .some(element => firstLine(element) === expected);
-  }, { timeout: UI_WAIT_TIMEOUT_MS }, 'GPT-5.6 Sol').then(() => true).catch(() => false);
-  if (!versionSubmenuReady) throw new Error(`[chatgpt] Requested UI model ${label} is unavailable: model-version-submenu-unavailable`);
+      .some(element => lines(element)[0] === 'Model' && lines(element)[1] === expected);
+  }, { timeout: UI_WAIT_TIMEOUT_MS }, modelLabel).then(() => true).catch(() => false);
+  if (!modelConfirmed) throw new Error(`[chatgpt] Requested UI model ${effortLabel} is unavailable: model-selection-not-visible:${modelLabel}`);
 
-  const openedVersionSubmenu = await page.evaluate(expected => {
+  if (!await clickChatGptPickerTarget(page, { kind: 'submenu', label: 'Effort' })) {
+    throw new Error(`[chatgpt] Requested UI model ${effortLabel} is unavailable: effort-submenu-disappeared`);
+  }
+  const effortReady = await page.waitForFunction(expected => {
     const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
-    const firstLine = element => String(element.getAttribute('aria-label') || element.textContent || '').split(/\r?\n/, 1)[0].trim();
-    const option = [...document.querySelectorAll('[role="menuitem"][data-has-submenu]')]
-      .filter(visible)
-      .find(element => firstLine(element) === expected);
-    if (!option) return false;
-    option.click();
-    return true;
-  }, 'GPT-5.6 Sol');
-  if (!openedVersionSubmenu) throw new Error(`[chatgpt] Requested UI model ${label} is unavailable: model-version-submenu-disappeared`);
+    const firstLine = element => String(element.innerText || element.textContent || '').split(/\r?\n/, 1)[0].trim();
+    return [...document.querySelectorAll('[role="menuitemradio"]')].filter(visible).some(element => firstLine(element) === expected);
+  }, { timeout: UI_WAIT_TIMEOUT_MS }, effortLabel).then(() => true).catch(() => false);
+  if (!effortReady) throw new Error(`[chatgpt] Requested UI model ${effortLabel} is unavailable: effort-option-unavailable:${effortLabel}`);
+  if (!await clickChatGptPickerTarget(page, { kind: 'option', label: effortLabel })) {
+    throw new Error(`[chatgpt] Requested UI model ${effortLabel} is unavailable: effort-option-disappeared:${effortLabel}`);
+  }
 
-  const versionReady = await page.waitForFunction(expected => {
+  const afterEffortSelection = await page.waitForFunction(expected => {
     const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
-    const firstLine = element => String(element.getAttribute('aria-label') || element.textContent || '').split(/\r?\n/, 1)[0].trim();
-    return [...document.querySelectorAll('[role="menuitemradio"],[role="menuitem"]')]
-      .filter(visible)
-      .some(element => !element.hasAttribute('data-has-submenu') && firstLine(element) === expected);
-  }, { timeout: UI_WAIT_TIMEOUT_MS }, 'GPT-5.6 Sol').then(() => true).catch(() => false);
-  if (!versionReady) throw new Error(`[chatgpt] Requested UI model ${label} is unavailable: model-version-unavailable`);
-
-  const clickedVersion = await page.evaluate(expected => {
-    const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
-    const firstLine = element => String(element.getAttribute('aria-label') || element.textContent || '').split(/\r?\n/, 1)[0].trim();
-    const option = [...document.querySelectorAll('[role="menuitemradio"],[role="menuitem"]')]
-      .filter(visible)
-      .find(element => !element.hasAttribute('data-has-submenu') && firstLine(element) === expected);
-    if (!option) return false;
-    option.click();
-    return true;
-  }, 'GPT-5.6 Sol');
-  if (!clickedVersion) throw new Error(`[chatgpt] Requested UI model ${label} is unavailable: model-version-disappeared`);
-
-  const reopened = await page.evaluate(knownLabels => {
-    const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
-    const firstLine = element => String(element.getAttribute('data-model-label') || element.getAttribute('aria-label') || element.textContent || '').split(/\r?\n/, 1)[0].trim();
-    const opener = [...document.querySelectorAll('button,[role="button"]')].filter(visible)
-      .find(element => /model/i.test(element.getAttribute('data-testid') || element.getAttribute('aria-label') || ''))
-      || [...document.querySelectorAll('button,[role="button"]')].filter(visible).find(element => knownLabels.some(candidate => firstLine(element) === candidate));
+    const firstLine = element => String(element.innerText || element.textContent || '').split(/\r?\n/, 1)[0].trim();
+    const lines = element => String(element.innerText || element.textContent || '').split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+    const opener = [...document.querySelectorAll('button,[role="button"]')].filter(visible).find(element => firstLine(element) === expected);
     if (!opener) return false;
-    opener.click();
-    return true;
-  }, labels);
-  if (!reopened) throw new Error(`[chatgpt] Requested UI model ${label} is unavailable: model-picker-control-unavailable-after-version`);
-
-  const currentVersionConfirmed = await page.waitForFunction(expected => {
-    const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
-    const firstLine = element => String(element.getAttribute('aria-label') || element.textContent || '').split(/\r?\n/, 1)[0].trim();
-    return [...document.querySelectorAll('[role="menuitem"][data-has-submenu]')]
+    if (opener.getAttribute('aria-expanded') !== 'true') return 'closed';
+    const summary = [...document.querySelectorAll('[role="menuitem"][data-has-submenu]')]
       .filter(visible)
-      .some(element => firstLine(element) === expected);
-  }, { timeout: UI_WAIT_TIMEOUT_MS }, 'GPT-5.6 Sol').then(() => true).catch(() => false);
-  if (!currentVersionConfirmed) throw new Error(`[chatgpt] Requested UI model ${label} is unavailable: model-version-not-confirmed`);
-
-  const optionReady = await page.waitForFunction(expected => {
-    const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
-    const firstLine = element => String(element.getAttribute('data-model-label') || element.getAttribute('aria-label') || element.textContent || '').split(/\r?\n/, 1)[0].trim();
-    return [...document.querySelectorAll('[role="menuitemradio"]')]
+      .some(element => lines(element)[0] === 'Effort' && lines(element)[1] === expected);
+    const checked = [...document.querySelectorAll('[role="menuitemradio"]')]
       .filter(visible)
-      .some(element => firstLine(element) === expected);
-  }, { timeout: UI_WAIT_TIMEOUT_MS }, label).then(() => true).catch(() => false);
-  if (!optionReady) throw new Error(`[chatgpt] Requested UI model ${label} is unavailable: model-option-unavailable:${label}`);
-
-  const clicked = await page.evaluate(expected => {
-    const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
-    const firstLine = element => String(element.getAttribute('data-model-label') || element.getAttribute('aria-label') || element.textContent || '').split(/\r?\n/, 1)[0].trim();
-    const option = [...document.querySelectorAll('[role="menuitemradio"]')]
-      .filter(visible)
-      .find(element => firstLine(element) === expected);
-    if (!option) return false;
-    option.click();
-    return true;
-  }, label);
-  if (!clicked) throw new Error(`[chatgpt] Requested UI model ${label} is unavailable: model-option-disappeared:${label}`);
-
-  const selected = await page.waitForFunction(expected => {
-    const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
-    const firstLine = element => String(element.getAttribute('data-model-label') || element.getAttribute('aria-label') || element.textContent || '').split(/\r?\n/, 1)[0].trim();
-    const opener = [...document.querySelectorAll('button,[role="button"]')].filter(visible)
-      .find(element => ['Instant', 'Medium', 'High', 'Extra High', 'Pro'].includes(firstLine(element)));
-    const checkedOption = [...document.querySelectorAll('[role="menuitemradio"]')]
       .some(element => firstLine(element) === expected && element.getAttribute('aria-checked') === 'true');
-    return firstLine(opener) === expected || (checkedOption && (!opener || firstLine(opener) === expected));
-  }, { timeout: UI_WAIT_TIMEOUT_MS }, label).then(() => true).catch(() => false);
-  if (!selected) throw new Error(`[chatgpt] Requested UI model ${label} is unavailable: model-selection-not-visible`);
-  return { ...model, verification: 'visible-ui-label' };
+    return summary && checked ? 'open-confirmed' : false;
+  }, { timeout: UI_WAIT_TIMEOUT_MS }, effortLabel).then(handle => handle.jsonValue()).catch(() => false);
+  if (!afterEffortSelection) throw new Error(`[chatgpt] Requested UI model ${effortLabel} is unavailable: effort-selection-not-visible`);
+  if (afterEffortSelection === 'open-confirmed') {
+    if (!await clickChatGptPickerTarget(page, { kind: 'picker' })) {
+      throw new Error(`[chatgpt] Requested UI model ${effortLabel} is unavailable: model-picker-control-unavailable-after-effort`);
+    }
+    const closed = await page.waitForFunction(expected => {
+      const visible = element => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; };
+      const firstLine = element => String(element.innerText || element.textContent || '').split(/\r?\n/, 1)[0].trim();
+      return [...document.querySelectorAll('button,[role="button"]')]
+        .filter(visible)
+        .some(element => firstLine(element) === expected && element.getAttribute('aria-expanded') !== 'true');
+    }, { timeout: UI_WAIT_TIMEOUT_MS }, effortLabel).then(() => true).catch(() => false);
+    if (!closed) throw new Error(`[chatgpt] Requested UI model ${effortLabel} is unavailable: model-picker-did-not-close-after-effort`);
+  }
+  return { ...model, verification: 'visible-ui-model-and-effort' };
 }
 
 function redactString(value) {
@@ -927,7 +966,14 @@ export const chatgptProvider = {
   },
   async findPage({ browser, continueChat, request }) {
     if (!continueChat && !request?.conversationTarget) {
-      const page = await browser.newPage({ background: true });
+      const pages = await browser.pages();
+      const startupPage = pages.at(-1);
+      const startupUrl = startupPage?.url?.();
+      // The provider picker does not open in a hidden background tab. Reuse only
+      // a known empty managed startup tab so the UI stays visible without focus churn.
+      const page = ['about:blank', 'chrome://newtab/', 'chrome://new-tab-page/'].includes(startupUrl)
+        ? startupPage
+        : await browser.newPage({ background: true });
       await page.goto(this.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await sleep(3000);
       return page;

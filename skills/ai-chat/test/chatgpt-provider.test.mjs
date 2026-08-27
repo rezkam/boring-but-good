@@ -181,58 +181,122 @@ test('exposes exactly the five public ChatGPT profiles and rejects legacy or raw
   for (const rejected of ['fast', 'thinking', 'research', 'pro-extended', 'gpt-5.5', 'gpt-5-5', 'gpt-5-6-thinking']) assert.equal(resolveChatGptModel(rejected), null, rejected);
 });
 
-class FakePickerPage {
-  constructor({ profiles = CHATGPT_MODEL_LEVELS.map(model => model.uiLabel), hasSol = true, selected = 'Instant', leaveOptionVisible = false } = {}) {
-    this.profiles = profiles;
-    this.hasSol = hasSol;
-    this.selected = selected;
-    this.versionSelected = false;
+class FakeAdvancedPickerPage {
+  constructor({
+    selectedModel = 'GPT-5.6 Sol',
+    selectedEffort = 'Extra High',
+    models = ['GPT-5.6 Sol', 'GPT-5.5'],
+    efforts = CHATGPT_MODEL_LEVELS.map(model => model.uiLabel),
+    applyEffortSelection = true,
+    pointerSubmenusClose = false,
+    keepModelMenuOpen = false,
+    keepEffortMenuOpen = false,
+  } = {}) {
+    this.selectedModel = selectedModel;
+    this.selectedEffort = selectedEffort;
+    this.models = models;
+    this.efforts = efforts;
+    this.applyEffortSelection = applyEffortSelection;
+    this.pointerSubmenusClose = pointerSubmenusClose;
+    this.keepModelMenuOpen = keepModelMenuOpen;
+    this.keepEffortMenuOpen = keepEffortMenuOpen;
     this.menuOpen = false;
-    this.versionSubmenuOpen = false;
-    this.leaveOptionVisible = leaveOptionVisible;
+    this.advanced = false;
+    this.submenu = null;
     this.phases = [];
+    this.pendingClick = null;
+    this.mouse = {
+      click: async () => {
+        if (!this.pendingClick) throw new Error('no picker target was located');
+        const click = this.pendingClick;
+        this.pendingClick = null;
+        click();
+      },
+    };
     this.document = { querySelectorAll: selector => this.elementsFor(selector) };
   }
 
-  element({ role = null, text, attrs = {}, click }) {
-    return {
+  element({ role = null, text, attrs = {}, click, pointerClick = click }) {
+    const element = {
       textContent: text,
+      innerText: text,
+      disabled: false,
       getAttribute: name => attrs[name] ?? (name === 'role' ? role : null),
       hasAttribute: name => Object.hasOwn(attrs, name),
-      getBoundingClientRect: () => ({ width: 100, height: 20 }),
+      getBoundingClientRect: () => {
+        this.pendingClick = pointerClick;
+        return { x: 10, y: 10, width: 100, height: 20 };
+      },
       click,
     };
+    return element;
   }
 
   elementsFor(selector) {
     const opener = this.element({
-      text: this.selected,
+      text: this.selectedEffort,
+      attrs: { 'aria-haspopup': 'menu', 'aria-expanded': this.menuOpen ? 'true' : 'false' },
       click: () => {
+        if (this.menuOpen) {
+          this.menuOpen = false;
+          this.submenu = null;
+          this.phases.push('close-picker');
+          return;
+        }
         this.menuOpen = true;
-        this.versionSubmenuOpen = false;
-        this.phases.push(this.versionSelected ? 'reopen-intelligence' : 'open-intelligence');
+        this.submenu = null;
+        this.phases.push('open-picker');
       },
     });
-    const submenu = this.element({
-      role: 'menuitem', text: 'GPT-5.6 Sol', attrs: { 'data-has-submenu': '' },
-      click: () => { this.versionSubmenuOpen = true; this.phases.push('enter-sol-submenu'); },
+    const advanced = this.element({
+      role: 'menuitem', text: 'Advanced', attrs: { 'aria-label': 'Show advanced options' },
+      click: () => { this.advanced = true; this.phases.push('show-advanced'); },
     });
-    const solChoice = this.element({
-      role: 'menuitemradio', text: 'GPT-5.6 Sol', attrs: { 'aria-checked': this.versionSelected ? 'true' : 'false' },
-      click: () => { this.versionSelected = true; this.versionSubmenuOpen = false; this.menuOpen = false; this.phases.push('select-sol-and-close-menu'); },
+    const modelMenu = this.element({
+      role: 'menuitem', text: `Model\n${this.selectedModel}`, attrs: { 'data-has-submenu': '', 'aria-haspopup': 'menu' },
+      click: () => { this.submenu = 'model'; this.phases.push('open-model'); },
+      pointerClick: this.pointerSubmenusClose
+        ? () => { this.menuOpen = false; this.submenu = null; this.phases.push('pointer-model-closed'); }
+        : () => { this.submenu = 'model'; this.phases.push('open-model'); },
     });
-    const profiles = this.profiles.map(label => this.element({
-      role: 'menuitemradio', text: label === 'Instant' ? 'Instant\n5.5' : label,
-      attrs: { 'aria-checked': this.selected === label ? 'true' : 'false' },
-      click: () => { this.selected = label; this.menuOpen = this.leaveOptionVisible; this.phases.push(`select-profile:${label}`); },
+    const effortMenu = this.element({
+      role: 'menuitem', text: `Effort\n${this.selectedEffort}`, attrs: { 'data-has-submenu': '', 'aria-haspopup': 'menu' },
+      click: () => { this.submenu = 'effort'; this.phases.push('open-effort'); },
+      pointerClick: this.pointerSubmenusClose
+        ? () => { this.menuOpen = false; this.submenu = null; this.phases.push('pointer-effort-closed'); }
+        : () => { this.submenu = 'effort'; this.phases.push('open-effort'); },
+    });
+    const modelOptions = this.models.map(label => this.element({
+      role: 'menuitemradio', text: label, attrs: { 'aria-checked': this.selectedModel === label ? 'true' : 'false' },
+      click: () => {
+        this.selectedModel = label;
+        this.menuOpen = this.keepModelMenuOpen;
+        this.submenu = this.keepModelMenuOpen ? 'model' : null;
+        this.phases.push(`select-model:${label}`);
+      },
+    }));
+    const effortOptions = this.efforts.map(label => this.element({
+      role: 'menuitemradio', text: label, attrs: { 'aria-checked': this.selectedEffort === label ? 'true' : 'false' },
+      click: () => {
+        if (this.applyEffortSelection) this.selectedEffort = label;
+        this.menuOpen = this.keepEffortMenuOpen;
+        this.submenu = this.keepEffortMenuOpen ? 'effort' : null;
+        this.phases.push(`select-effort:${label}`);
+      },
     }));
     if (selector.includes('button') || selector.includes('[role="button"]')) return [opener];
-    if (selector.includes('[role="menuitem"][data-has-submenu]')) return this.menuOpen && !this.versionSubmenuOpen && this.hasSol ? [submenu] : [];
-    if (selector.includes('[role="menuitemradio"],[role="menuitem"]')) return this.versionSubmenuOpen && this.hasSol ? [submenu, solChoice] : [];
-    if (selector.includes('[role="menuitemradio"]')) {
-      if (this.versionSubmenuOpen) return this.hasSol ? [solChoice] : [];
-      return this.menuOpen || this.leaveOptionVisible ? profiles : [];
+    if (selector.includes('[role="menuitem"][data-has-submenu]')) return this.menuOpen && this.advanced ? [modelMenu, effortMenu] : [];
+    if (selector.includes('[role="menuitemradio"],[role="menuitem"]')) {
+      if (this.submenu === 'model') return [modelMenu, ...modelOptions];
+      if (this.submenu === 'effort') return [effortMenu, ...effortOptions];
+      return this.menuOpen ? [advanced, ...(this.advanced ? [modelMenu, effortMenu] : [])] : [];
     }
+    if (selector.includes('[role="menuitemradio"]')) {
+      if (this.submenu === 'model') return modelOptions;
+      if (this.submenu === 'effort') return effortOptions;
+      return [];
+    }
+    if (selector.includes('[role="menuitem"]')) return this.menuOpen ? [advanced, ...(this.advanced ? [modelMenu, effortMenu] : [])] : [];
     return [];
   }
 
@@ -247,52 +311,82 @@ class FakePickerPage {
 
   async waitForFunction(callback, _options, label) {
     this.installDocument();
-    if (!callback(label)) throw new Error(`unavailable:${label}`);
+    const value = callback(label);
+    if (!value) throw new Error(`unavailable:${JSON.stringify(label)}`);
+    return { jsonValue: async () => value };
   }
 }
 
-test('selects each profile through explicit picker phases with exact labels', async () => {
+test('selects every model and effort profile through the current advanced picker', async () => {
   for (const model of CHATGPT_MODEL_LEVELS) {
-    const page = new FakePickerPage();
+    const page = new FakeAdvancedPickerPage();
     const result = await selectChatGptModelInUi(page, model.id);
     assert.equal(result.id, model.id);
-    assert.equal(result.verification, 'visible-ui-label');
-    assert.deepEqual(page.phases, ['open-intelligence', 'enter-sol-submenu', 'select-sol-and-close-menu', 'reopen-intelligence', `select-profile:${model.uiLabel}`]);
+    assert.equal(result.verification, 'visible-ui-model-and-effort');
+    assert.equal(page.selectedModel, model.uiModelLabel);
+    assert.equal(page.selectedEffort, model.uiLabel);
+    assert.deepEqual(page.phases, [
+      'open-picker',
+      'show-advanced',
+      'open-model',
+      `select-model:${model.uiModelLabel}`,
+      'open-picker',
+      'open-effort',
+      `select-effort:${model.uiLabel}`,
+    ]);
   }
 });
 
-test('picker exact matching does not select Extra High for High', async () => {
-  const page = new FakePickerPage({ profiles: ['Extra High'] });
-  await assert.rejects(() => selectChatGptModelInUi(page, 'high'), /model-option-unavailable:High/);
-  assert.deepEqual(page.phases, ['open-intelligence', 'enter-sol-submenu', 'select-sol-and-close-menu', 'reopen-intelligence']);
+test('submenu activation does not let pointer toggling close the picker', async () => {
+  const page = new FakeAdvancedPickerPage({ pointerSubmenusClose: true });
+  const result = await selectChatGptModelInUi(page, 'high');
+  assert.equal(result.id, 'high');
+  assert.equal(page.selectedEffort, 'High');
+  assert.equal(page.phases.includes('pointer-model-closed'), false);
+  assert.equal(page.phases.includes('pointer-effort-closed'), false);
 });
 
-test('unselected visible profile option does not satisfy final picker verification', async () => {
-  const page = new FakePickerPage({ leaveOptionVisible: true });
-  const original = page.elementsFor.bind(page);
-  page.elementsFor = selector => {
-    const elements = original(selector);
-    if (selector.includes('[role="menuitemradio"]') && page.versionSelected && page.menuOpen) {
-      return elements.map(element => ({ ...element, click: () => page.phases.push('profile-click-without-state-change') }));
-    }
-    return elements;
-  };
-  await assert.rejects(() => selectChatGptModelInUi(page, 'high'), /model-selection-not-visible/);
-  assert.equal(page.selected, 'Instant');
+test('continues from a model submenu that remains open after selection', async () => {
+  const page = new FakeAdvancedPickerPage({ keepModelMenuOpen: true });
+  const result = await selectChatGptModelInUi(page, 'high');
+  assert.equal(result.id, 'high');
+  assert.equal(page.selectedModel, 'GPT-5.6 Sol');
+  assert.equal(page.selectedEffort, 'High');
+  assert.deepEqual(page.phases, [
+    'open-picker',
+    'show-advanced',
+    'open-model',
+    'select-model:GPT-5.6 Sol',
+    'open-effort',
+    'select-effort:High',
+  ]);
 });
 
-test('missing GPT-5.6 Sol fails before profile click or composer submission', async () => {
-  const page = new FakePickerPage({ hasSol: false });
-  await assert.rejects(() => selectChatGptModelInUi(page, 'pro'), /model-version-submenu-unavailable/);
-  assert.deepEqual(page.phases, ['open-intelligence']);
-});
-
-test('Sol selection closes the submenu and is confirmed from the reopened main menu', async () => {
-  const page = new FakePickerPage();
-  await selectChatGptModelInUi(page, 'medium');
+test('verifies an effort that remains open and closes the picker explicitly', async () => {
+  const page = new FakeAdvancedPickerPage({ keepModelMenuOpen: true, keepEffortMenuOpen: true });
+  const result = await selectChatGptModelInUi(page, 'high');
+  assert.equal(result.id, 'high');
+  assert.equal(page.selectedEffort, 'High');
   assert.equal(page.menuOpen, false);
-  assert.equal(page.versionSubmenuOpen, false);
-  assert.deepEqual(page.phases.slice(0, 4), ['open-intelligence', 'enter-sol-submenu', 'select-sol-and-close-menu', 'reopen-intelligence']);
+  assert.deepEqual(page.phases.slice(-2), ['select-effort:High', 'close-picker']);
+});
+
+test('effort picker exact matching does not select Extra High for High', async () => {
+  const page = new FakeAdvancedPickerPage({ efforts: ['Extra High'] });
+  await assert.rejects(() => selectChatGptModelInUi(page, 'high'), /effort-option-unavailable:High/);
+  assert.equal(page.selectedEffort, 'Extra High');
+});
+
+test('an effort click without a state change fails final picker verification', async () => {
+  const page = new FakeAdvancedPickerPage({ applyEffortSelection: false });
+  await assert.rejects(() => selectChatGptModelInUi(page, 'high'), /effort-selection-not-visible/);
+  assert.equal(page.selectedEffort, 'Extra High');
+});
+
+test('missing requested base model fails before effort selection or composer submission', async () => {
+  const page = new FakeAdvancedPickerPage({ models: ['GPT-5.5'] });
+  await assert.rejects(() => selectChatGptModelInUi(page, 'pro'), /model-option-unavailable:GPT-5\.6 Sol/);
+  assert.equal(page.phases.includes('open-effort'), false);
 });
 
 test('tracker uses Network only and correlates only final conversation POSTs', async () => {

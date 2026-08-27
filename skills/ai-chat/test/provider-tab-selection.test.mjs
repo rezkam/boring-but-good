@@ -59,6 +59,21 @@ test('ChatGPT tab selection ignores provider domains outside the hostname and op
   assert.deepEqual(trustedNew.navigations, ['https://chatgpt.com']);
 }));
 
+test('ChatGPT reuses the managed browser startup tab for visible UI interaction', async () => withFastTimeouts(async () => {
+  for (const startupUrl of ['about:blank', 'chrome://new-tab-page/']) {
+    const startup = makePage(startupUrl);
+    const browser = {
+      pages: async () => [startup],
+      newPage: async () => assert.fail('the visible startup tab should be reused'),
+    };
+
+    const page = await chatgptProvider.findPage({ browser, continueChat: false, request: {} });
+
+    assert.equal(page, startup);
+    assert.deepEqual(startup.navigations, ['https://chatgpt.com']);
+  }
+}));
+
 test('ChatGPT tab selection reuses a real provider host', async () => withFastTimeouts(async () => {
   const real = makePage('https://chatgpt.com/c/abc123');
   const browser = {
