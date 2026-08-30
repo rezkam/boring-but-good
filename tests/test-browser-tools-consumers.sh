@@ -22,12 +22,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const root = process.argv[2];
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-if (manifest.dependencies?.['@rezkam/browser-tools'] !== '^1.0.2') process.exit(1);
+if (manifest.dependencies?.['@rezkam/browser-tools'] !== '^1.0.3') process.exit(1);
 NODE
     then
-        pass "${consumer} declares @rezkam/browser-tools ^1.0.2"
+        pass "${consumer} declares @rezkam/browser-tools ^1.0.3"
     else
-        fail "${consumer} should declare @rezkam/browser-tools ^1.0.2"
+        fail "${consumer} should declare @rezkam/browser-tools ^1.0.3"
     fi
 
     if node - "$consumer_dir" <<'NODE'
@@ -36,14 +36,14 @@ const path = require('node:path');
 const root = process.argv[2];
 const lock = JSON.parse(fs.readFileSync(path.join(root, 'package-lock.json'), 'utf8'));
 const entry = lock.packages?.['node_modules/@rezkam/browser-tools'];
-if (lock.packages?.['']?.dependencies?.['@rezkam/browser-tools'] !== '^1.0.2') process.exit(1);
-if (entry?.version !== '1.0.2') process.exit(1);
-if (entry?.resolved !== 'https://registry.npmjs.org/@rezkam/browser-tools/-/browser-tools-1.0.2.tgz') process.exit(1);
+if (lock.packages?.['']?.dependencies?.['@rezkam/browser-tools'] !== '^1.0.3') process.exit(1);
+if (entry?.version !== '1.0.3') process.exit(1);
+if (entry?.resolved !== 'https://registry.npmjs.org/@rezkam/browser-tools/-/browser-tools-1.0.3.tgz') process.exit(1);
 NODE
     then
-        pass "${consumer} locks Browser Tools 1.0.2 from the npm registry"
+        pass "${consumer} locks Browser Tools 1.0.3 from the npm registry"
     else
-        fail "${consumer} should lock Browser Tools 1.0.2 from the npm registry"
+        fail "${consumer} should lock Browser Tools 1.0.3 from the npm registry"
     fi
 
     if node - "$consumer_dir" <<'NODE'

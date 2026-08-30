@@ -112,7 +112,7 @@ test('AI Chat consumes Browser Tools only through the published package', () => 
   assert.deepEqual(offenders, []);
 
   const packageJson = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf-8'));
-  assert.equal(packageJson.dependencies?.['@rezkam/browser-tools'], '^1.0.2');
+  assert.equal(packageJson.dependencies?.['@rezkam/browser-tools'], '^1.0.3');
 });
 
 test('public ChatGPT contract has no stale local or rewrite claims', () => {

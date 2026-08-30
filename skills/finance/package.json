@@ -8,6 +8,6 @@
     "validate": "npm test"
   },
   "dependencies": {
-    "@rezkam/browser-tools": "^1.0.2"
+    "@rezkam/browser-tools": "^1.0.3"
   }
 }
