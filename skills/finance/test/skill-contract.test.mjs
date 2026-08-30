@@ -93,7 +93,7 @@ test('finance helpers depend on Browser Tools instead of owning browser manageme
   assert.deepEqual(directUsage, []);
 
   const packageJson = JSON.parse(readRelative('package.json'));
-  assert.equal(packageJson.dependencies?.['@rezkam/browser-tools'], '^1.0.2');
+  assert.equal(packageJson.dependencies?.['@rezkam/browser-tools'], '^1.0.3');
 });
 
 test('Trading Economics helpers share the Trading Economics module', () => {

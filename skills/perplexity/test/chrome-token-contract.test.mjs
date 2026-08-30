@@ -29,5 +29,5 @@ test('perplexity package declares the published Browser Tools package', () => {
   const packageJson = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
   assert.equal(packageJson.private, true);
   assert.equal(packageJson.engines?.node, '>=20');
-  assert.equal(packageJson.dependencies?.['@rezkam/browser-tools'], '^1.0.2');
+  assert.equal(packageJson.dependencies?.['@rezkam/browser-tools'], '^1.0.3');
 });
