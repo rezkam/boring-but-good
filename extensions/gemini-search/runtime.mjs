@@ -1,9 +1,10 @@
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, open } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   browserWSEndpoint,
@@ -18,6 +19,13 @@ import {
 export const GEMINI_SEARCH_MODEL = 'gemini-3.6-flash-extended-thinking';
 export const DEFAULT_GEMINI_SEARCH_TIMEOUT_SECONDS = 300;
 export const DEFAULT_GEMINI_SEARCH_RESULT_DIR = join(homedir(), '.agents', 'tmp', 'gemini-search');
+
+const AI_CHAT_MODULE_PATH = fileURLToPath(new URL('../../skills/ai-chat/scripts/ai-chat/module.mjs', import.meta.url));
+const resolveAiChatDependency = createRequire(AI_CHAT_MODULE_PATH);
+
+export function resolveBrowserToolsModuleUrl() {
+  return pathToFileURL(resolveAiChatDependency.resolve('@rezkam/browser-tools')).href;
+}
 
 export function buildGeminiSearchPrompt(query) {
   return [
@@ -169,7 +177,7 @@ const BROWSER_START_CHILD_PATH = fileURLToPath(new URL('./browser-start-child.mj
 const DEFAULT_BROWSER_START_TIMEOUT_MS = 120000;
 
 export function startChromeWithoutTerminalOutput(options, {
-  moduleUrl = import.meta.resolve('@rezkam/browser-tools'),
+  moduleUrl = resolveBrowserToolsModuleUrl(),
   signal,
   timeoutMs = DEFAULT_BROWSER_START_TIMEOUT_MS,
   cleanupDeadlineMs = 30000,
