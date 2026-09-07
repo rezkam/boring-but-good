@@ -126,6 +126,11 @@ turn, so the mechanics survive compaction without this file. If the
 `coordinator_campaign` tool is absent, the guard is not installed: stop and tell the
 user, because nothing below is enforced without it.
 
+Recording an integration also marks a compaction boundary: once the turn settles, the guard
+summarizes the campaign so far and the next slice starts on that summary rather than on
+every dispatch before it. Nothing is asked of you for that, and `/campaign compact off`
+is the user's way out of it.
+
 Register the campaign before the first dispatch: `coordinator_campaign` action `start`
 with slug, worktree, plan path, slice count, and the authorization scope. Record slices
 with `set-slices`, lanes with `coordinator_lane`, and open the single review pass with

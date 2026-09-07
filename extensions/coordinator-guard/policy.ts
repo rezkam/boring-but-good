@@ -413,6 +413,89 @@ Do these in order:
 If you are waiting, you are wrong: either work is running and you report on it, or work is not running and you start some. A missing external dependency parks that one gate, never the campaign.`;
 }
 
+/**
+ * Fraction of the context window a finished slice has to have spent before compacting it.
+ *
+ * pi's own compaction fires at the overflow edge, which lands mid-turn, mid-dispatch, and
+ * splits a turn it then has to summarize twice. A slice boundary is the opposite: nothing is
+ * in flight, the last integration is recorded, and the transcript behind it is finished work.
+ * The floor is what keeps this a context measure rather than a ritual, because below it the
+ * summary would replace a transcript that still fits with a paraphrase of it.
+ */
+export const COMPACTION_FLOOR = 0.5;
+
+export interface ContextReading {
+	/** Null right after a compaction, before the next response reports usage. */
+	tokens: number | null;
+	contextWindow: number;
+}
+
+export function compactionDecision(
+	campaign: Campaign | null,
+	at: { pending: string | null; enabled: boolean; usage?: ContextReading | null },
+): { compact: boolean; reason: string } {
+	if (!at.enabled) return { compact: false, reason: "slice compaction is off" };
+	if (!at.pending) return { compact: false, reason: "no slice has finished since the last compaction" };
+	if (!campaign || campaign.status === "closed") return { compact: false, reason: "no live campaign has a next slice to carry anything into" };
+	const usage = at.usage;
+	if (!usage || usage.tokens === null || usage.contextWindow <= 0) {
+		return { compact: false, reason: "context usage is unknown, and an unknown number is not a number past the floor" };
+	}
+	const fraction = usage.tokens / usage.contextWindow;
+	const percent = Math.round(fraction * 100);
+	if (fraction < COMPACTION_FLOOR) {
+		return { compact: false, reason: `context is ${percent}% of the window, below the ${Math.round(COMPACTION_FLOOR * 100)}% floor` };
+	}
+	return { compact: true, reason: `context is ${percent}% of the window and lane ${at.pending} is integrated` };
+}
+
+/**
+ * What the summarizer is told to keep when a slice boundary compacts the campaign.
+ *
+ * This is appended to pi's own summarization prompt as its additional focus, and the second
+ * compaction onwards runs pi's update prompt, which orders the summarizer to preserve
+ * everything it previously wrote. A campaign compacting every slice under that instruction
+ * grows a summary that never sheds a finished slice, so saying what to drop matters as much
+ * as saying what to keep.
+ *
+ * The ledger is restated verbatim rather than left to be noticed: slug, worktree, counts and
+ * open lanes are the facts a paraphrase cannot rebuild, and they gate every later refusal.
+ */
+export function compactionInstructions(campaign: Campaign, finishedLane: string | null): string {
+	const open = campaign.lanes.filter((lane) => lane.state !== "integrated");
+	const lanes =
+		open.length === 0
+			? "none"
+			: open.map((lane) => `${lane.key} (${lane.kind}, ${lane.model}, ${lane.state}${lane.runId ? `, run ${lane.runId}` : ""})`).join("; ");
+	return `this is a coordinator campaign compacting at a slice boundary${finishedLane ? `, right after lane ${finishedLane} was integrated` : ""}. The next turn has to keep driving the campaign with nothing but this summary and the few messages kept after it, so write it as a handover to a coordinator who has read none of the transcript.
+
+Carry this ledger through verbatim, in Critical Context:
+CAMPAIGN ${campaign.slug}
+WORKTREE ${campaign.worktree}
+PLAN ${campaign.planPath ?? "unrecorded"}
+SLICES ${campaign.slicesDone} of ${campaign.slicesTotal}
+OPEN LANES ${lanes}
+AUTHORIZED ${campaign.authorized}
+
+Keep, exactly:
+- the campaign branch, the base it rebases onto, the PR number and url, and the last known state of its checks
+- every open lane: key, run id, model, what it was dispatched to do, and what it last reported
+- each slice already integrated, one line each: what landed and the commit it landed in
+- which slices remain, in order, and which one is next
+- the gate commands for this worktree and the result of the last run of each
+- decisions already made and their reason, and the user's answers, so neither is relitigated
+- unresolved failures, review findings not yet addressed, and anything parked with what unparks it
+- repository facts the next turn would otherwise rediscover: entry points, config paths, conventions
+
+Drop:
+- file contents, diffs, and command output already integrated and verified; keep the conclusion, not the transcript
+- exploration that led nowhere, beyond one line saying it was tried and why it was dropped
+- dispatch prose, guard verdicts, and subagent narration; keep what the coordinator did with them
+- superseded plans, resolved errors, and every status block but the newest
+
+An integrated slice is finished work: it stays as one line, and it does not keep the story of its integration merely because an earlier summary had it.`;
+}
+
 export function parseModelPin(model: unknown): { id: string; effort: ThinkingLevel } | null {
 	if (typeof model !== "string" || !model.includes("/")) return null;
 	const colon = model.lastIndexOf(":");

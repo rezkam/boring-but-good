@@ -22,6 +22,9 @@ import { findRoleShadows } from "./shadows.ts";
 import { rateFor, readThroughput, reorderByThroughput, type Throughput } from "./throughput.ts";
 
 import {
+	compactionDecision,
+	COMPACTION_FLOOR,
+	compactionInstructions,
 	continuationDecision,
 	continuationPrompt,
 	contractPrompt,
@@ -80,6 +83,10 @@ const CONTINUATION_INTERVAL_MS = 5 * 60_000;
 /** After this many continuations with no lane changing state, the campaign is stuck and the user decides. */
 const MAX_NO_PROGRESS_CONTINUATIONS = 10;
 
+/** How long a continuation waits for a running compaction before it stops waiting for it. */
+const COMPACTION_RECHECK_MS = 15_000;
+const COMPACTION_MAX_WAIT_MS = 10 * 60_000;
+
 /**
  * The judge reads prompts, so it wants to be cheap and fast rather than clever. It is
  * overridable because model availability is a local fact, not something this can assume.
@@ -97,6 +104,8 @@ interface PersistedState {
 	campaign: Campaign | null;
 	judgeModel: string;
 	judgeEnabled: boolean;
+	/** Absent in sessions written before slice compaction existed, where it was on. */
+	compaction?: boolean;
 	/** Absent until the user overrides a class, so defaults keep evolving with the code. */
 	tiers?: TierLists;
 }
@@ -187,6 +196,10 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 	let lastContinuationAt = 0;
 	let continuationQueued = false;
 	let continuationTimer: ReturnType<typeof setTimeout> | null = null;
+	let compactionEnabled = true;
+	/** The integrated lane whose slice boundary has not been compacted yet. */
+	let compactionPending: string | null = null;
+	let compactingSince = 0;
 	const laneByToolCall = new Map<string, { keys: string[]; foreground: boolean }>();
 
 	function recordProgress(): void {
@@ -221,6 +234,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			campaign,
 			judgeModel,
 			judgeEnabled,
+			compaction: compactionEnabled,
 			...(tiers === DEFAULT_TIERS ? {} : { tiers }),
 		});
 	}
@@ -287,6 +301,82 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 
 	function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "info"): void {
 		if (ctx.hasUI) ctx.ui.notify(message, level);
+	}
+
+	function scheduleContinuation(ctx: ExtensionContext, wait = Math.max(0, CONTINUATION_INTERVAL_MS - (Date.now() - lastContinuationAt))): void {
+		if (continuationTimer) return;
+		continuationTimer = setTimeout(() => {
+			continuationTimer = null;
+			// This fires long after the turn that scheduled it, and the session may have been
+			// replaced, reloaded, or ended in between. A captured ctx throws once that happens, so
+			// a missed continuation has to stay a missed continuation rather than a crashed pi.
+			try {
+				if (!campaign || campaign.status === "closed") return;
+				if (!continuationDecision(campaign, { consecutiveErrors: 0 }).proceed) return;
+				// Continuing into a running compaction would send the turn the compaction is about to
+				// abort, and the summary would then describe a turn that never happened.
+				if (compactingSince > 0 && Date.now() - compactingSince < COMPACTION_MAX_WAIT_MS) {
+					scheduleContinuation(ctx, COMPACTION_RECHECK_MS);
+					return;
+				}
+				if (continuationQueued || ctx.hasPendingMessages() || !ctx.isIdle()) return;
+				continuationQueued = true;
+				noProgressContinuations += 1;
+				lastContinuationAt = Date.now();
+				pi.sendMessage({ customType: CONTINUATION_TYPE, content: continuationPrompt(campaign), display: false }, { triggerTurn: true });
+			} catch {
+				continuationQueued = false;
+			}
+		}, wait);
+		continuationTimer.unref?.();
+	}
+
+	/**
+	 * Compact at a finished slice, so the next slice starts on a summary rather than on the
+	 * whole campaign so far.
+	 *
+	 * A campaign outlives its context: every dispatch, verdict, integration and gate run stays
+	 * in the transcript, and the window then goes on work that is already merged. Left to pi's
+	 * own threshold the cut lands wherever the context happens to overflow, which is mid-turn
+	 * with lanes in flight. A slice boundary is the one moment where nothing is running and the
+	 * transcript behind it is finished work, so it is the one moment a summary costs nothing
+	 * that is still needed.
+	 */
+	function startCompaction(ctx: ExtensionContext): boolean {
+		if (compactingSince > 0) return false;
+		const decision = compactionDecision(campaign, {
+			pending: compactionPending,
+			enabled: compactionEnabled,
+			usage: ctx.getContextUsage(),
+		});
+		if (!decision.compact || !campaign) return false;
+
+		const lane = compactionPending;
+		compactionPending = null;
+		compactingSince = Date.now();
+		notice(`Coordinator guard: compacting at a slice boundary, ${decision.reason}.`);
+		const settled = (message: string, level: "info" | "warning" = "info") => {
+			compactingSince = 0;
+			try {
+				notice(message);
+				notify(ctx, message, level);
+				scheduleContinuation(ctx);
+			} catch {
+				// The session is gone, so there is nothing left to continue into.
+			}
+		};
+		try {
+			ctx.compact({
+				customInstructions: compactionInstructions(campaign, lane),
+				onComplete: () => settled("Coordinator guard: context compacted, the campaign carries on from the summary."),
+				// An uncompacted campaign still runs, and pi's own threshold is still behind it, so a
+				// failure here is reported rather than retried into the same wall every slice.
+				onError: (error) => settled(`Coordinator guard: slice compaction failed, ${error.message}. The campaign continues uncompacted.`, "warning"),
+			});
+		} catch (error) {
+			settled(`Coordinator guard: slice compaction could not start, ${error instanceof Error ? error.message : String(error)}.`, "warning");
+		}
+		return true;
 	}
 
 	/** The tier table with whatever throughput history can be measured for each entry. */
@@ -447,6 +537,9 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		armed = false;
 		judgeModel = DEFAULT_JUDGE_MODEL;
 		judgeEnabled = true;
+		compactionEnabled = true;
+		compactionPending = null;
+		compactingSince = 0;
 		tiers = DEFAULT_TIERS;
 		verdictCache.clear();
 		noProgressContinuations = 0;
@@ -463,6 +556,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			campaign = data.campaign ?? null;
 			judgeModel = typeof data.judgeModel === "string" && data.judgeModel ? data.judgeModel : DEFAULT_JUDGE_MODEL;
 			judgeEnabled = data.judgeEnabled !== false;
+			compactionEnabled = data.compaction !== false;
 			tiers = isTierLists(data.tiers) ? data.tiers : DEFAULT_TIERS;
 		}
 		updateStatusLine(ctx);
@@ -824,25 +918,15 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			return;
 		}
 
-		const wait = Math.max(0, CONTINUATION_INTERVAL_MS - (Date.now() - lastContinuationAt));
-		continuationTimer = setTimeout(() => {
-			continuationTimer = null;
-			// This fires long after the turn that scheduled it, and the session may have been
-			// replaced, reloaded, or ended in between. A captured ctx throws once that happens, so
-			// a missed continuation has to stay a missed continuation rather than a crashed pi.
-			try {
-				if (!campaign || campaign.status === "closed") return;
-				if (!continuationDecision(campaign, { consecutiveErrors: 0 }).proceed) return;
-				if (continuationQueued || ctx.hasPendingMessages() || !ctx.isIdle()) return;
-				continuationQueued = true;
-				noProgressContinuations += 1;
-				lastContinuationAt = Date.now();
-				pi.sendMessage({ customType: CONTINUATION_TYPE, content: continuationPrompt(campaign), display: false }, { triggerTurn: true });
-			} catch {
-				continuationQueued = false;
-			}
-		}, wait);
-		continuationTimer.unref?.();
+		scheduleContinuation(ctx);
+	});
+
+	// The compaction runs on agent_settled rather than agent_end, because that is the point pi
+	// states no retry, no compaction of its own, and no queued continuation is still coming.
+	// Compacting earlier aborts the run it is standing in.
+	pi.on("agent_settled", async (_event, ctx) => {
+		if (continuationQueued || ctx.hasPendingMessages()) return;
+		startCompaction(ctx);
 	});
 
 	// Sessions started before notices became entries still carry them as messages, and those
@@ -980,6 +1064,10 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			}
 			if (params.action === "integrated" && lane.kind === "implement" && params.slice) {
 				campaign = { ...campaign, ...recordIntegration(campaign, params.slice) };
+				// The boundary is here, not in the compaction: an integrated writer lane is work that
+				// is on the branch and gated, so the transcript of getting it there is spent. The
+				// compaction itself waits for the turn to settle, because it aborts what is running.
+				compactionPending = params.key;
 			}
 			recordProgress();
 			persist();
@@ -1014,6 +1102,14 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 				]);
 			}
 
+			if (head === "compact" && rest.length > 0) {
+				return suggest([
+					{ value: "compact on", label: "compact on", description: "summarize the context at every finished slice" },
+					{ value: "compact off", label: "compact off", description: "keep the whole campaign transcript" },
+					{ value: "compact now", label: "compact now", description: "compact this campaign's context immediately" },
+				]);
+			}
+
 			if (head === "models" && rest.length > 0) {
 				const tierOptions = [
 					{ value: "models gpt", label: "models gpt", description: "OpenAI defaults for all tiers and the judge" },
@@ -1045,6 +1141,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 				{ value: "authorize ", label: "authorize", description: "widen the recorded scope in words" },
 				{ value: "models", label: "models", description: "show or set the tier lists" },
 				{ value: "judge", label: "judge", description: "show or set the prompt judge" },
+				{ value: "compact", label: "compact", description: "slice-boundary compaction: show, switch, or run now" },
 				{ value: "arm", label: "arm", description: "turn enforcement on" },
 				{ value: "disarm", label: "disarm", description: "turn enforcement off, once no campaign is active" },
 				{ value: "close", label: "close", description: "end the campaign and disarm" },
@@ -1115,6 +1212,50 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 						show(
 							`Authorization widened. It now reads:\n\n${campaign.authorized}\n\nForce push granted for: ${campaign.grants?.forcePush?.join(", ") || "nothing"}\n\nEnforced from the next tool call.`,
 						);
+						break;
+					}
+					if (command === "compact" || command.startsWith("compact ")) {
+						const argument = command.slice("compact".length).trim();
+						if (!argument) {
+							const usage = ctx.getContextUsage();
+							const at = usage?.percent === null || usage === undefined ? "unknown" : `${Math.round(usage.percent)}%`;
+							show(
+								`Slice compaction ${compactionEnabled ? "on" : "off"}. Context is at ${at} of the window, and a finished slice compacts past ${Math.round(COMPACTION_FLOOR * 100)}%.\nPending boundary: ${compactionPending ?? "none"}.`,
+							);
+						} else if (argument === "on" || argument === "off") {
+							compactionEnabled = argument === "on";
+							persist();
+							show(
+								compactionEnabled
+									? "Slice compaction on. Each integrated writer lane compacts the context once the turn settles."
+									: "Slice compaction off. The campaign keeps its whole transcript until pi's own threshold cuts it mid-turn.",
+							);
+						} else if (argument === "now") {
+							if (!campaign || campaign.status === "closed") {
+								show("No live campaign, so /compact is the one to use: this writes the campaign ledger into the summary.");
+								break;
+							}
+							// The floor and the pending boundary are what the automatic path waits for, and
+							// asking for it by hand is the user overriding both.
+							await ctx.waitForIdle();
+							const lane = compactionPending;
+							compactionPending = null;
+							compactingSince = Date.now();
+							ctx.compact({
+								customInstructions: compactionInstructions(campaign, lane),
+								onComplete: () => {
+									compactingSince = 0;
+									notify(ctx, "coordinator-guard: context compacted with the campaign ledger.");
+								},
+								onError: (error) => {
+									compactingSince = 0;
+									notify(ctx, `coordinator-guard: compaction failed, ${error.message}`, "warning");
+								},
+							});
+							show("Compacting the campaign context now.");
+						} else {
+							show("Usage: /campaign compact [on|off|now]");
+						}
 						break;
 					}
 					if (command === "models" || command.startsWith("models ")) {

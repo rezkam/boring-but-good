@@ -293,6 +293,21 @@ else
         else
             fail "guard policy suite" "$(printf '%s' "$GUARD_OUT" | grep -E '^. (fail|not ok)' | head -5)"
         fi
+
+        # The wiring suite loads the extension itself, so unlike the policy suites it needs the
+        # harness packages. It runs here when they are installed and is skipped when they are not,
+        # rather than making this suite depend on an npm install.
+        if [ ! -d "${COORD_GUARD_DIR}/../node_modules" ]; then
+            skip "guard wiring suite (run: npm --prefix extensions install)"
+        else
+            WIRING_OUT=$(cd "$COORD_GUARD_DIR" && node --test compaction.test.ts 2>&1)
+            WIRING_RC=$?
+            if [ "$WIRING_RC" -eq 0 ]; then
+                pass "guard wiring suite"
+            else
+                fail "guard wiring suite" "$(printf '%s' "$WIRING_OUT" | grep -E '^. (fail|not ok)' | head -5)"
+            fi
+        fi
     fi
 fi
 

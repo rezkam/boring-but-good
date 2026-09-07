@@ -95,6 +95,8 @@ Commands:
 - `/campaign resume` re-activates a paused or closed campaign
 - `/campaign judge` shows the judge model; `/campaign judge <provider/model:effort>` changes
   it; `/campaign judge off` disables prompt rules entirely
+- `/campaign compact` shows the slice-compaction state and the current context usage;
+  `/campaign compact off` keeps the whole transcript; `/campaign compact now` compacts once
 
 Closing is the way out: a closed campaign is treated as no campaign, so ordinary dispatches
 work again immediately.
@@ -155,6 +157,35 @@ downgrade does not.
 
 Overrides persist with the campaign and are printed whenever the guard arms, so the
 enforced table is never something you have to remember.
+
+## Compaction at the slice boundary
+
+A campaign outlives its context. Every dispatch, verdict, integration, and gate run stays in
+the transcript, so a long campaign spends most of its window on work that is already merged
+and then hits pi's own compaction threshold, which fires at the overflow edge: mid-turn, with
+lanes in flight, splitting a turn it has to summarize twice.
+
+An integrated writer lane is the opposite moment. The work is on the branch, the gates have
+run, nothing is in flight, and the transcript behind it is finished. So the guard compacts
+there instead: `coordinator_lane` marks the boundary when it records the integration, and the
+compaction runs on `agent_settled`, the point pi states no retry, no compaction of its own,
+and no queued continuation is still coming. Compaction aborts whatever is running, so calling
+it any earlier would abort the turn that asked for it.
+
+The summary is written for a coordinator who has read none of the transcript. The
+instructions carry the ledger through verbatim (slug, worktree, plan, slice counts, open lanes
+with their run ids, and the authorization) and then say what to keep: the branch and PR state,
+one line per integrated slice, the gate commands and their last results, decisions with their
+reasons, unaddressed review findings, and anything parked. Dispatch prose, guard verdicts,
+integrated diffs, and superseded plans are dropped. That last half matters more than it looks:
+from the second compaction on, pi runs its update prompt, which orders the summarizer to
+preserve everything it previously wrote, so a campaign that compacts every slice would grow a
+summary that never sheds a finished one.
+
+Below half the context window nothing is compacted, because a summary that replaces a
+transcript which still fits is a loss, not a saving. The campaign contract is re-injected into
+the system prompt every turn and the ledger lives in the guard's own state, so neither depends
+on the summary being right.
 
 ## What fails, and why
 
