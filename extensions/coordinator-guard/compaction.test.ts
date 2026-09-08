@@ -32,6 +32,7 @@ function harness() {
 		contextWindow: 200_000,
 		percent: 75,
 	};
+	let compactThrows = false;
 
 	const pi = {
 		on(event: string, handler: (event: unknown, ctx: unknown) => unknown) {
@@ -67,6 +68,7 @@ function harness() {
 		waitForIdle: async () => {},
 		compact(options: CompactCall) {
 			compactCalls.push(options);
+			if (compactThrows) throw new Error("Nothing to compact (session too small)");
 		},
 	};
 
@@ -89,6 +91,9 @@ function harness() {
 		command: (args: string) => commands.get("campaign")?.handler(args, ctx) ?? Promise.reject(new Error("no command")),
 		setUsage(next: typeof usage) {
 			usage = next;
+		},
+		throwOnCompact(next: boolean) {
+			compactThrows = next;
 		},
 	};
 }
@@ -174,4 +179,66 @@ test("the campaign carries on when a compaction is off, refused by the floor, or
 	failing.compactCalls[0]?.onError?.(new Error("Nothing to compact (session too small)"));
 	await failing.emit("agent_settled");
 	assert.equal(failing.compactCalls.length, 1);
+});
+
+test("a partial integration is not a finished slice, so it does not compact", async () => {
+	// The instructions tell the summarizer an integrated slice is finished work whose diffs and
+	// command output can go. That is true of "done" and of "retry", which re-ran a slice already
+	// counted; it is the opposite of "partial", which says this slice still needs work, and
+	// throwing away its detail is throwing away what the next dispatch is built from.
+	const partial = harness();
+	await campaignWithLane(partial);
+	await partial.call("coordinator_lane", { action: "integrated", key: "s1-parser", slice: "partial" });
+	await partial.emit("agent_settled");
+	assert.equal(partial.compactCalls.length, 0);
+
+	const retry = harness();
+	await campaignWithLane(retry);
+	await retry.call("coordinator_lane", { action: "integrated", key: "s1-parser", slice: "retry" });
+	await retry.emit("agent_settled");
+	assert.equal(retry.compactCalls.length, 1, "a re-run slice is still work that landed and is finished");
+});
+
+test("a boundary belongs to the campaign that made it", async () => {
+	// An integration below the floor leaves the boundary pending. If the campaign then closes,
+	// the next campaign in the same session would open on a compaction it never earned, stamped
+	// with a lane key belonging to work it has nothing to do with.
+	const pi = harness();
+	await campaignWithLane(pi);
+	pi.setUsage({ tokens: 20_000, contextWindow: 200_000, percent: 10 });
+	await pi.call("coordinator_lane", { action: "integrated", key: "s1-parser", slice: "done" });
+	await pi.emit("agent_settled");
+	assert.equal(pi.compactCalls.length, 0, "below the floor nothing compacts, and the boundary is still pending");
+
+	await pi.command("close");
+	await pi.call("coordinator_campaign", {
+		action: "start",
+		slug: "second",
+		worktree: WORKTREE,
+		slices_total: 2,
+		authorized: "implement approved slices",
+	});
+	pi.setUsage({ tokens: 150_000, contextWindow: 200_000, percent: 75 });
+	await pi.emit("agent_settled");
+	assert.equal(pi.compactCalls.length, 0, "a new campaign has finished no slice of its own");
+});
+
+test("a manual compaction that cannot start leaves nothing stuck behind it", async () => {
+	// /campaign compact now deliberately skips the floor, so it is the path most likely to reach
+	// a session pi refuses to compact. A throw there used to leave the guard believing a
+	// compaction was running, which parks the continuation loop for ten minutes.
+	const pi = harness();
+	await campaignWithLane(pi);
+	pi.throwOnCompact(true);
+	await pi.command("compact now");
+	assert.equal(pi.compactCalls.length, 1);
+
+	pi.throwOnCompact(false);
+	await pi.call("coordinator_lane", { action: "integrated", key: "s1-parser", slice: "done" });
+	await pi.emit("agent_settled");
+	assert.equal(pi.compactCalls.length, 2, "the next real boundary still compacts");
+
+	// And a second request while one is genuinely in flight is one compaction, not two.
+	await pi.command("compact now");
+	assert.equal(pi.compactCalls.length, 2);
 });

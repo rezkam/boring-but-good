@@ -342,14 +342,19 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 	 * transcript behind it is finished work, so it is the one moment a summary costs nothing
 	 * that is still needed.
 	 */
-	function startCompaction(ctx: ExtensionContext): boolean {
-		if (compactingSince > 0) return false;
-		const decision = compactionDecision(campaign, {
-			pending: compactionPending,
-			enabled: compactionEnabled,
-			usage: ctx.getContextUsage(),
-		});
-		if (!decision.compact || !campaign) return false;
+	function startCompaction(ctx: ExtensionContext, byHand = false): { started: boolean; reason: string } {
+		if (compactingSince > 0) return { started: false, reason: "a compaction is already running" };
+		if (!campaign || campaign.status === "closed") return { started: false, reason: "no live campaign has a next slice to carry anything into" };
+		// Asking for it by hand overrides the floor and the boundary, which are what the automatic
+		// path waits for. It does not override a compaction already in flight.
+		const decision = byHand
+			? { compact: true, reason: "asked for by hand" }
+			: compactionDecision(campaign, {
+					pending: compactionPending,
+					enabled: compactionEnabled,
+					usage: ctx.getContextUsage(),
+				});
+		if (!decision.compact) return { started: false, reason: decision.reason };
 
 		const lane = compactionPending;
 		compactionPending = null;
@@ -376,7 +381,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		} catch (error) {
 			settled(`Coordinator guard: slice compaction could not start, ${error instanceof Error ? error.message : String(error)}.`, "warning");
 		}
-		return true;
+		return { started: true, reason: decision.reason };
 	}
 
 	/** The tier table with whatever throughput history can be measured for each entry. */
@@ -929,6 +934,12 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 		startCompaction(ctx);
 	});
 
+	pi.on("session_compact", async () => {
+		// pi compacted on its own threshold or at the user's /compact, so the boundary this was
+		// holding has been summarized by someone else and is no longer owed a compaction.
+		compactionPending = null;
+	});
+
 	// Sessions started before notices became entries still carry them as messages, and those
 	// would otherwise be replayed into context on resume.
 	pi.on("context", async (event) => ({
@@ -969,6 +980,9 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 						startedAt: now,
 					});
 					armed = true;
+					// A boundary belongs to the campaign that made it. Carrying one across would open the
+					// next campaign on a compaction it never earned, stamped with someone else's lane.
+					compactionPending = null;
 					recordProgress();
 					break;
 				}
@@ -1015,6 +1029,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 					}
 					campaign.status = "closed";
 					armed = false;
+					compactionPending = null;
 					break;
 				}
 				case "show":
@@ -1067,7 +1082,9 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 				// The boundary is here, not in the compaction: an integrated writer lane is work that
 				// is on the branch and gated, so the transcript of getting it there is spent. The
 				// compaction itself waits for the turn to settle, because it aborts what is running.
-				compactionPending = params.key;
+				// "partial" is the one integration that is not spent: the slice still needs work, and
+				// the summary would tell the next turn to drop the detail that work is built from.
+				if (params.slice !== "partial") compactionPending = params.key;
 			}
 			recordProgress();
 			persist();
@@ -1174,6 +1191,7 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 				case "close":
 					if (campaign) campaign.status = "closed";
 					armed = false;
+					compactionPending = null;
 					persist();
 					show("Campaign closed and guard disarmed. Enforcement is off until the next campaign.");
 					break;
@@ -1235,24 +1253,9 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 								show("No live campaign, so /compact is the one to use: this writes the campaign ledger into the summary.");
 								break;
 							}
-							// The floor and the pending boundary are what the automatic path waits for, and
-							// asking for it by hand is the user overriding both.
 							await ctx.waitForIdle();
-							const lane = compactionPending;
-							compactionPending = null;
-							compactingSince = Date.now();
-							ctx.compact({
-								customInstructions: compactionInstructions(campaign, lane),
-								onComplete: () => {
-									compactingSince = 0;
-									notify(ctx, "coordinator-guard: context compacted with the campaign ledger.");
-								},
-								onError: (error) => {
-									compactingSince = 0;
-									notify(ctx, `coordinator-guard: compaction failed, ${error.message}`, "warning");
-								},
-							});
-							show("Compacting the campaign context now.");
+							const outcome = startCompaction(ctx, true);
+							show(outcome.started ? "Compacting the campaign context now." : `Not compacting: ${outcome.reason}.`);
 						} else {
 							show("Usage: /campaign compact [on|off|now]");
 						}

@@ -128,8 +128,9 @@ user, because nothing below is enforced without it.
 
 Recording an integration also marks a compaction boundary: once the turn settles, the guard
 summarizes the campaign so far and the next slice starts on that summary rather than on
-every dispatch before it. Nothing is asked of you for that, and `/campaign compact off`
-is the user's way out of it.
+every dispatch before it. A slice recorded `partial` marks no boundary, because its detail
+is what the follow-up dispatch is built from. Nothing is asked of you for any of this, and
+`/campaign compact off` is the user's way out of it.
 
 Register the campaign before the first dispatch: `coordinator_campaign` action `start`
 with slug, worktree, plan path, slice count, and the authorization scope. Record slices

@@ -172,6 +172,11 @@ compaction runs on `agent_settled`, the point pi states no retry, no compaction 
 and no queued continuation is still coming. Compaction aborts whatever is running, so calling
 it any earlier would abort the turn that asked for it.
 
+An integration recorded as `partial` marks no boundary. That value says the slice still needs
+work, and the instructions below tell the summarizer an integrated slice is finished and its
+detail can go, which is exactly the detail the next dispatch would be built from. `done` and
+`retry` both mean the lane's work landed, so both compact.
+
 The summary is written for a coordinator who has read none of the transcript. The
 instructions carry the ledger through verbatim (slug, worktree, plan, slice counts, open lanes
 with their run ids, and the authorization) and then say what to keep: the branch and PR state,
