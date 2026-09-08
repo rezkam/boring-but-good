@@ -7,11 +7,10 @@ Use this template for every implementation dispatch. Render all placeholders bef
 - **Agent:** `[RUNTIME-VERIFIED GENERAL-PURPOSE IMPLEMENTER]`
 - **Description:** `Implement Task [N]: [TASK NAME]`
 - **Model:** `[REQUIRED: choose under dispatch.md Model selection]`
-  - `gpt-5.6-luna` for complete-code transcription and mechanical one- or two-file work when GPT models are available
-  - `gpt-5.6-terra` or `claude-sonnet-5` for default implementation from a well-specified plan
-  - `gpt-5.6-sol` or `claude-opus-4-8` for genuinely difficult multi-step implementation or broad integration
-  - `gpt-5.6-sol` or `claude-fable-5` only when implementation itself requires architecture or highest-complexity design judgment
-- **Effort:** `medium` by default
+  - `gpt-5.6-luna:high` or `claude-sonnet-5:medium` for complete, mechanical slices
+  - `gpt-6-astra:low` or `claude-opus-5:low` for prose-led implementation and integration work
+  - `gpt-6-astra:medium` or `claude-opus-5:medium` for complex cross-layer or long-horizon work
+- **Effort:** `[REQUIRED: use the effort listed for the selected class in dispatch.md]`
 - **Working directory:** `[FULL ISOLATED WORKTREE PATH]`
 - **Report file:** `[DURABLE REPORT PATH UNDER THE CAMPAIGN DIRECTORY]`
 
