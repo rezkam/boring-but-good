@@ -98,11 +98,23 @@ function harness() {
 	};
 }
 
-const TASK = [
-	`ROUTE: s1-parser | class 1 | claude-bridge/claude-sonnet-5:medium | mechanical single-file transcription`,
-	`Implement slice S1 in ${WORKTREE} at exact HEAD ${HEAD}. Stop and report if HEAD differs.`,
-	"Commit locally on your branch and never push, never run gh, never open a PR.",
-].join("\n");
+const task = (key: string) =>
+	[
+		`ROUTE: ${key} | class 1 | claude-bridge/claude-sonnet-5:medium | mechanical single-file transcription`,
+		`Implement slice ${key} in ${WORKTREE} at exact HEAD ${HEAD}. Stop and report if HEAD differs.`,
+		"Commit locally on your branch and never push, never run gh, never open a PR.",
+	].join("\n");
+
+async function dispatch(pi: ReturnType<typeof harness>, key: string, callId = `tc-${key}`) {
+	await pi.emit("tool_call", {
+		toolName: "subagent",
+		toolCallId: callId,
+		input: {
+			async: true,
+			workflowScript: `return runs.run('${key}', { agent: 'campaign-worker', model: 'claude-bridge/claude-sonnet-5:medium', task: \`${task(key)}\` })`,
+		},
+	});
+}
 
 async function campaignWithLane(pi: ReturnType<typeof harness>) {
 	// The judge spends a model call on every dispatch, and this test is about the compaction
@@ -116,14 +128,7 @@ async function campaignWithLane(pi: ReturnType<typeof harness>) {
 		slices_total: 3,
 		authorized: "implement approved slices; commit; push; open and update the PR",
 	});
-	await pi.emit("tool_call", {
-		toolName: "subagent",
-		toolCallId: "tc-1",
-		input: {
-			async: true,
-			workflowScript: `return runs.run('s1-parser', { agent: 'campaign-worker', model: 'claude-bridge/claude-sonnet-5:medium', task: \`${TASK}\` })`,
-		},
-	});
+	await dispatch(pi, "s1-parser");
 }
 
 test("an integrated slice compacts once the run settles, and not before", async () => {
@@ -241,4 +246,32 @@ test("a manual compaction that cannot start leaves nothing stuck behind it", asy
 	// And a second request while one is genuinely in flight is one compaction, not two.
 	await pi.command("compact now");
 	assert.equal(pi.compactCalls.length, 2);
+});
+
+test("partial work lands in the transcript, so it invalidates an older boundary too", async () => {
+	// A boundary below the floor waits for the context to be worth compacting, and the wait is
+	// where it can go stale: skipping the assignment for a partial integration left the earlier
+	// slice's boundary standing, so the first settle past the floor compacted immediately after
+	// the partial work and told the summarizer to drop exactly what its follow-up is built from.
+	const pi = harness();
+	await campaignWithLane(pi);
+	await dispatch(pi, "s2-render");
+
+	pi.setUsage({ tokens: 20_000, contextWindow: 200_000, percent: 10 });
+	await pi.call("coordinator_lane", { action: "integrated", key: "s1-parser", slice: "done" });
+	await pi.emit("agent_settled");
+	assert.equal(pi.compactCalls.length, 0, "below the floor the boundary waits");
+
+	pi.setUsage({ tokens: 150_000, contextWindow: 200_000, percent: 75 });
+	await pi.call("coordinator_lane", { action: "integrated", key: "s2-render", slice: "partial" });
+	await pi.emit("agent_settled");
+	assert.equal(pi.compactCalls.length, 0, "unfinished work in the transcript is not a cut point");
+
+	// A partial integration closes its lane, so the rest of that slice is a new dispatch. When it
+	// finishes, that boundary is its own and it compacts.
+	await dispatch(pi, "s2-render", "tc-s2-render-2");
+	await pi.call("coordinator_lane", { action: "integrated", key: "s2-render", slice: "done" });
+	await pi.emit("agent_settled");
+	assert.equal(pi.compactCalls.length, 1);
+	assert.match(pi.compactCalls[0]?.customInstructions ?? "", /s2-render/);
 });

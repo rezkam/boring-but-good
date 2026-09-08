@@ -1083,8 +1083,11 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 				// is on the branch and gated, so the transcript of getting it there is spent. The
 				// compaction itself waits for the turn to settle, because it aborts what is running.
 				// "partial" is the one integration that is not spent: the slice still needs work, and
-				// the summary would tell the next turn to drop the detail that work is built from.
-				if (params.slice !== "partial") compactionPending = params.key;
+				// the summary would tell the next turn to drop the detail that work is built from. It
+				// also invalidates an older boundary still waiting for the floor, because that detail
+				// is in the transcript now and the earlier cut point no longer sits behind finished
+				// work alone.
+				compactionPending = params.slice === "partial" ? null : params.key;
 			}
 			recordProgress();
 			persist();
