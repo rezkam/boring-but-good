@@ -17,6 +17,8 @@ import {
 	withTierList,
 	contractPrompt,
 	continuationPrompt,
+	compactionDecision,
+	compactionInstructions,
 	DEFAULT_CONFIG,
 	evaluateStructure,
 	evaluateVerdicts,
@@ -1330,4 +1332,75 @@ test("a campaign can declare itself blocked on the owner, and that is not parkin
 
 	// An active campaign is unchanged: this is a declared state, not a way around the rule.
 	assert.equal(structure(request({ tool: "update_goal", campaign: campaign({ slicesDone: 18 }), input: { status: "blocked" } })).code, "CG023");
+});
+
+test("a finished slice compacts once the context is worth compacting", () => {
+	// The campaign outlives its context: every dispatch, verdict, integration, and gate run
+	// stays in the transcript, so a long campaign either overflows mid-turn or spends the whole
+	// window on work it already finished. A slice boundary is the one moment where nothing is
+	// in flight, so it is the one moment where a summary loses nothing that is still needed.
+	const live = campaign({ slicesDone: 2 });
+	const past = { tokens: 140_000, contextWindow: 200_000 };
+
+	assert.equal(compactionDecision(live, { pending: "s2-parser", enabled: true, usage: past }).compact, true);
+
+	// Nothing finished, so there is nothing to summarize that the next turn is done with.
+	assert.equal(compactionDecision(live, { pending: null, enabled: true, usage: past }).compact, false);
+
+	// The user's switch is the user's, and it is off rather than ignored.
+	const off = compactionDecision(live, { pending: "s2-parser", enabled: false, usage: past });
+	assert.equal(off.compact, false);
+	assert.match(off.reason, /off/);
+});
+
+test("compaction below the floor is refused, because a summary is lossier than the transcript it replaces", () => {
+	// Compacting at 10% of the window spends a model call to trade the real transcript for a
+	// paraphrase of it. The floor is what makes this a context measure rather than a ritual.
+	const live = campaign({ slicesDone: 1 });
+	const early = compactionDecision(live, { pending: "s1-parser", enabled: true, usage: { tokens: 30_000, contextWindow: 200_000 } });
+	assert.equal(early.compact, false);
+	assert.match(early.reason, /15%|floor/);
+
+	// Right after a compaction pi reports no token count at all, and an unknown number is not
+	// a number past the floor.
+	assert.equal(
+		compactionDecision(live, { pending: "s1-parser", enabled: true, usage: { tokens: null, contextWindow: 200_000 } }).compact,
+		false,
+	);
+	assert.equal(compactionDecision(live, { pending: "s1-parser", enabled: true, usage: null }).compact, false);
+
+	// A campaign that is over has no next slice to carry anything into.
+	assert.equal(
+		compactionDecision(campaign({ status: "closed" }), { pending: "s1-parser", enabled: true, usage: { tokens: 140_000, contextWindow: 200_000 } }).compact,
+		false,
+	);
+	assert.equal(compactionDecision(null, { pending: "s1-parser", enabled: true, usage: { tokens: 140_000, contextWindow: 200_000 } }).compact, false);
+});
+
+test("the compaction prompt hands the campaign over to a coordinator who has read none of the transcript", () => {
+	const live = campaign({ slicesDone: 2, slicesTotal: 5 });
+	live.lanes = [
+		{ key: "s3-render", kind: "implement", model: "claude-bridge/claude-sonnet-5:medium", startedAt: 2_000, state: "running", runId: "run_7" },
+	];
+	const prompt = compactionInstructions(live, "s2-parser");
+
+	// The ledger is what the next turn cannot rebuild from a paraphrase, so it is carried
+	// verbatim rather than left to the summarizer to notice.
+	assert.match(prompt, /demo/);
+	assert.match(prompt, new RegExp(WORKTREE.replace(/[/\\]/g, "\\$&")));
+	assert.match(prompt, /2 of 5/);
+	assert.match(prompt, /s3-render/);
+	assert.match(prompt, /implement approved slices/);
+	assert.match(prompt, /s2-parser/);
+
+	// The keep list is the point: the things a coordinator cannot continue without.
+	for (const needed of [/gate/i, /commit/i, /decision/i, /review finding/i, /open lane/i]) {
+		assert.match(prompt, needed);
+	}
+
+	// pi's update prompt orders the summarizer to preserve everything it previously wrote, so
+	// a campaign that compacts every slice would grow a summary that never sheds a finished
+	// slice. This has to say the opposite, or the second compaction onwards saves nothing.
+	assert.match(prompt, /one line/i);
+	assert.match(prompt, /superseded|no longer|drop/i);
 });
