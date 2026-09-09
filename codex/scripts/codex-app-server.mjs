@@ -1329,6 +1329,7 @@ async function runServe(options) {
           onTurnStarted(active) {
             activeId = active.turnId;
             threads.add(active.threadId);
+            clearActiveTurnsForThread(active.threadId);
             activeTurns.set(active.turnId, { ...active, startedAt: new Date().toISOString() });
             refreshState();
           },

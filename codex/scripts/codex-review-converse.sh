@@ -29,6 +29,7 @@ Options:
   --effort <value>  Reasoning effort advertised by the selected model
                     (default: the run's recorded effort)
   --model <name>    model to resume with (default: the run's recorded model)
+  --config <k=v>    only model_reasoning_effort is supported for continuation
 
 If only one positional argument is provided after --last, it is treated as the prompt.
 EOF
@@ -41,7 +42,6 @@ MODEL=""
 EFFORT=""
 PROMPT=""
 WORKDIR=""
-CONFIG_FLAGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -63,15 +63,15 @@ while [[ $# -gt 0 ]]; do
         --effort)
             [[ $# -lt 2 ]] && { echo "--effort requires a value" >&2; exit 1; }
             EFFORT="$2"
-            CONFIG_FLAGS+=(-c "model_reasoning_effort=$2")
             shift 2
             ;;
         --config)
             [[ $# -lt 2 ]] && { echo "--config requires a key=value" >&2; exit 1; }
-            if [[ "$2" == model_reasoning_effort=* ]]; then
-                EFFORT="${2#*=}"
+            if [[ "$2" != model_reasoning_effort=* ]]; then
+                echo "Unsupported continuation config '${2%%=*}'. Only model_reasoning_effort can be changed with --config on an existing host. Set other config when starting the run." >&2
+                exit 1
             fi
-            CONFIG_FLAGS+=(-c "$2")
+            EFFORT="${2#*=}"
             shift 2
             ;;
         --help|-h)
@@ -149,7 +149,6 @@ if [[ -z "$EFFORT" ]]; then
     META_EFFORT="$(codex_review_get_meta_field "$RUN_ID" effort)"
     if [[ -n "$META_EFFORT" && "$META_EFFORT" != "null" ]]; then
         EFFORT="$META_EFFORT"
-        CONFIG_FLAGS+=(-c "model_reasoning_effort=$META_EFFORT")
     fi
 fi
 

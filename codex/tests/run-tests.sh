@@ -1089,6 +1089,44 @@ else
 fi
 node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MANAGED_REVIEW_MISMATCH_DIR" --force >/dev/null 2>&1
 
+# Active native reviews must replace the provisional id as soon as review/start
+# supplies the accepted id, so thread-selected controls remain unambiguous.
+for review_action in steer interrupt; do
+    REVIEW_CONTROL_DIR="$WORK/review-control-$review_action"
+    : > "$APP_SERVER_LOG"
+    PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO="review-control-$review_action" \
+        node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$REVIEW_CONTROL_DIR" \
+        --approval decline >/dev/null 2>&1
+    node "$SCRIPTS_DIR/codex-app-server.mjs" review --session-dir "$REVIEW_CONTROL_DIR" \
+        --scope uncommitted --workdir "$NONBLOCK_REPO" --sandbox read-only \
+        >"$WORK/review-control-$review_action.json" 2>&1 &
+    REVIEW_CONTROL_CLIENT_PID=$!
+    for _ in $(seq 1 100); do
+        jq -e '.activeTurns | map(.turnId) | index("00000000-0000-0000-0000-000000000002") != null' \
+            "$REVIEW_CONTROL_DIR/state.json" >/dev/null 2>&1 && break
+        sleep 0.02
+    done
+    review_control_args=("$review_action" --session-dir "$REVIEW_CONTROL_DIR" \
+        --thread "00000000-0000-0000-0000-000000000001")
+    [[ "$review_action" == "steer" ]] && review_control_args+=(--prompt "finish the review")
+    review_control_out="$(node "$SCRIPTS_DIR/codex-app-server.mjs" "${review_control_args[@]}" 2>&1)"; review_control_code=$?
+    if [[ "$review_control_code" -ne 0 ]]; then
+        node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$REVIEW_CONTROL_DIR" --force >/dev/null 2>&1 || true
+    fi
+    if wait "$REVIEW_CONTROL_CLIENT_PID"; then review_wait_code=0; else review_wait_code=$?; fi
+    expected_wait_code=0
+    [[ "$review_action" == "interrupt" ]] && expected_wait_code=1
+    if [[ "$review_control_code" -eq 0 && "$review_wait_code" -eq "$expected_wait_code" ]] \
+        && jq -e --arg method "turn/$review_action" 'select(.method == $method) | (.params.expectedTurnId // .params.turnId) == "00000000-0000-0000-0000-000000000002"' "$APP_SERVER_LOG" >/dev/null 2>&1 \
+        && jq -e '.activeTurns | length == 1 and .[0].threadId == "00000000-0000-0000-0000-000000000004"' "$REVIEW_CONTROL_DIR/state.json" >/dev/null 2>&1; then
+        check "active native review $review_action uses accepted id and preserves other threads" 0
+    else
+        check "active native review $review_action uses accepted id and preserves other threads" 1 \
+            "control=$review_control_code waiter=$review_wait_code output=$review_control_out"
+    fi
+    node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$REVIEW_CONTROL_DIR" --force >/dev/null 2>&1 || true
+done
+
 # A native review can become idle without emitting turn/completed for its
 # provisional id. Idle status clears aliases only on that thread and retains
 # an independently active turn on another thread.
@@ -2000,6 +2038,31 @@ if jq -e 'select(.method == "turn/start") | .params | has("effort")' "$EFFORT_RP
     check "converse forces no effort when the run recorded none" 1 "rpc: $(tail -c 300 "$EFFORT_RPC_LOG" 2>/dev/null)"
 else
     check "converse forces no effort when the run recorded none" 0
+fi
+
+# Process-wide config cannot be changed on an initialized continuation host.
+# Reject unsupported overrides before accepting work under different settings.
+: > "$EFFORT_RPC_LOG"
+converse_config_out="$("$SCRIPTS_DIR/codex-review-converse.sh" fake-exec-effort \
+    --config sandbox_workspace_write.network_access=true "requires network" 2>&1)"; converse_config_code=$?
+if [[ "$converse_config_code" -ne 0 ]] \
+    && printf '%s' "$converse_config_out" | grep -qF "Unsupported continuation config" \
+    && [[ ! -s "$EFFORT_RPC_LOG" ]]; then
+    check "converse rejects unsupported config before any RPC" 0
+else
+    check "converse rejects unsupported config before any RPC" 1 \
+        "exit=$converse_config_code output=$converse_config_out rpc=$(tail -c 200 "$EFFORT_RPC_LOG")"
+fi
+
+: > "$EFFORT_RPC_LOG"
+converse_config_effort_out="$("$SCRIPTS_DIR/codex-review-converse.sh" fake-exec-effort \
+    --config model_reasoning_effort=low "supported effort config" 2>&1)"; converse_config_effort_code=$?
+if [[ "$converse_config_effort_code" -eq 0 ]] \
+    && jq -e 'select(.method == "turn/start") | .params.effort == "low"' "$EFFORT_RPC_LOG" >/dev/null 2>&1; then
+    check "converse retains supported reasoning effort config" 0
+else
+    check "converse retains supported reasoning effort config" 1 \
+        "exit=$converse_config_effort_code output=$converse_config_effort_out"
 fi
 
 node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$EFFORT_SESSION" >/dev/null 2>&1 || true

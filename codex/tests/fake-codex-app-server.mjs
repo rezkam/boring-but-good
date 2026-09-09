@@ -176,7 +176,7 @@ function handle(message) {
       return;
     }
     case "review/start":
-      if (scenario === "review-turn-id-mismatch" || scenario === "review-turn-id-mismatch-with-other") {
+      if (scenario === "review-turn-id-mismatch" || scenario === "review-turn-id-mismatch-with-other" || scenario.startsWith("review-control-")) {
         send({
           method: "turn/started",
           params: {
@@ -185,7 +185,7 @@ function handle(message) {
           },
         });
       }
-      if (scenario === "review-turn-id-mismatch-with-other") {
+      if (scenario === "review-turn-id-mismatch-with-other" || scenario.startsWith("review-control-")) {
         send({
           method: "turn/started",
           params: {
@@ -195,6 +195,7 @@ function handle(message) {
         });
       }
       send({ id: message.id, result: { turn: { id: TURN_ID, status: "inProgress", items: [], error: null }, reviewThreadId: THREAD_ID } });
+      if (scenario.startsWith("review-control-")) return;
       send({ method: "item/completed", params: { threadId: THREAD_ID, turnId: TURN_ID, completedAtMs: Date.now(), item: { type: "exitedReviewMode", id: "review-1", review: "NATIVE_REVIEW_OK" } } });
       send({ method: "turn/completed", params: { threadId: THREAD_ID, turn: { id: TURN_ID, status: "completed", items: [], error: null } } });
       return;
@@ -203,12 +204,12 @@ function handle(message) {
         send({ id: message.id, error: { code: -32602, message: "expectedTurnId required" } });
       } else {
         send({ id: message.id, result: { turnId: TURN_ID } });
-        if (scenario === "control-steer") completed("STEERED_ON_ACTIVE_CONNECTION");
+        if (scenario === "control-steer" || scenario === "review-control-steer") completed("STEERED_ON_ACTIVE_CONNECTION");
       }
       return;
     case "turn/interrupt":
       send({ id: message.id, result: {} });
-      if (scenario === "timeout" || scenario === "control-interrupt" || scenario === "hold") {
+      if (scenario === "timeout" || scenario === "control-interrupt" || scenario === "hold" || scenario === "review-control-interrupt") {
         send({ method: "turn/completed", params: { threadId: THREAD_ID, turn: { id: TURN_ID, status: "interrupted", items: [], error: null } } });
       }
       return;
