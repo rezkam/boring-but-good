@@ -162,8 +162,10 @@ test("parseModelPin requires a provider-qualified id and a known effort suffix",
 test("modelClass reads the tier table as model-and-effort pairs", () => {
 	assert.equal(modelClass("openai-codex/gpt-5.6-luna", "high"), 1);
 	assert.equal(modelClass("claude-bridge/claude-sonnet-5", "medium"), 1);
-	assert.equal(modelClass("openai-codex/gpt-5.6-terra", "medium"), 2);
-	assert.equal(modelClass("openai-codex/gpt-5.6-sol", "medium"), 3);
+	assert.equal(modelClass("openai-codex/gpt-6-astra", "low"), 2);
+	assert.equal(modelClass("openai-codex/gpt-6-astra", "medium"), 3);
+	assert.equal(modelClass("openai-codex/gpt-5.6-terra", "medium"), null);
+	assert.equal(modelClass("openai-codex/gpt-5.6-sol", "medium"), null);
 	assert.equal(modelClass("claude-bridge/claude-opus-5", "low"), 2);
 	assert.equal(modelClass("claude-bridge/claude-opus-5", "medium"), 3);
 	assert.equal(modelClass("openai-codex/gpt-5.6-luna", "off"), null);
@@ -723,7 +725,7 @@ test("an unroutable model refusal names every model that would work", () => {
 	const task = implementTask("ROUTE: s1-parser | class 1 | openai-codex/gpt-9-nova:high | mechanical edit");
 	const { code, reason } = structure(request({ input: launch({ model: "openai-codex/gpt-9-nova:high", task }) }));
 	assert.equal(code, "CG004");
-	for (const listed of ["gpt-5.6-luna:high", "claude-sonnet-5:medium", "gpt-5.6-terra:medium", "claude-opus-5:low", "gpt-5.6-sol:medium"]) {
+	for (const listed of ["gpt-5.6-luna:high", "claude-sonnet-5:medium", "gpt-6-astra:low", "claude-opus-5:low", "gpt-6-astra:medium"]) {
 		assert.match(reason, new RegExp(listed.replace(/[.]/g, "\\.")), `must list ${listed}`);
 	}
 });
@@ -799,16 +801,16 @@ test("CG004: review and implementation are separate tables, never checked agains
 	assert.match(workerClaimingReview.reason, /Review classes belong to campaign-reviewer/);
 });
 
-test("CG004: the review table is opus by effort, terra and sol at xhigh", () => {
+test("CG004: the review table uses Astra at medium and high", () => {
 	const ok = (model: string, cls: number) =>
 		evaluateStructure(
 			request({ input: reviewLaunch({ model, task: implementTask(`ROUTE: r | review ${cls} | ${model} | why`) }) }),
 		).allow;
 
 	assert.equal(ok("claude-bridge/claude-opus-5:high", 1), true);
-	assert.equal(ok("openai-codex/gpt-5.6-terra:xhigh", 1), true);
+	assert.equal(ok("openai-codex/gpt-6-astra:medium", 1), true);
 	assert.equal(ok("claude-bridge/claude-opus-5:xhigh", 2), true);
-	assert.equal(ok("openai-codex/gpt-5.6-sol:xhigh", 2), true);
+	assert.equal(ok("openai-codex/gpt-6-astra:high", 2), true);
 
 	// Same model, different effort, different class: the likeliest real refusal.
 	assert.equal(ok("claude-bridge/claude-opus-5:high", 2), false);
@@ -1060,12 +1062,12 @@ test("the GPT preset is OpenAI-only and preserves every class's intended effort"
 	assert.deepEqual(GPT_DEFAULT_TIERS, {
 		class: {
 			1: ["openai-codex/gpt-5.6-luna:high"],
-			2: ["openai-codex/gpt-5.6-terra:medium"],
-			3: ["openai-codex/gpt-5.6-sol:medium"],
+			2: ["openai-codex/gpt-6-astra:low"],
+			3: ["openai-codex/gpt-6-astra:medium"],
 		},
 		review: {
-			1: ["openai-codex/gpt-5.6-terra:xhigh"],
-			2: ["openai-codex/gpt-5.6-sol:xhigh"],
+			1: ["openai-codex/gpt-6-astra:medium"],
+			2: ["openai-codex/gpt-6-astra:high"],
 		},
 	});
 });

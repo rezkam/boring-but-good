@@ -9,8 +9,8 @@ Perform a read-only, defect-first review of a specified code change and return e
 - **Agent:** `[RUNTIME-VERIFIED READ-ONLY REVIEWER]`
 - **Description:** `Review [TARGET DESCRIPTION]`
 - **Model:** `[REQUIRED: pick from the review table in dispatch.md]`
-  - review 1: `claude-opus-5` at `high`, or `gpt-5.6-terra` at `xhigh`
-  - review 2: `claude-opus-5` at `xhigh`, or `gpt-5.6-sol` at `xhigh`
+  - review 1: `claude-opus-5` at `high`, or `gpt-6-astra` at `medium`
+  - review 2: `claude-opus-5` at `xhigh`, or `gpt-6-astra` at `high`
   - scale to review 2 for a subtle, risky, broad, or cross-layer branch
 - **Effort:** `[THE EFFORT THE REVIEW TABLE GIVES THAT MODEL; IT IS PART OF THE CLASS]`
 - **Working directory:** `[FULL REVIEW WORKTREE PATH]`

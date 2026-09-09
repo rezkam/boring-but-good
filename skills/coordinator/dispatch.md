@@ -34,8 +34,8 @@ table.
 | Implementation class | Models, preferred first | Use for |
 | --- | --- | --- |
 | 1 | `claude-sonnet-5:medium`, then `gpt-5.6-luna:high` | Complete, mechanical slices |
-| 2 | `claude-opus-5:low`, then `gpt-5.6-terra:medium` | Prose-led implementation and integration work |
-| 3 | `claude-opus-5:medium`, then `gpt-5.6-sol:medium` | Complex cross-layer or long-horizon work |
+| 2 | `claude-opus-5:low`, then `gpt-6-astra:low` | Prose-led implementation and integration work |
+| 3 | `claude-opus-5:medium`, then `gpt-6-astra:medium` | Complex cross-layer or long-horizon work |
 
 These are defaults. The enforced lists are whatever `/campaign models` shows, which is the
 authority when the two differ.
@@ -71,8 +71,8 @@ end, so the class is chosen by the risk of the whole branch rather than by stage
 
 | Review class | Equivalent models | Use for |
 | --- | --- | --- |
-| 1 | `claude-opus-5` at `high`, or `gpt-5.6-terra` at `xhigh` | Narrow or mechanical branch, low blast radius |
-| 2 | `claude-opus-5` at `xhigh`, or `gpt-5.6-sol` at `xhigh` | Subtle, risky, broad, or cross-layer branch |
+| 1 | `claude-opus-5` at `high`, or `gpt-6-astra` at `medium` | Narrow or mechanical branch, low blast radius |
+| 2 | `claude-opus-5` at `xhigh`, or `gpt-6-astra` at `high` | Subtle, risky, broad, or cross-layer branch |
 
 A review dispatch declares `review 1` or `review 2` in its routing row, never an
 implementation class, and the review always names its model explicitly, even when that

@@ -522,12 +522,12 @@ export interface TierLists {
 export const DEFAULT_TIERS: TierLists = {
 	class: {
 		1: ["claude-bridge/claude-sonnet-5:medium", "openai-codex/gpt-5.6-luna:high"],
-		2: ["claude-bridge/claude-opus-5:low", "openai-codex/gpt-5.6-terra:medium"],
-		3: ["claude-bridge/claude-opus-5:medium", "openai-codex/gpt-5.6-sol:medium"],
+		2: ["claude-bridge/claude-opus-5:low", "openai-codex/gpt-6-astra:low"],
+		3: ["claude-bridge/claude-opus-5:medium", "openai-codex/gpt-6-astra:medium"],
 	},
 	review: {
-		1: ["claude-bridge/claude-opus-5:high", "openai-codex/gpt-5.6-terra:xhigh"],
-		2: ["claude-bridge/claude-opus-5:xhigh", "openai-codex/gpt-5.6-sol:xhigh"],
+		1: ["claude-bridge/claude-opus-5:high", "openai-codex/gpt-6-astra:medium"],
+		2: ["claude-bridge/claude-opus-5:xhigh", "openai-codex/gpt-6-astra:high"],
 	},
 };
 
@@ -539,12 +539,12 @@ export const DEFAULT_TIERS: TierLists = {
 export const GPT_DEFAULT_TIERS: TierLists = {
 	class: {
 		1: ["openai-codex/gpt-5.6-luna:high"],
-		2: ["openai-codex/gpt-5.6-terra:medium"],
-		3: ["openai-codex/gpt-5.6-sol:medium"],
+		2: ["openai-codex/gpt-6-astra:low"],
+		3: ["openai-codex/gpt-6-astra:medium"],
 	},
 	review: {
-		1: ["openai-codex/gpt-5.6-terra:xhigh"],
-		2: ["openai-codex/gpt-5.6-sol:xhigh"],
+		1: ["openai-codex/gpt-6-astra:medium"],
+		2: ["openai-codex/gpt-6-astra:high"],
 	},
 };
 
@@ -633,7 +633,7 @@ export function parseTierEntries(raw: string): { ok: true; entries: string[] } |
 			return { ok: false, error: `"${entry}" is not provider/model:effort. A class is a model at an effort, so both are required.` };
 		}
 		if (!entry.includes("/")) {
-			return { ok: false, error: `"${entry}" has no provider prefix. Write it the way the local harness spells it, for example openai-codex/gpt-5.6-terra:xhigh.` };
+			return { ok: false, error: `"${entry}" has no provider prefix. Write it the way the local harness spells it, for example openai-codex/gpt-6-astra:high.` };
 		}
 	}
 	return { ok: true, entries };
@@ -1313,7 +1313,7 @@ function checkRoute(route: RouteHeader, agent: string | undefined, tiers: TierLi
 		}
 		return deny(
 			"CG004",
-			`${pin.id} is not in the ${axis} table, so its ${axis} cannot be checked. Route to one of these exactly, model and effort together:\n${table}\nThe provider prefix stays as your harness spells it, for example openai-codex/gpt-5.6-terra:xhigh.`,
+			`${pin.id} is not in the ${axis} table, so its ${axis} cannot be checked. Route to one of these exactly, model and effort together:\n${table}\nThe provider prefix stays as your harness spells it, for example openai-codex/gpt-6-astra:high.`,
 		);
 	}
 	if (actualClass !== route.cls) {
