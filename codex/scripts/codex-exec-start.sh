@@ -129,6 +129,7 @@ mkdir -p "$RUN_DIR" "$CONV_DIR"
 
 codex_review_create_meta "$RUN_ID" "$WORKDIR" "exec-task" "" "$TITLE" "" "$MODEL" "$SANDBOX" "$LOG_FILE" "$REPORT_FILE" "$CONV_DIR"
 codex_review_set_meta_field "$RUN_ID" kind "exec"
+codex_review_set_meta_field "$RUN_ID" network "$NETWORK"
 if [[ -n "$EFFORT" ]]; then
     codex_review_set_meta_field "$RUN_ID" effort "$EFFORT"
 fi

@@ -580,6 +580,48 @@ else
     check "managed session shuts down cleanly after its leases finish" 1
 fi
 
+# A persistent connection must discard historical streaming deltas. Disable
+# event files for this memory probe so it measures retained protocol history.
+MEMORY_SESSION="$WORK/notification-memory"
+NODE_OPTIONS="--max-old-space-size=48" PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=notification-storm \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$MEMORY_SESSION" \
+    --events "" --approval decline >/dev/null 2>&1
+memory_request_out="$(timeout 20 node "$SCRIPTS_DIR/codex-app-server.mjs" request \
+    --session-dir "$MEMORY_SESSION" --method model/list 2>&1)"; memory_request_code=$?
+memory_turn_out="$(timeout 10 node "$SCRIPTS_DIR/codex-app-server.mjs" turn \
+    --session-dir "$MEMORY_SESSION" --new --prompt "after stream" --sandbox read-only 2>&1)"; memory_turn_code=$?
+if [[ "$memory_request_code" -eq 0 && "$memory_turn_code" -eq 0 ]] \
+    && printf '%s' "$memory_turn_out" | jq -e '.text == "APP_SERVER_FAKE_OK"' >/dev/null 2>&1; then
+    check "persistent host survives notification history larger than its heap" 0
+else
+    check "persistent host survives notification history larger than its heap" 1 \
+        "request=$memory_request_code turn=$memory_turn_code output=$memory_request_out"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$MEMORY_SESSION" --force >/dev/null 2>&1 || true
+
+# Early notifications for overlapping starts belong to each individual waiter.
+CONCURRENT_SESSION="$WORK/concurrent-notification-race"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=concurrent-notification-race \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$CONCURRENT_SESSION" \
+    --approval decline >/dev/null 2>&1
+node "$SCRIPTS_DIR/codex-app-server.mjs" turn --session-dir "$CONCURRENT_SESSION" \
+    --new --prompt FIRST --sandbox read-only >"$WORK/concurrent-first.json" 2>&1 &
+CONCURRENT_FIRST_PID=$!
+node "$SCRIPTS_DIR/codex-app-server.mjs" turn --session-dir "$CONCURRENT_SESSION" \
+    --new --prompt SECOND --sandbox read-only >"$WORK/concurrent-second.json" 2>&1 &
+CONCURRENT_SECOND_PID=$!
+if wait "$CONCURRENT_FIRST_PID"; then concurrent_first_code=0; else concurrent_first_code=$?; fi
+if wait "$CONCURRENT_SECOND_PID"; then concurrent_second_code=0; else concurrent_second_code=$?; fi
+if [[ "$concurrent_first_code" -eq 0 && "$concurrent_second_code" -eq 0 ]] \
+    && jq -e '.text == "FIRST"' "$WORK/concurrent-first.json" >/dev/null 2>&1 \
+    && jq -e '.text == "SECOND"' "$WORK/concurrent-second.json" >/dev/null 2>&1; then
+    check "concurrent starts preserve their own early terminal notifications" 0
+else
+    check "concurrent starts preserve their own early terminal notifications" 1 \
+        "first=$concurrent_first_code second=$concurrent_second_code"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$CONCURRENT_SESSION" --force >/dev/null 2>&1 || true
+
 # Managed workspace-write must keep its controller and HMAC credential out of
 # every effective writable root. The fake session root is under /tmp, and the
 # second session is also nested directly inside the requested workdir. Both
@@ -1254,6 +1296,36 @@ fi
 timeout 8 node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown \
     --session-dir "$MANAGED_ARCHIVE_FAILURE_DIR" --force >/dev/null 2>&1 || true
 
+# Ordinary notification archival failures must take the same terminal cleanup
+# path as reverse-request failures, including active leases and controller keys.
+ORDINARY_ARCHIVE_DIR="$WORK/ordinary-archive-failure"
+PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=ordinary-archive-failure \
+    node "$SCRIPTS_DIR/codex-app-server.mjs" start --session-dir "$ORDINARY_ARCHIVE_DIR" \
+    --approval decline >/dev/null 2>&1
+node "$SCRIPTS_DIR/codex-app-server.mjs" turn --session-dir "$ORDINARY_ARCHIVE_DIR" \
+    --new --prompt "ordinary archival failure" --sandbox read-only \
+    >"$WORK/ordinary-archive-client.json" 2>&1 &
+ORDINARY_ARCHIVE_CLIENT_PID=$!
+for _ in $(seq 1 100); do
+    jq -e 'select(.method == "client/turnStarted")' "$ORDINARY_ARCHIVE_DIR/events.jsonl" >/dev/null 2>&1 && break
+    sleep 0.01
+done
+mv "$ORDINARY_ARCHIVE_DIR/events.jsonl" "$ORDINARY_ARCHIVE_DIR/events.saved"
+mkdir "$ORDINARY_ARCHIVE_DIR/events.jsonl"
+if wait "$ORDINARY_ARCHIVE_CLIENT_PID"; then ordinary_archive_code=0; else ordinary_archive_code=$?; fi
+for _ in $(seq 1 100); do
+    jq -e '.status == "closed"' "$ORDINARY_ARCHIVE_DIR/state.json" >/dev/null 2>&1 && break
+    sleep 0.02
+done
+if [[ "$ordinary_archive_code" -ne 0 ]] \
+    && jq -e '.status == "closed" and .activeTurns == [] and .pendingRequests == [] and .leaseCount == 0 and (.error | contains("archive"))' "$ORDINARY_ARCHIVE_DIR/state.json" >/dev/null 2>&1; then
+    check "ordinary notification archival failure closes host and releases leases" 0
+else
+    check "ordinary notification archival failure closes host and releases leases" 1 \
+        "exit=$ordinary_archive_code state=$(jq -c '{status,leaseCount,error}' "$ORDINARY_ARCHIVE_DIR/state.json")"
+fi
+node "$SCRIPTS_DIR/codex-app-server.mjs" shutdown --session-dir "$ORDINARY_ARCHIVE_DIR" --force >/dev/null 2>&1 || true
+
 MANAGED_AUTO_DIR="$WORK/managed-auto-resolution"
 : > "$APP_SERVER_LOG"
 PATH="$FAKE_CODEX_BIN:$PATH" FAKE_APP_SERVER_SCENARIO=auto-resolve \
@@ -1812,6 +1884,33 @@ else
     check "status does not reconcile while another local command lease is active" 1 "got: $(printf '%s' "$out" | head -c 200)"
 fi
 
+# A dead waiter cannot leave an idle persistent host publicly running after
+# failed or interrupted work, which produces no report.
+for orphan_terminal in failed interrupted; do
+    orphan_failed_run="fake-orphan-$orphan_terminal"
+    fabricate_exec_run "$orphan_failed_run" "$WEDGE_PID" "00000000-0000-0000-0000-000000000001"
+    orphan_failed_session="$CODEX_REVIEW_HOME/runs/$orphan_failed_run/session"
+    mkdir -p "$orphan_failed_session"
+    (
+        source "$SCRIPTS_DIR/_helpers.sh"
+        codex_review_set_meta_field "$orphan_failed_run" turn_client_pid 999998 number
+        codex_review_set_meta_field "$orphan_failed_run" session_dir "$orphan_failed_session"
+    )
+    jq -n --argjson pid "$WEDGE_PID" '{status:"ready",pid:$pid,activeTurns:[],pendingRequests:[],leaseCount:0}' \
+        > "$orphan_failed_session/state.json"
+    jq -n --arg status "$orphan_terminal" '{method:"turn/completed",params:{threadId:"00000000-0000-0000-0000-000000000001",turn:{id:"orphan-turn",status:$status}}}' \
+        > "$CODEX_REVIEW_HOME/runs/$orphan_failed_run/events.log"
+    orphan_failed_status="$("$SCRIPTS_DIR/codex-status.sh" "$orphan_failed_run" --json 2>&1)"
+    orphan_failed_watch="$("$SCRIPTS_DIR/codex-watch.sh" "$orphan_failed_run" --interval 1 --timeout 1 2>&1)"; orphan_failed_watch_code=$?
+    if printf '%s' "$orphan_failed_status" | jq -e '.status == "failed" and .verdict == "failed" and .exit_code == 1' >/dev/null 2>&1 \
+        && [[ "$orphan_failed_watch_code" -eq 2 ]]; then
+        check "status and watch terminate for orphaned $orphan_terminal turn without report" 0
+    else
+        check "status and watch terminate for orphaned $orphan_terminal turn without report" 1 \
+            "watch=$orphan_failed_watch_code status=$orphan_failed_status"
+    fi
+done
+
 # Machine-readable form for coordinators.
 out="$("$SCRIPTS_DIR/codex-exec-status.sh" fake-exec-dead --json 2>&1)"
 if printf '%s' "$out" | jq -e '.verdict == "dead" and .kind == "exec" and .codex_pid == null and .network_active == false and .child_cmd_running == false' >/dev/null 2>&1; then
@@ -2011,6 +2110,7 @@ effort_set() { ( source "$SCRIPTS_DIR/_helpers.sh"; codex_review_set_meta_field 
 
 fabricate_exec_run "fake-exec-effort" "" "00000000-0000-0000-0000-000000000042"
 effort_set fake-exec-effort status "completed"
+effort_set fake-exec-effort sandbox "read-only"
 effort_set fake-exec-effort effort "medium"
 effort_set fake-exec-effort session_dir "$EFFORT_SESSION"
 : > "$EFFORT_RPC_LOG"
@@ -2031,6 +2131,7 @@ fi
 
 fabricate_exec_run "fake-exec-effort-none" "" "00000000-0000-0000-0000-000000000043"
 effort_set fake-exec-effort-none status "completed"
+effort_set fake-exec-effort-none sandbox "read-only"
 effort_set fake-exec-effort-none session_dir "$EFFORT_SESSION"
 : > "$EFFORT_RPC_LOG"
 "$SCRIPTS_DIR/codex-review-converse.sh" fake-exec-effort-none "hi" >/dev/null 2>&1 || true
@@ -2038,6 +2139,34 @@ if jq -e 'select(.method == "turn/start") | .params | has("effort")' "$EFFORT_RP
     check "converse forces no effort when the run recorded none" 1 "rpc: $(tail -c 300 "$EFFORT_RPC_LOG" 2>/dev/null)"
 else
     check "converse forces no effort when the run recorded none" 0
+fi
+
+# A changed continuation workdir must revalidate the recorded sandbox policy.
+fabricate_exec_run "fake-exec-unsafe-continuation" "" "00000000-0000-0000-0000-000000000044"
+effort_set fake-exec-unsafe-continuation status "completed"
+effort_set fake-exec-unsafe-continuation session_dir "$EFFORT_SESSION"
+: > "$EFFORT_RPC_LOG"
+unsafe_continuation_out="$("$SCRIPTS_DIR/codex-review-converse.sh" fake-exec-unsafe-continuation \
+    --workdir "$WORK" "continue in changed workdir" 2>&1)"; unsafe_continuation_code=$?
+if [[ "$unsafe_continuation_code" -ne 0 ]] \
+    && grep -qF "managed workspace-write" "$CODEX_REVIEW_HOME/runs/fake-exec-unsafe-continuation/conv/"*.stderr.log \
+    && [[ ! -s "$EFFORT_RPC_LOG" ]]; then
+    check "workspace-write continuation rejects controller inside changed workdir before RPC" 0
+else
+    check "workspace-write continuation rejects controller inside changed workdir before RPC" 1 \
+        "exit=$unsafe_continuation_code output=$unsafe_continuation_out"
+fi
+
+: > "$EFFORT_RPC_LOG"
+effort_set fake-exec-effort-none network "true"
+safe_continuation_out="$("$SCRIPTS_DIR/codex-review-converse.sh" fake-exec-effort-none \
+    "continue recorded policy" 2>&1)"; safe_continuation_code=$?
+if [[ "$safe_continuation_code" -eq 0 ]] \
+    && jq -e 'select(.method == "turn/start") | .params.sandboxPolicy == {type:"readOnly", networkAccess:true}' "$EFFORT_RPC_LOG" >/dev/null 2>&1; then
+    check "continuation forwards recorded sandbox and network policy" 0
+else
+    check "continuation forwards recorded sandbox and network policy" 1 \
+        "exit=$safe_continuation_code output=$safe_continuation_out"
 fi
 
 # Process-wide config cannot be changed on an initialized continuation host.

@@ -2,6 +2,7 @@
 
 import { appendFileSync } from "node:fs";
 import readline from "node:readline";
+import { once } from "node:events";
 
 const THREAD_ID = "00000000-0000-0000-0000-000000000001";
 const TURN_ID = "00000000-0000-0000-0000-000000000002";
@@ -45,6 +46,8 @@ const scenario = process.env.FAKE_APP_SERVER_SCENARIO ?? "complete";
 const logFile = process.env.FAKE_APP_SERVER_LOG;
 const pidFile = process.env.FAKE_CODEX_PID_FILE;
 const pendingApprovalIds = new Set([901, 902, 903, 904, 905, 906]);
+let threadSequence = 10;
+let notificationStormSent = false;
 
 if (pidFile) appendFileSync(pidFile, `${process.pid}\n`, "utf8");
 
@@ -104,6 +107,15 @@ function sendApprovalRequests() {
   send({ id: 906, method: "item/tool/call", params: { threadId: THREAD_ID, turnId: TURN_ID, itemId: "tool-1", tool: "fake", arguments: {} } });
 }
 
+async function sendNotificationStorm(requestId) {
+  const delta = "x".repeat(65_536);
+  for (let index = 0; index < 2_048; index += 1) {
+    const writable = process.stdout.write(`${JSON.stringify({ method: "item/agentMessage/delta", params: { threadId: THREAD_ID, turnId: TURN_ID, delta } })}\n`);
+    if (!writable) await once(process.stdout, "drain");
+  }
+  send({ id: requestId, result: { data: MODELS, nextCursor: null } });
+}
+
 function handle(message) {
   record(message);
 
@@ -125,6 +137,10 @@ function handle(message) {
     case "initialized":
       return;
     case "thread/start":
+      if (scenario === "concurrent-notification-race") {
+        send({ id: message.id, result: { thread: { id: `thread-${threadSequence++}` } } });
+        return;
+      }
       send({
         id: message.id,
         result: {
@@ -138,6 +154,15 @@ function handle(message) {
       send({ id: message.id, result: { thread: { id: THREAD_ID } } });
       return;
     case "turn/start": {
+      if (scenario === "concurrent-notification-race") {
+        const threadId = message.params.threadId;
+        const turnId = `${threadId}-turn`;
+        const text = message.params.input[0].text;
+        send({ method: "item/completed", params: { threadId, turnId, item: { type: "agentMessage", id: `${turnId}-message`, text } } });
+        send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed", items: [] } } });
+        setTimeout(() => send({ id: message.id, result: { turn: { id: turnId } } }), text === "FIRST" ? 100 : 10);
+        return;
+      }
       const response = { id: message.id, result: { turn: { id: TURN_ID, status: "inProgress", items: [], error: null } } };
       if (scenario === "rpc-error") {
         send({ id: message.id, error: { code: -32602, message: "bad turn params" } });
@@ -146,7 +171,10 @@ function handle(message) {
         send(response);
       } else {
         send(response);
-        if (scenario === "complete" || scenario === "review-turn-id-mismatch" || scenario.startsWith("model-")) completed();
+        if (scenario === "complete" || scenario === "notification-storm" || scenario === "review-turn-id-mismatch" || scenario.startsWith("model-")) completed();
+        if (scenario === "ordinary-archive-failure") {
+          setTimeout(() => send({ method: "item/started", params: { threadId: THREAD_ID, turnId: TURN_ID, item: { type: "commandExecution", id: "ordinary-item" } } }), 500);
+        }
         if (scenario === "delayed-complete") setTimeout(() => completed("DELAYED_COMPLETE_OK"), 5_000);
         if (scenario === "approvals") sendApprovalRequests();
         if (scenario === "auto-resolve") {
@@ -214,6 +242,11 @@ function handle(message) {
       }
       return;
     case "model/list":
+      if (scenario === "notification-storm" && !notificationStormSent) {
+        notificationStormSent = true;
+        void sendNotificationStorm(message.id);
+        return;
+      }
       if (scenario === "thread-idle-with-other-active") {
         send({
           method: "turn/started",

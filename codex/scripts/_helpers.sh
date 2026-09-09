@@ -562,10 +562,10 @@ codex_skill_status_json() {
           report_file: $report_file}'
 }
 
-# Persist completion when a tracked turn waiter disappeared after App Server
-# accepted the turn but the persistent host finished it. New App Server runs
-# record the short waiter separately from the long-lived host. Legacy runs do
-# not, so they retain the old dead-pid plus report fallback.
+# Reconcile a tracked turn waiter that disappeared after App Server accepted
+# the turn. An idle host without a report is terminal failure, not live work.
+# New App Server runs record the short waiter separately from the long-lived
+# host. Legacy runs retain the old dead-pid plus report fallback.
 codex_skill_reconcile_orphaned_run() {
     local run_id="$1"
     local meta_file kind status report_file turn_client_pid session_dir legacy_pid
@@ -578,7 +578,6 @@ codex_skill_reconcile_orphaned_run() {
     [[ "$status" == "running" || "$status" == "queued" ]] || return 0
 
     report_file="$(codex_review_get_meta_field "$run_id" report_file)"
-    [[ -n "$report_file" && "$report_file" != "null" && -s "$report_file" ]] || return 0
 
     turn_client_pid="$(codex_review_get_meta_field "$run_id" turn_client_pid)"
     if [[ -n "$turn_client_pid" && "$turn_client_pid" != "null" ]]; then
@@ -591,10 +590,15 @@ codex_skill_reconcile_orphaned_run() {
             and ((.pendingRequests // []) | length == 0)
             and (.leaseCount == 0)
         ' "$session_dir/state.json" >/dev/null 2>&1 || return 0
-        codex_review_update_status "$run_id" "completed"
+        if [[ -n "$report_file" && "$report_file" != "null" && -s "$report_file" ]]; then
+            codex_review_update_status "$run_id" "completed"
+        else
+            codex_review_update_status "$run_id" "failed" 1
+        fi
         return 0
     fi
 
+    [[ -n "$report_file" && "$report_file" != "null" && -s "$report_file" ]] || return 0
     legacy_pid="$(codex_review_get_meta_field "$run_id" pid)"
     if [[ -z "$legacy_pid" || "$legacy_pid" == "null" ]] || ! kill -0 "$legacy_pid" 2>/dev/null; then
         codex_review_update_status "$run_id" "completed"

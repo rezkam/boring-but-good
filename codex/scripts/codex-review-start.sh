@@ -202,7 +202,7 @@ REPORT_FILE="$RUN_DIR/report.md"
 CONV_DIR="$RUN_DIR/conversations"
 mkdir -p "$RUN_DIR" "$CONV_DIR"
 
-codex_review_create_meta "$RUN_ID" "$WORKDIR" "$SCOPE" "$SCOPE_VALUE" "$TITLE" "$PRESET" "$MODEL" "" "$LOG_FILE" "$REPORT_FILE" "$CONV_DIR"
+codex_review_create_meta "$RUN_ID" "$WORKDIR" "$SCOPE" "$SCOPE_VALUE" "$TITLE" "$PRESET" "$MODEL" "read-only" "$LOG_FILE" "$REPORT_FILE" "$CONV_DIR"
 codex_review_set_meta_field "$RUN_ID" error_log "$ERROR_FILE"
 if [[ -n "$EFFORT" ]]; then
     codex_review_set_meta_field "$RUN_ID" effort "$EFFORT"

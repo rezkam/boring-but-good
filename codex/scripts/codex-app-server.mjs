@@ -329,7 +329,6 @@ class CodexAppServerClient {
     this.nextId = 1;
     this.pending = new Map();
     this.notificationHandlers = new Set();
-    this.notifications = [];
     this.closeHandlers = new Set();
     this.stderrTail = "";
     this.eventWrite = Promise.resolve();
@@ -452,6 +451,12 @@ class CodexAppServerClient {
       () => appendJson(this.options.events, recorded),
       () => appendJson(this.options.events, recorded),
     );
+    // Notifications do not await archival. Observe every write rejection here
+    // so storage failures still invalidate waiters and run host cleanup.
+    void this.eventWrite.catch((error) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.invalidate(new AppServerClosedError(`failed to archive app-server event: ${detail}`));
+    });
     return this.eventWrite;
   }
 
@@ -497,7 +502,6 @@ class CodexAppServerClient {
       return;
     }
     if (message.method) {
-      this.notifications.push(message);
       void this.recordEvent(message);
       for (const handler of this.notificationHandlers) {
         Promise.resolve(handler(message)).catch(() => undefined);
@@ -766,7 +770,23 @@ async function establishThread(client, options) {
   return threadId;
 }
 
-async function waitForTurn(client, options, turnId, threadId) {
+function captureTurnStartNotifications(client, threadId) {
+  const notifications = [];
+  const remove = client.addNotificationHandler((notification) => {
+    if (!["item/started", "item/completed", "turn/completed"].includes(notification.method)) return;
+    const notificationThread = notification.params?.threadId ?? notification.params?.thread?.id;
+    if (notificationThread && notificationThread !== threadId) return;
+    notifications.push(notification);
+  });
+  return {
+    finish() {
+      remove();
+      return notifications.splice(0);
+    },
+  };
+}
+
+async function waitForTurn(client, options, turnId, threadId, earlyNotifications = []) {
   const timeoutMs = Number(options.timeout ?? DEFAULT_TIMEOUT_MS / 1000) * 1000;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) fail("--timeout must be a positive number of seconds");
   const assistantTexts = [];
@@ -805,7 +825,7 @@ async function waitForTurn(client, options, turnId, threadId) {
       removeClose();
       rejectFinish(error);
     });
-    for (const notification of client.notifications) processNotification(notification);
+    for (const notification of earlyNotifications) processNotification(notification);
     if (client.closed) {
       clientClosed = client.closeError ?? new AppServerClosedError("codex app-server client is closed");
       removeNotifications();
@@ -861,8 +881,10 @@ async function runTurnOnClient(client, options, useLegacyControl = false) {
   const prompt = await readPrompt(options);
   await validateReasoningEffort(client, options);
   let controlChannel;
+  let startNotifications;
   try {
     const threadId = await establishThread(client, options);
+    startNotifications = captureTurnStartNotifications(client, threadId);
     let activeTurnId;
     const started = await client.request("turn/start", {
       threadId,
@@ -880,10 +902,11 @@ async function runTurnOnClient(client, options, useLegacyControl = false) {
       controlChannel = await createControlChannel(client, options, threadId, () => activeTurnId);
     }
     await client.recordEvent({ method: "client/turnStarted", params: { threadId, turnId } });
-    const result = await waitForTurn(client, options, turnId, threadId);
+    const result = await waitForTurn(client, options, turnId, threadId, startNotifications.finish());
     await writeText(options.report, result.text ? `${result.text}\n` : "");
     return { threadId, turnId, model: options.model, effort: options.effort, ...result };
   } finally {
+    startNotifications?.finish();
     options.onTurnFinished?.();
     await controlChannel?.close();
   }
@@ -936,8 +959,10 @@ async function runReviewOnClient(client, options, useLegacyControl = false) {
   });
   await validateReasoningEffort(client, options);
   let controlChannel;
+  let startNotifications;
   try {
     const threadId = await establishThread(client, options);
+    startNotifications = captureTurnStartNotifications(client, threadId);
     let activeTurnId;
     const started = await client.request("review/start", {
       threadId,
@@ -951,10 +976,11 @@ async function runReviewOnClient(client, options, useLegacyControl = false) {
     if (useLegacyControl) {
       controlChannel = await createControlChannel(client, options, threadId, () => activeTurnId);
     }
-    const result = await waitForTurn(client, options, turnId, threadId);
+    const result = await waitForTurn(client, options, turnId, threadId, startNotifications.finish());
     await writeText(options.report, result.text ? `${result.text}\n` : "");
     return { threadId, turnId, model: options.model, effort: options.effort, ...result };
   } finally {
+    startNotifications?.finish();
     options.onTurnFinished?.();
     await controlChannel?.close();
   }

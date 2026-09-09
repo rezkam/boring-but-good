@@ -233,6 +233,13 @@ ERROR_FILE="$CONV_DIR/converse-${STAMP}.stderr.log"
 # Keep all follow-up turns on the existing bidirectional connection so server
 # notifications and requests remain visible to the same session owner.
 APP_SERVER_CMD=(node "$SCRIPT_DIR/codex-app-server.mjs" turn --session-dir "$SESSION_DIR" --thread "$SESSION_ID" --prompt "$PROMPT" --workdir "$WORKDIR" --report "$OUT_FILE")
+SANDBOX="$(codex_review_get_meta_field "$RUN_ID" sandbox)"
+if [[ -n "$SANDBOX" && "$SANDBOX" != "null" ]]; then
+    APP_SERVER_CMD+=(--sandbox "$SANDBOX")
+fi
+if [[ "$(codex_review_get_meta_field "$RUN_ID" network)" == "true" ]]; then
+    APP_SERVER_CMD+=(--network)
+fi
 if [[ -n "$MODEL" ]]; then
     APP_SERVER_CMD+=(--model "$MODEL")
 fi
