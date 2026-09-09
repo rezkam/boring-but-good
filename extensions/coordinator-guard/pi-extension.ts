@@ -365,7 +365,8 @@ export default function coordinatorGuard(pi: ExtensionAPI) {
 			try {
 				notice(message);
 				notify(ctx, message, level);
-				scheduleContinuation(ctx);
+				// agent_end owns the decision to continue. Its timer waits through compaction;
+				// creating another here would override an abort or an exhausted retry limit.
 			} catch {
 				// The session is gone, so there is nothing left to continue into.
 			}

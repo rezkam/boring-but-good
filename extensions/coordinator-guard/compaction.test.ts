@@ -275,3 +275,37 @@ test("partial work lands in the transcript, so it invalidates an older boundary 
 	assert.equal(pi.compactCalls.length, 1);
 	assert.match(pi.compactCalls[0]?.customInstructions ?? "", /s2-render/);
 });
+
+for (const result of ["complete", "error"] as const) {
+	test(`compaction ${result} preserves an aborted turn's decision to stop`, async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
+		const pi = harness();
+		await campaignWithLane(pi);
+		await pi.call("coordinator_lane", { action: "integrated", key: "s1-parser", slice: "done" });
+		await pi.emit("agent_end", { messages: [{ role: "assistant", stopReason: "aborted" }] });
+		await pi.emit("agent_settled");
+		assert.equal(pi.compactCalls.length, 1);
+
+		if (result === "complete") pi.compactCalls[0]?.onComplete?.(undefined);
+		else pi.compactCalls[0]?.onError?.(new Error("Compaction failed"));
+		t.mock.timers.tick(5 * 60_000);
+		assert.equal(pi.sent.length, 0, "compaction must not restart a turn the user aborted");
+	});
+
+	test(`an eligible continuation waits for compaction ${result}`, async (t) => {
+		t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
+		const pi = harness();
+		await campaignWithLane(pi);
+		await pi.call("coordinator_lane", { action: "integrated", key: "s1-parser", slice: "done" });
+		await pi.emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] });
+		await pi.emit("agent_settled");
+		assert.equal(pi.compactCalls.length, 1);
+		t.mock.timers.tick(1);
+		assert.equal(pi.sent.length, 0, "the continuation waits while compaction is running");
+
+		if (result === "complete") pi.compactCalls[0]?.onComplete?.(undefined);
+		else pi.compactCalls[0]?.onError?.(new Error("Compaction failed"));
+		t.mock.timers.tick(15_000);
+		assert.equal(pi.sent.length, 1, "the existing timer resumes the eligible campaign");
+	});
+}
