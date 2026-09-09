@@ -11,10 +11,18 @@ import * as geminiSearchRuntime from '../runtime.mjs';
 const {
   GEMINI_SEARCH_MODEL,
   queryGeminiWithAiChat,
+  resolveBrowserToolsModuleUrl,
   buildGeminiSearchPrompt,
   runGeminiSearchBatch,
   stopOwnedAiChatBrowser,
 } = geminiSearchRuntime;
+
+test('Gemini search resolves Browser Tools from the AI Chat dependency location', async () => {
+  const moduleUrl = resolveBrowserToolsModuleUrl();
+  assert.match(moduleUrl, /@rezkam[\\/]browser-tools/);
+  const browserTools = await import(moduleUrl);
+  assert.equal(typeof browserTools.startChrome, 'function');
+});
 
 test('Gemini search rejects results without exact UI mode verification', async () => {
   const resultDir = await mkdtemp(join(tmpdir(), 'gemini-search-model-'));
