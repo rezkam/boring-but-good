@@ -19,6 +19,7 @@ question, is the worker actually working:
   quiet      pid alive, session exists, the event log is idle past the quiet
              window (default 180s), and network or child command activity is
              visible
+  waiting    App Server has an approval, user input, or other reverse request
   wedged     pid alive but no codex session appeared within the wedge window
              (default 180s): the classic startup hang. Kill and relaunch.
   stalled    pid alive but the event log is idle with no network connection

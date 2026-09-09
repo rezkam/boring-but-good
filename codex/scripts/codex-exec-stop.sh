@@ -11,10 +11,8 @@ usage() {
     cat <<'EOF'
 Usage: codex-exec-stop.sh [run_id|--last]
 
-Stop a running exec worker. Without a run_id (or with --last), stops the most
-recent exec run. The run stays in the list as `stopped` with its log and any
-partial work in the tree; the codex thread remains resumable via
-`codex exec resume`.
+Stop an exec worker and its persistent App Server session host. The run stays
+in the list as `stopped` with its log, durable thread id, and partial work.
 EOF
 }
 
@@ -45,21 +43,30 @@ fi
 
 PID="$(codex_review_get_meta_field "$RUN_ID" pid)"
 THREAD_ID="$(codex_review_get_meta_field "$RUN_ID" thread_id)"
+SESSION_DIR="$(codex_review_get_meta_field "$RUN_ID" session_dir)"
+if [[ -z "$SESSION_DIR" || "$SESSION_DIR" == "null" ]]; then
+    SESSION_DIR="$(codex_review_get_meta_field "$RUN_ID" control_dir)"
+fi
 
 if [[ -n "$PID" && "$PID" != "null" ]] && kill -0 "$PID" 2>/dev/null; then
-    # The recorded pid is the wrapper subshell; TERM its whole process group
-    # would be nicer, but codex runs as its child, so kill the tree.
-    pkill -TERM -P "$PID" 2>/dev/null || true
-    kill "$PID" 2>/dev/null || true
-    for _ in $(seq 1 10); do
-        kill -0 "$PID" 2>/dev/null || break
-        sleep 0.5
-    done
-    if kill -0 "$PID" 2>/dev/null; then
-        pkill -KILL -P "$PID" 2>/dev/null || true
-        kill -9 "$PID" 2>/dev/null || true
+    if [[ -n "$SESSION_DIR" && "$SESSION_DIR" != "null" && -f "$SESSION_DIR/state.json" ]]; then
+        timeout 5 node "$SCRIPT_DIR/codex-app-server.mjs" interrupt --session-dir "$SESSION_DIR" >/dev/null 2>&1 || true
+        timeout 15 node "$SCRIPT_DIR/codex-app-server.mjs" shutdown --session-dir "$SESSION_DIR" --force >/dev/null 2>&1 || true
     fi
-    echo "Stopped exec worker $RUN_ID (pid $PID). Partial changes may be in the tree; review them before relaunching."
+    if kill -0 "$PID" 2>/dev/null; then
+        # Fall back only when the session host cannot perform a clean shutdown.
+        pkill -TERM -P "$PID" 2>/dev/null || true
+        kill "$PID" 2>/dev/null || true
+        for _ in $(seq 1 10); do
+            kill -0 "$PID" 2>/dev/null || break
+            sleep 0.5
+        done
+        if kill -0 "$PID" 2>/dev/null; then
+            pkill -KILL -P "$PID" 2>/dev/null || true
+            kill -9 "$PID" 2>/dev/null || true
+        fi
+    fi
+    echo "Stopped exec worker and App Server session $RUN_ID (pid $PID). Partial changes may be in the tree; review them before recovery."
 else
     echo "Exec worker $RUN_ID was not running."
 fi
@@ -67,6 +74,5 @@ fi
 codex_review_update_status "$RUN_ID" "stopped" 0
 
 if [[ -n "$THREAD_ID" && "$THREAD_ID" != "null" ]]; then
-    echo "Session $THREAD_ID is preserved. Continue it with:"
-    echo "  codex exec resume $THREAD_ID \"<your prompt>\""
+    echo "Durable thread $THREAD_ID is preserved. Start a new session host and inspect thread/read before sending another turn."
 fi

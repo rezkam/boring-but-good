@@ -56,7 +56,6 @@ if ! RUN_ID="$(codex_resolve_run_id "$RUN_ID" review)" || [[ -z "$RUN_ID" ]]; th
     exit 1
 fi
 
-RUN_DIR="$(codex_review_run_dir "$RUN_ID")"
 META_FILE="$(codex_review_meta_file "$RUN_ID")"
 if [[ ! -f "$META_FILE" ]]; then
     echo "Metadata missing for run $RUN_ID" >&2
@@ -73,6 +72,7 @@ if [[ "$FOLLOW" == "true" ]]; then
     exit 0
 fi
 
+codex_skill_reconcile_orphaned_run "$RUN_ID"
 STATUS="$(codex_review_get_meta_field "$RUN_ID" status)"
 PID="$(codex_review_get_meta_field "$RUN_ID" pid)"
 SESSION_ID="$(codex_review_get_meta_field "$RUN_ID" thread_id)"
@@ -82,10 +82,20 @@ SCOPE_VALUE="$(codex_review_get_meta_field "$RUN_ID" scope_value)"
 TITLE="$(codex_review_get_meta_field "$RUN_ID" title)"
 PRESET="$(codex_review_get_meta_field "$RUN_ID" preset)"
 LOG_FILE="$(codex_review_get_meta_field "$RUN_ID" log_file)"
+ERROR_FILE="$(codex_review_get_meta_field "$RUN_ID" error_log)"
 REPORT_FILE="$(codex_review_get_meta_field "$RUN_ID" report_file)"
 CREATED="$(codex_review_get_meta_field "$RUN_ID" created_at)"
 UPDATED="$(codex_review_get_meta_field "$RUN_ID" updated_at)"
 EXIT_CODE="$(codex_review_get_meta_field "$RUN_ID" exit_code)"
+SESSION_DIR="$(codex_review_get_meta_field "$RUN_ID" session_dir)"
+HOST_STATUS="none"
+ACTIVE_TURNS=0
+PENDING_REQUESTS=0
+if [[ -n "$SESSION_DIR" && "$SESSION_DIR" != "null" && -f "$SESSION_DIR/state.json" ]]; then
+    HOST_STATUS="$(jq -r '.status // "unknown"' "$SESSION_DIR/state.json")"
+    ACTIVE_TURNS="$(jq -r '.activeTurns | length' "$SESSION_DIR/state.json")"
+    PENDING_REQUESTS="$(jq -r '.pendingRequests | length' "$SESSION_DIR/state.json")"
+fi
 
 if [[ -z "$SESSION_ID" || "$SESSION_ID" == "null" ]]; then
     SESSION_ID="$(codex_review_extract_session_id_from_log "$LOG_FILE" || true)"
@@ -123,10 +133,15 @@ if [[ "$OUTPUT_JSON" == "true" ]]; then
         --arg preset "$PRESET" \
         --arg pid "$PID" \
         --arg log_file "$LOG_FILE" \
+        --arg error_file "$ERROR_FILE" \
         --arg report_file "$REPORT_FILE" \
         --arg created "$CREATED" \
         --arg updated "$UPDATED" \
         --arg exit_code "$EXIT_CODE" \
+        --arg session_dir "$SESSION_DIR" \
+        --arg host_status "$HOST_STATUS" \
+        --argjson active_turns "$ACTIVE_TURNS" \
+        --argjson pending_requests "$PENDING_REQUESTS" \
         '{
             run_id: $run_id,
             status: $status,
@@ -138,11 +153,12 @@ if [[ "$OUTPUT_JSON" == "true" ]]; then
             preset: $preset,
             pid: ($pid|if . == "null" or . == "" then null else tonumber end),
             log_file: $log_file,
+            error_log: (if $error_file == "" or $error_file == "null" then null else $error_file end),
             report_file: $report_file,
             created_at: ($created | tonumber),
             updated_at: ($updated | tonumber),
             exit_code: ($exit_code | if . == "null" or . == "" then null else tonumber end)
-        }'
+        } + {session_dir: (if $session_dir == "" or $session_dir == "null" then null else $session_dir end), host_status: $host_status, active_turns: $active_turns, pending_requests: $pending_requests}'
     exit 0
 fi
 
@@ -165,10 +181,12 @@ printf "title: %s\n" "${TITLE:-<none>}"
 printf "preset: %s\n" "${PRESET:-<none>}"
 printf "session_id: %s\n" "${SESSION_ID:-pending}"
 printf "pid: %s\n" "${PID:-none}"
+printf "app_server: status=%s active_turns=%s pending_requests=%s\n" "$HOST_STATUS" "$ACTIVE_TURNS" "$PENDING_REQUESTS"
 printf "created_at: %s\n" "$(date -u -d "@$CREATED" +"%Y-%m-%dT%H:%M:%SZ")"
 printf "updated_at: %s\n" "$(date -u -d "@$UPDATED" +"%Y-%m-%dT%H:%M:%SZ")"
 printf "exit_code: %s\n" "${EXIT_CODE:-null}"
 printf "log_file: %s\n" "$LOG_FILE"
+[[ -n "$ERROR_FILE" && "$ERROR_FILE" != "null" ]] && printf "error_log: %s\n" "$ERROR_FILE"
 printf "report_file: %s\n" "$REPORT_FILE"
 printf "\n"
 printf "Recent activity:\n%s\n\n" "${LAST_SEEN:-No activity yet}"
