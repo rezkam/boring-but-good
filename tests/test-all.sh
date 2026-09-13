@@ -63,6 +63,7 @@ run_suite "Dependency-Track"  "$SCRIPT_DIR/test-dependency-track.sh"
 run_suite "ArgoCD"            "$SCRIPT_DIR/test-argocd.sh"
 run_suite "Codex"             "$SCRIPT_DIR/test-codex-review.sh"
 run_suite "Coordinator"       "$SCRIPT_DIR/test-coordinator.sh"
+run_suite "PR ready"          "$SCRIPT_DIR/test-pr-ready.sh"
 
 # ── Global cross-skill checks ──────────────────────────────────────────────
 
