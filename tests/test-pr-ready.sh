@@ -28,13 +28,15 @@ case "$*" in
   "rev-list --left-right --count @{upstream}...HEAD")
     case "${GIT_SCENARIO:-}" in
       upstream) echo '1 0' ;;
-      unpushed) echo '0 1' ;;
+      unpushed|behind-and-unpushed) echo '0 1' ;;
       *) echo '0 0' ;;
     esac
     ;;
   "fetch --quiet origin main") [ "${GIT_SCENARIO:-}" != fetch-fail ] ;;
   "rev-parse --verify --quiet origin/main") ;;
-  "rev-list --count HEAD..origin/main") echo 0 ;;
+  "rev-list --count HEAD..origin/main")
+    [ "${GIT_SCENARIO:-}" = behind-and-unpushed ] && echo 1 || echo 0
+    ;;
   "rev-list --count origin/main..HEAD") echo 1 ;;
   "rev-list --merges --count origin/main..HEAD") echo 0 ;;
   *) printf 'unexpected git call: %s\n' "$*" >&2; exit 2 ;;
@@ -48,15 +50,18 @@ if [ "$1 $2" = "pr view" ]; then
     head=1111111111111111111111111111111111111111
     decision=""
     checks='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://example.test/run/1"}]'
+    state=CLEAN
+    mergeable=MERGEABLE
     case "${PR_TEST_SCENARIO:-success}" in
       pending) checks='[{"__typename":"CheckRun","name":"ci","status":"IN_PROGRESS","conclusion":"","detailsUrl":"https://example.test/run/2"}]' ;;
       failure) checks='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://example.test/run/3"}]' ;;
       none) checks='[]' ;;
       mismatch) head=2222222222222222222222222222222222222222 ;;
       changes) decision=CHANGES_REQUESTED ;;
+      dirty) state=DIRTY; mergeable=CONFLICTING ;;
     esac
-    jq -n --arg head "$head" --arg decision "$decision" --argjson checks "$checks" \
-      '{number:7,isDraft:false,mergeable:"MERGEABLE",mergeStateStatus:"CLEAN",title:"mock",baseRefName:"main",headRefOid:$head,reviewDecision:$decision,url:"https://example.test/pr/7",statusCheckRollup:$checks}'
+    jq -n --arg head "$head" --arg decision "$decision" --arg state "$state" --arg mergeable "$mergeable" --argjson checks "$checks" \
+      '{number:7,isDraft:false,mergeable:$mergeable,mergeStateStatus:$state,title:"mock",baseRefName:"main",headRefOid:$head,reviewDecision:$decision,url:"https://example.test/pr/7",statusCheckRollup:$checks}'
   else
     echo 0
   fi
@@ -102,6 +107,8 @@ run_case "failed base refresh blocks readiness" success fetch-fail BASE_FETCH_FA
 run_case "remote commits block readiness" success upstream UPSTREAM_AHEAD
 run_case "local commits must be pushed" success unpushed LOCAL_UNPUSHED
 run_case "missing tracking branch must be repaired" success no-upstream NO_UPSTREAM
+run_case "base drift outranks an unpushed local commit" success behind-and-unpushed BEHIND_BASE
+run_case "GitHub conflict blocks a current branch" dirty normal CONFLICTS_WITH_BASE
 
 printf '\nResults: %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
 [ "$FAIL" -eq 0 ]

@@ -232,6 +232,7 @@ if [ "$mine" -gt 0 ];                  then echo "VERDICT        UNCOMMITTED_WOR
 elif [ "$fetch_ok" != 1 ];             then echo "VERDICT        BASE_FETCH_FAILED"
 elif [ "$has_upstream" != 1 ];         then echo "VERDICT        NO_UPSTREAM"
 elif [ "$behind" -gt 0 ];              then echo "VERDICT        UPSTREAM_AHEAD"
+elif [ "$behind_base" -gt 0 ];         then echo "VERDICT        BEHIND_BASE"
 elif [ "$ahead" -gt 0 ];               then echo "VERDICT        LOCAL_UNPUSHED"
 elif [ "$local_sha" != "$pr_head" ];   then echo "VERDICT        PR_HEAD_MISMATCH"
 elif [ "$isdraft" = "true" ];          then echo "VERDICT        IS_DRAFT"

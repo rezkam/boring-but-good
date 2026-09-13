@@ -47,6 +47,20 @@ explicit exception, zero checks means the new pipeline may not have registered y
 | `BLOCKED_*` or `*_QUERY_FAILED` | Stop only when the named dependency cannot be repaired from this worktree. |
 | `READY_TO_MERGE` | Re-run once for a final fresh snapshot, then report it verbatim. |
 
+## Conflict handling
+
+Base drift and conflicts come before pushing local commits. Fetch the exact PR base and remote
+head, then probe the rebase in a disposable worktree before changing the PR branch.
+
+For each conflict, inspect the base version, branch version, surrounding callers, and tests.
+Preserve the branch's intent while adopting current base behavior. Never resolve the whole file
+with an automatic ours or theirs choice. Drop a commit only when its exact change is already in
+the base. Put any new integration repair in its own explained commit.
+
+After the replay, compare `git range-diff` and the full old-head to new-head diff. Every changed
+patch or tree difference must be intentional and explained. Run focused tests, the full project
+gate, and required running-app checks before a lease-protected force-push.
+
 ## Pipeline watch and failure loop
 
 After every push, record the PR head SHA and start a fresh watch. On every poll, verify the
