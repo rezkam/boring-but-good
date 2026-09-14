@@ -10,12 +10,18 @@ SKIP=0
 SANDBOX=$(mktemp -d)
 trap 'rm -rf "$SANDBOX"' EXIT
 
-pass() { PASS=$((PASS + 1)); printf '  OK   %s\n' "$1"; }
-fail() { FAIL=$((FAIL + 1)); printf '  FAIL %s: %s\n' "$1" "$2"; }
+pass() {
+  PASS=$((PASS + 1))
+  printf '  OK   %s\n' "$1"
+}
+fail() {
+  FAIL=$((FAIL + 1))
+  printf '  FAIL %s: %s\n' "$1" "$2"
+}
 
 mkdir -p "$SANDBOX/bin"
 
-cat > "$SANDBOX/bin/git" <<'EOF'
+cat >"$SANDBOX/bin/git" <<'EOF'
 #!/bin/bash
 head=1111111111111111111111111111111111111111
 case "$*" in
@@ -48,7 +54,7 @@ case "$*" in
 esac
 EOF
 
-cat > "$SANDBOX/bin/gh" <<'EOF'
+cat >"$SANDBOX/bin/gh" <<'EOF'
 #!/bin/bash
 if [ "$1 $2" = "pr view" ]; then
   if [[ "$*" == *statusCheckRollup* ]]; then
@@ -85,7 +91,7 @@ EOF
 
 chmod +x "$SANDBOX/bin/git" "$SANDBOX/bin/gh"
 
-cat > "$SANDBOX/bin/state-sequence" <<'EOF'
+cat >"$SANDBOX/bin/state-sequence" <<'EOF'
 #!/bin/bash
 count=0
 [ ! -f "$PR_FINAL_COUNT_FILE" ] || read -r count < "$PR_FINAL_COUNT_FILE"

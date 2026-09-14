@@ -8,7 +8,7 @@ state_command=${PR_READY_STATE_COMMAND:-"$skill_dir/pr-state.sh"}
 stability_seconds=${PR_READY_STABILITY_SECONDS:-60}
 
 case "$stability_seconds" in
-  ''|*[!0-9]*)
+  '' | *[!0-9]*)
     echo "PR_READY_STABILITY_SECONDS must be a non-negative integer." >&2
     exit 2
     ;;

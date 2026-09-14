@@ -44,22 +44,22 @@ explicit exception, zero checks means the new pipeline may not have registered y
 
 ## State loop
 
-| Verdict | Action |
-| --- | --- |
-| `UNCOMMITTED_WORK` | Identify every path. Commit only this task's changes. Exclude proven foreign paths on every later run. |
-| `NO_PR` | Push and create a non-draft PR with an explicit title and body. |
-| `LOCAL_UNPUSHED` or `NO_UPSTREAM` | Push and set tracking. Confirm the remote and PR head SHA afterward. |
-| `UPSTREAM_AHEAD` or `PR_HEAD_MISMATCH` | Fetch and reconcile before doing anything else. Do not overwrite unknown remote work. |
-| `IS_DRAFT` | Mark the PR ready. |
-| `BEHIND_BASE` or `CONFLICTS_WITH_BASE` | Rebase onto the freshly fetched base, test, then force-push with lease after required user approval. |
-| `REBASE_UNPROVEN` | Re-run with `--probe-rebase`. |
-| `CHECKS_STARTING` or `CHECKS_RUNNING` | Keep polling. A push may briefly have no checks, and queued jobs are not failures. |
-| `CHECKS_FAILING` | Diagnose and fix using the failure loop below. |
-| `CHANGES_REQUESTED` or `OPEN_REVIEW_THREADS` | Read every comment. Fix valid findings, reply with evidence to invalid ones, push, and restart the check watch. |
-| `READY_EXCEPT_REBASE` | Report which merge methods are proven and which are not. |
-| `BLOCKED_*` or `*_QUERY_FAILED` | Stop only when the named dependency cannot be repaired from this worktree. |
-| `READY_TO_MERGE` | Treat it as provisional and run `pr-final.sh`; report readiness only if the settled verdict remains `READY_TO_MERGE`. |
-| `STABILITY_CHANGED` | Fetch again, reconcile the changed PR or base state, then restart the state loop. |
+| Verdict                                      | Action                                                                                                                |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `UNCOMMITTED_WORK`                           | Identify every path. Commit only this task's changes. Exclude proven foreign paths on every later run.                |
+| `NO_PR`                                      | Push and create a non-draft PR with an explicit title and body.                                                       |
+| `LOCAL_UNPUSHED` or `NO_UPSTREAM`            | Push and set tracking. Confirm the remote and PR head SHA afterward.                                                  |
+| `UPSTREAM_AHEAD` or `PR_HEAD_MISMATCH`       | Fetch and reconcile before doing anything else. Do not overwrite unknown remote work.                                 |
+| `IS_DRAFT`                                   | Mark the PR ready.                                                                                                    |
+| `BEHIND_BASE` or `CONFLICTS_WITH_BASE`       | Rebase onto the freshly fetched base, test, then force-push with lease after required user approval.                  |
+| `REBASE_UNPROVEN`                            | Re-run with `--probe-rebase`.                                                                                         |
+| `CHECKS_STARTING` or `CHECKS_RUNNING`        | Keep polling. A push may briefly have no checks, and queued jobs are not failures.                                    |
+| `CHECKS_FAILING`                             | Diagnose and fix using the failure loop below.                                                                        |
+| `CHANGES_REQUESTED` or `OPEN_REVIEW_THREADS` | Read every comment. Fix valid findings, reply with evidence to invalid ones, push, and restart the check watch.       |
+| `READY_EXCEPT_REBASE`                        | Report which merge methods are proven and which are not.                                                              |
+| `BLOCKED_*` or `*_QUERY_FAILED`              | Stop only when the named dependency cannot be repaired from this worktree.                                            |
+| `READY_TO_MERGE`                             | Treat it as provisional and run `pr-final.sh`; report readiness only if the settled verdict remains `READY_TO_MERGE`. |
+| `STABILITY_CHANGED`                          | Fetch again, reconcile the changed PR or base state, then restart the state loop.                                     |
 
 ## Conflict handling
 

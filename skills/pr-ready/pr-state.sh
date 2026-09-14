@@ -20,17 +20,32 @@ allow_no_checks=0
 excludes=()
 
 if [ -n "${PR_READY_EXCLUDE:-}" ]; then
-  IFS=':' read -r -a env_ex <<< "$PR_READY_EXCLUDE"
+  IFS=':' read -r -a env_ex <<<"$PR_READY_EXCLUDE"
   excludes+=("${env_ex[@]}")
 fi
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --exclude)        excludes+=("$2"); shift 2 ;;
-    --probe-rebase)   probe=1; shift ;;
-    --preserve-merges) rebase_merges=1; shift ;;
-    --allow-no-checks) allow_no_checks=1; shift ;;
-    *)                pr="$1"; shift ;;
+    --exclude)
+      excludes+=("$2")
+      shift 2
+      ;;
+    --probe-rebase)
+      probe=1
+      shift
+      ;;
+    --preserve-merges)
+      rebase_merges=1
+      shift
+      ;;
+    --allow-no-checks)
+      allow_no_checks=1
+      shift
+      ;;
+    *)
+      pr="$1"
+      shift
+      ;;
   esac
 done
 
@@ -66,7 +81,11 @@ while IFS= read -r line; do
   path=${path##* -> }
   hit=0
   for ex in ${excludes+"${excludes[@]}"}; do
-    case "$path" in "$ex"|"$ex"/*) hit=1; break ;; esac
+    case "$path" in "$ex" | "$ex"/*)
+      hit=1
+      break
+      ;;
+    esac
   done
   if [ "$hit" = 1 ]; then
     foreign=$((foreign + 1))
@@ -153,7 +172,7 @@ echo "MERGE_METHODS  merge:$allow_merge squash:$allow_squash rebase:$allow_rebas
 
 # Rebase-merge viability. There is NO API field for this. The only proof is a replay.
 rebase_status="NOT_PROBED"
-rebase_risk="none"     # none | high | proven | broken
+rebase_risk="none" # none | high | proven | broken
 if [ "$allow_rebase" != "true" ]; then
   rebase_status="DISABLED_ON_REPO"
 elif [ "$probe" = 1 ]; then
@@ -225,36 +244,55 @@ echo "CHECKS         $pass passed, $fail failed, $pend running, $unknown unknown
 read -r owner name < <(gh repo view --json owner,name -q '[.owner.login, .name] | @tsv')
 threads=$(gh api graphql -f query="query{repository(owner:\"$owner\",name:\"$name\"){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved}}}}}" \
   -q '[.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved==false)]|length' 2>/dev/null)
-case "$threads" in ''|*[!0-9]*) threads="?" ;; esac
+case "$threads" in '' | *[!0-9]*) threads="?" ;; esac
 comments=$(gh pr view "$pr" --json comments -q '.comments|length' 2>/dev/null || echo "?")
 echo "OPEN_THREADS   $threads unresolved"
 echo "COMMENTS       $comments total"
 echo "REVIEW         ${decision:-NONE}"
 
 # Single verdict the caller acts on
-if [ "$mine" -gt 0 ];                  then echo "VERDICT        UNCOMMITTED_WORK"
-elif [ "$fetch_ok" != 1 ];             then echo "VERDICT        BASE_FETCH_FAILED"
-elif [ "$has_upstream" != 1 ];         then echo "VERDICT        NO_UPSTREAM"
-elif [ "$behind" -gt 0 ];              then echo "VERDICT        UPSTREAM_AHEAD"
-elif [ "$behind_base" -gt 0 ];         then echo "VERDICT        BEHIND_BASE"
-elif [ "$ahead" -gt 0 ];               then echo "VERDICT        LOCAL_UNPUSHED"
-elif [ "$local_sha" != "$pr_head" ];   then echo "VERDICT        PR_HEAD_MISMATCH"
-elif [ "$isdraft" = "true" ];          then echo "VERDICT        IS_DRAFT"
-elif [ "$state" = "DIRTY" ];           then echo "VERDICT        CONFLICTS_WITH_BASE"
-elif [ "$state" = "BEHIND" ];          then echo "VERDICT        BEHIND_BASE"
-elif [ "$fail" -gt 0 ];                then echo "VERDICT        CHECKS_FAILING"
-elif [ "$total" -eq 0 ] && [ "$allow_no_checks" != 1 ]; then echo "VERDICT        CHECKS_STARTING"
-elif [ "$pend" -gt 0 ];                then echo "VERDICT        CHECKS_RUNNING"
-elif [ "$unknown" -gt 0 ];             then echo "VERDICT        CHECKS_QUERY_FAILED"
-elif [ "$threads" = "?" ];            then echo "VERDICT        REVIEW_QUERY_FAILED"
-elif [ "$decision" = "CHANGES_REQUESTED" ]; then echo "VERDICT        CHANGES_REQUESTED"
-elif [ "$threads" != "0" ];           then echo "VERDICT        OPEN_REVIEW_THREADS"
-elif [ "$state" = "BLOCKED" ];         then echo "VERDICT        BLOCKED_NEEDS_APPROVAL"
+if [ "$mine" -gt 0 ]; then
+  echo "VERDICT        UNCOMMITTED_WORK"
+elif [ "$fetch_ok" != 1 ]; then
+  echo "VERDICT        BASE_FETCH_FAILED"
+elif [ "$has_upstream" != 1 ]; then
+  echo "VERDICT        NO_UPSTREAM"
+elif [ "$behind" -gt 0 ]; then
+  echo "VERDICT        UPSTREAM_AHEAD"
+elif [ "$behind_base" -gt 0 ]; then
+  echo "VERDICT        BEHIND_BASE"
+elif [ "$ahead" -gt 0 ]; then
+  echo "VERDICT        LOCAL_UNPUSHED"
+elif [ "$local_sha" != "$pr_head" ]; then
+  echo "VERDICT        PR_HEAD_MISMATCH"
+elif [ "$isdraft" = "true" ]; then
+  echo "VERDICT        IS_DRAFT"
+elif [ "$state" = "DIRTY" ]; then
+  echo "VERDICT        CONFLICTS_WITH_BASE"
+elif [ "$state" = "BEHIND" ]; then
+  echo "VERDICT        BEHIND_BASE"
+elif [ "$fail" -gt 0 ]; then
+  echo "VERDICT        CHECKS_FAILING"
+elif [ "$total" -eq 0 ] && [ "$allow_no_checks" != 1 ]; then
+  echo "VERDICT        CHECKS_STARTING"
+elif [ "$pend" -gt 0 ]; then
+  echo "VERDICT        CHECKS_RUNNING"
+elif [ "$unknown" -gt 0 ]; then
+  echo "VERDICT        CHECKS_QUERY_FAILED"
+elif [ "$threads" = "?" ]; then
+  echo "VERDICT        REVIEW_QUERY_FAILED"
+elif [ "$decision" = "CHANGES_REQUESTED" ]; then
+  echo "VERDICT        CHANGES_REQUESTED"
+elif [ "$threads" != "0" ]; then
+  echo "VERDICT        OPEN_REVIEW_THREADS"
+elif [ "$state" = "BLOCKED" ]; then
+  echo "VERDICT        BLOCKED_NEEDS_APPROVAL"
 elif [ "$state" = "CLEAN" ]; then
   case "$rebase_risk" in
     broken) echo "VERDICT        READY_EXCEPT_REBASE" ;;
-    high)   echo "VERDICT        REBASE_UNPROVEN" ;;
-    *)      echo "VERDICT        READY_TO_MERGE" ;;
+    high) echo "VERDICT        REBASE_UNPROVEN" ;;
+    *) echo "VERDICT        READY_TO_MERGE" ;;
   esac
-else                                        echo "VERDICT        UNKNOWN_$state"
+else
+  echo "VERDICT        UNKNOWN_$state"
 fi
