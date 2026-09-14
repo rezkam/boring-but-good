@@ -3,6 +3,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/forbidden.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 STATE="${SCRIPT_DIR}/../skills/pr-ready/pr-state.sh"
+FINAL="${SCRIPT_DIR}/../skills/pr-ready/pr-final.sh"
 PASS=0
 FAIL=0
 SKIP=0
@@ -32,8 +33,12 @@ case "$*" in
       *) echo '0 0' ;;
     esac
     ;;
-  "fetch --quiet origin main") [ "${GIT_SCENARIO:-}" != fetch-fail ] ;;
+  "fetch --quiet origin +refs/heads/main:refs/remotes/origin/main")
+    [ -z "${GIT_FETCH_LOG:-}" ] || echo "$*" > "$GIT_FETCH_LOG"
+    [ "${GIT_SCENARIO:-}" != fetch-fail ]
+    ;;
   "rev-parse --verify --quiet origin/main") ;;
+  "rev-parse origin/main") echo 3333333333333333333333333333333333333333 ;;
   "rev-list --count HEAD..origin/main")
     [ "${GIT_SCENARIO:-}" = behind-and-unpushed ] && echo 1 || echo 0
     ;;
@@ -80,6 +85,39 @@ EOF
 
 chmod +x "$SANDBOX/bin/git" "$SANDBOX/bin/gh"
 
+cat > "$SANDBOX/bin/state-sequence" <<'EOF'
+#!/bin/bash
+count=0
+[ ! -f "$PR_FINAL_COUNT_FILE" ] || read -r count < "$PR_FINAL_COUNT_FILE"
+count=$((count + 1))
+printf '%s\n' "$count" > "$PR_FINAL_COUNT_FILE"
+
+local_head=1111111111111111111111111111111111111111
+pr_head=$local_head
+base_head=3333333333333333333333333333333333333333
+verdict=READY_TO_MERGE
+case "${PR_FINAL_SCENARIO:-stable}" in
+  conflict-first) verdict=CONFLICTS_WITH_BASE ;;
+  conflict-second) [ "$count" -eq 1 ] || verdict=CONFLICTS_WITH_BASE ;;
+  head-change)
+    if [ "$count" -gt 1 ]; then
+      local_head=2222222222222222222222222222222222222222
+      pr_head=$local_head
+    fi
+    ;;
+  base-change)
+    [ "$count" -eq 1 ] || base_head=4444444444444444444444444444444444444444
+    ;;
+esac
+
+echo "LOCAL_HEAD     $local_head"
+echo "BASE_HEAD      $base_head"
+echo "PR_HEAD        $pr_head"
+echo "VERDICT        $verdict"
+EOF
+
+chmod +x "$SANDBOX/bin/state-sequence"
+
 run_case() {
   label="$1"
   pr_scenario="$2"
@@ -109,6 +147,44 @@ run_case "local commits must be pushed" success unpushed LOCAL_UNPUSHED
 run_case "missing tracking branch must be repaired" success no-upstream NO_UPSTREAM
 run_case "base drift outranks an unpushed local commit" success behind-and-unpushed BEHIND_BASE
 run_case "GitHub conflict blocks a current branch" dirty normal CONFLICTS_WITH_BASE
+
+state_output=$(PATH="$SANDBOX/bin:$PATH" "$STATE" 7)
+if printf '%s\n' "$state_output" | grep -q '^BASE_HEAD      3333333333333333333333333333333333333333$'; then
+  pass "state snapshot records the fetched base head"
+else
+  fail "state snapshot records the fetched base head" "BASE_HEAD was absent or incorrect"
+fi
+
+fetch_log="$SANDBOX/fetch-log"
+PATH="$SANDBOX/bin:$PATH" GIT_FETCH_LOG="$fetch_log" "$STATE" 7 >/dev/null
+if [ "$(cat "$fetch_log")" = "fetch --quiet origin +refs/heads/main:refs/remotes/origin/main" ]; then
+  pass "base refresh updates the exact remote-tracking ref"
+else
+  fail "base refresh updates the exact remote-tracking ref" "got $(cat "$fetch_log")"
+fi
+
+run_final_case() {
+  label="$1"
+  scenario="$2"
+  expected="$3"
+  expected_calls="$4"
+  count_file="$SANDBOX/final-count"
+  rm -f "$count_file"
+  output=$(PR_READY_STATE_COMMAND="$SANDBOX/bin/state-sequence" PR_READY_STABILITY_SECONDS=0 PR_FINAL_COUNT_FILE="$count_file" PR_FINAL_SCENARIO="$scenario" "$FINAL" 7 2>&1)
+  actual=$(printf '%s\n' "$output" | awk '/^VERDICT/{print $2}')
+  calls=$(cat "$count_file" 2>/dev/null || echo 0)
+  if [ "$actual" = "$expected" ] && [ "$calls" = "$expected_calls" ]; then
+    pass "$label"
+  else
+    fail "$label" "expected $expected after $expected_calls snapshot(s), got ${actual:-no verdict} after $calls"
+  fi
+}
+
+run_final_case "a conflicting first snapshot cannot be certified ready" conflict-first CONFLICTS_WITH_BASE 1
+run_final_case "a conflict appearing during settling blocks readiness" conflict-second CONFLICTS_WITH_BASE 2
+run_final_case "unchanged ready snapshots certify readiness" stable READY_TO_MERGE 2
+run_final_case "a changed PR head invalidates provisional readiness" head-change STABILITY_CHANGED 2
+run_final_case "a changed base head invalidates provisional readiness" base-change STABILITY_CHANGED 2
 
 printf '\nResults: %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
 [ "$FAIL" -eq 0 ]

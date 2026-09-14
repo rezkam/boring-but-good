@@ -94,16 +94,20 @@ fi
 
 # Distance from the real base
 fetch_ok=1
-git fetch --quiet origin "$base" 2>/dev/null || fetch_ok=0
+git fetch --quiet origin "+refs/heads/$base:refs/remotes/origin/$base" 2>/dev/null || fetch_ok=0
 behind_base=0
 merge_commits=0
 ahead_base=0
 if git rev-parse --verify --quiet "origin/$base" >/dev/null; then
+  base_sha=$(git rev-parse "origin/$base")
   behind_base=$(git rev-list --count "HEAD..origin/$base")
   ahead_base=$(git rev-list --count "origin/$base..HEAD")
   merge_commits=$(git rev-list --merges --count "origin/$base..HEAD")
+  echo "BASE_HEAD      $base_sha"
   echo "BEHIND_BASE    $behind_base commit(s) behind origin/$base"
   echo "AHEAD_BASE     $ahead_base commit(s), $merge_commits of them merge commits"
+else
+  echo "BASE_HEAD      n/a"
 fi
 echo "BASE_FETCH     $([ "$fetch_ok" = 1 ] && echo ok || echo failed)"
 
