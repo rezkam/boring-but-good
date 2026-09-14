@@ -44,6 +44,15 @@ explicit exception, zero checks means the new pipeline may not have registered y
 
 ## State loop
 
+An actionable non-ready verdict starts or resumes work. It is not a result to report. Perform
+the matching repair, verify it, commit and push when needed, then take a fresh snapshot. Apply
+the same rule when `pr-final.sh` returns a non-ready verdict: feed it back into this loop instead
+of ending the run or waiting for the user to request the repair.
+
+Stop only for a `BLOCKED_*` or `*_QUERY_FAILED` verdict after exhausting repairs available from the worktree.
+Name the external dependency or authority required to continue. All other verdicts remain work
+in progress until the settling command certifies `READY_TO_MERGE`.
+
 | Verdict                                      | Action                                                                                                                |
 | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | `UNCOMMITTED_WORK`                           | Identify every path. Commit only this task's changes. Exclude proven foreign paths on every later run.                |
