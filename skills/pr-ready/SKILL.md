@@ -1,237 +1,114 @@
 ---
 name: pr-ready
-description: Take the work in this session all the way to a merge-ready PR and prove it. Commits, pushes, opens a non-draft PR, keeps the branch mergeable against main, proves the merge strategy the user actually uses, watches every GitHub check to a terminal state, triages review comments, and reports each step verified. Use for "commit and push", "push to the pr", "create a PR", "is it ready", "check the review comments", "fix the conflicts", or any request to finish the current change. Never merges.
+description: Finish a branch or pull request and prove it is merge-ready. Use whenever the user asks to commit, push, open or update a PR, fix CI, check reviews, resolve conflicts, or make a PR ready. It follows the current PR head through replacement CI runs, diagnoses failures from logs, fixes valid review comments, and never merges.
 ---
 
-# pr-ready
+# PR ready
 
-One invocation. It ends in exactly one of two states: **READY_TO_MERGE**, with every step
-shown as verified, or **BLOCKED**, naming the one thing that stopped it. Never ask the
-user "should I continue" between steps. Never report a step you did not run.
+End only with `READY_TO_MERGE` or one concrete blocker. Never merge.
 
-Merging is the user's click. This skill never merges.
+## Source of truth
 
-## The state command
-
-`pr-state.sh` in this skill directory is the single source of truth. Never infer readiness
-from memory, from a push succeeding, or from a check that was green ten minutes ago.
+Use the snapshot command while doing the work:
 
 ```bash
-~/.agents/skills/pr-ready/pr-state.sh [pr-number] [--exclude <path>]... [--probe-rebase] [--preserve-merges]
+~/.agents/skills/pr-ready/pr-state.sh [pr-number] [--exclude <foreign-path>]... [--probe-rebase]
 ```
 
-It prints the dirty paths by name, then `BRANCH BASE UNCOMMITTED UNPUSHED UPSTREAM_AHEAD
-BEHIND_BASE AHEAD_BASE PR DRAFT MERGEABLE MERGE_STATE MERGE_METHODS REBASE_MERGE CHECKS
-OPEN_THREADS COMMENTS REVIEW`, and one `VERDICT`. Act on the VERDICT.
+Act on its last `VERDICT`. Run it again after every commit, push, rebase, check completion,
+or review change. Never infer readiness from memory or from an earlier green run. A snapshot
+that says `READY_TO_MERGE` is provisional because the base, reviews, or checks can change as soon
+as the query finishes.
 
-**The final report's VERDICT line is the script's last VERDICT, verbatim.** If you decide
-something the script cannot know, that changes the inputs you give the script, never the
-verdict you print. Printing READY_TO_MERGE over a script that said UNCOMMITTED_WORK, with
-the disagreement explained underneath, has already happened once and it made a blocked PR
-look finished.
-
-## First step: isolate
-
-Any work that needs a new branch gets a worktree, before anything is committed:
+Before reporting completion, run the settling command from the same worktree:
 
 ```bash
-git worktree add ~/.agents/worktrees/<slug>-<yyyymmdd> -b <type>/<slug> origin/<base>
+~/.agents/skills/pr-ready/pr-final.sh [pr-number] [--exclude <foreign-path>]... [--probe-rebase]
 ```
 
-This is the default, not a judgment call. Branch inside the user's own checkout only when
-they asked for that specifically. A branch created in their working tree puts their
-in-flight edits one `git switch` away from disappearing, and it blocks them from using
-their own checkout while your work sits on it.
+It requires two `READY_TO_MERGE` snapshots with the same local, PR, and base heads, separated by
+60 seconds. `PR_READY_STABILITY_SECONDS` may be shortened only in deterministic tests. Report
+`READY_TO_MERGE` only when this settling command returns it. If state changes during the interval,
+act on its final verdict and restart the state loop.
 
-Never `/tmp`, never `$TMPDIR`, never `/private/var/folders`. Move only the files you
-changed into the worktree, not everything the tree shows as dirty.
+`READY_TO_MERGE` means all of these are true for the same current head SHA:
 
-If a branch already exists in their checkout and the work is committed and pushed, leave
-it there and say so. Moving it is churn, not safety.
+- the worktree is clean and local, upstream, and PR heads match
+- the branch is current and mergeable against the PR base
+- every check is present, terminal, and successful
+- no review is requesting changes and no review thread is unresolved
+- the PR is non-draft
 
-## The loop
+If a repository truly has no CI, verify that first and pass `--allow-no-checks`. Without that
+explicit exception, zero checks means the new pipeline may not have registered yet.
 
-Run `pr-state.sh`, act on the VERDICT, run it again. Repeat until READY_TO_MERGE or
-BLOCKED. Each verdict has exactly one correct response:
+## State loop
 
-| VERDICT | Do this |
-| --- | --- |
-| `UNCOMMITTED_WORK` | Adjudicate each named path, then commit yours. See below. |
-| `NO_PR` | Push, then `gh pr create` (never `--draft`). |
-| `IS_DRAFT` | `gh pr ready <n>`. The user has said: never draft. |
-| `BEHIND_BASE` | Rebase onto the base, then force-push with lease. See below. |
-| `CONFLICTS_WITH_BASE` | Same rebase. Resolve keeping this branch's intent. |
-| `REBASE_UNPROVEN` | Re-run with `--probe-rebase`. Do not report ready until it resolves. |
-| `READY_EXCEPT_REBASE` | Merge-commit and squash work, rebase-merge does not. Report all three buttons. |
-| `CHECKS_RUNNING` | Wait and re-poll. Do not declare anything. |
-| `CHECKS_FAILING` | Open the failing run's log, fix the cause, push, re-poll. |
-| `OPEN_REVIEW_THREADS` | Triage each one. Valid gets fixed and pushed, invalid gets a reply saying why. |
-| `BLOCKED_NEEDS_APPROVAL` | Terminal. Report it: this needs the user's review click. |
-| `READY_TO_MERGE` | Terminal. Print the verified report. |
+| Verdict                                      | Action                                                                                                                |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `UNCOMMITTED_WORK`                           | Identify every path. Commit only this task's changes. Exclude proven foreign paths on every later run.                |
+| `NO_PR`                                      | Push and create a non-draft PR with an explicit title and body.                                                       |
+| `LOCAL_UNPUSHED` or `NO_UPSTREAM`            | Push and set tracking. Confirm the remote and PR head SHA afterward.                                                  |
+| `UPSTREAM_AHEAD` or `PR_HEAD_MISMATCH`       | Fetch and reconcile before doing anything else. Do not overwrite unknown remote work.                                 |
+| `IS_DRAFT`                                   | Mark the PR ready.                                                                                                    |
+| `BEHIND_BASE` or `CONFLICTS_WITH_BASE`       | Rebase onto the freshly fetched base, test, then force-push with lease after required user approval.                  |
+| `REBASE_UNPROVEN`                            | Re-run with `--probe-rebase`.                                                                                         |
+| `CHECKS_STARTING` or `CHECKS_RUNNING`        | Keep polling. A push may briefly have no checks, and queued jobs are not failures.                                    |
+| `CHECKS_FAILING`                             | Diagnose and fix using the failure loop below.                                                                        |
+| `CHANGES_REQUESTED` or `OPEN_REVIEW_THREADS` | Read every comment. Fix valid findings, reply with evidence to invalid ones, push, and restart the check watch.       |
+| `READY_EXCEPT_REBASE`                        | Report which merge methods are proven and which are not.                                                              |
+| `BLOCKED_*` or `*_QUERY_FAILED`              | Stop only when the named dependency cannot be repaired from this worktree.                                            |
+| `READY_TO_MERGE`                             | Treat it as provisional and run `pr-final.sh`; report readiness only if the settled verdict remains `READY_TO_MERGE`. |
+| `STABILITY_CHANGED`                          | Fetch again, reconcile the changed PR or base state, then restart the state loop.                                     |
 
-### Uncommitted work you did not create
+## Conflict handling
 
-The script names every dirty path because a count cannot be adjudicated. Each path gets
-one of three outcomes, and the loop cannot advance until all of them do:
+Base drift and conflicts come before pushing local commits. Fetch the exact PR base and remote
+head, then probe the rebase in a disposable worktree before changing the PR branch.
 
-- **Yours**: commit it.
-- **Not yours**: pass `--exclude <path>` on every subsequent run. It then prints as
-  FOREIGN, stays visible in the report, and stops deadlocking the verdict. Say in the
-  report why each one was excluded, with the evidence: an archived patch it matches, a
-  build directory, a prior session's artifact.
-- **Unclear**: ask. The `commit` skill's rule governs: untracked files are not
-  automatically yours and are not automatically disposable.
+For each conflict, inspect the base version, branch version, surrounding callers, and tests.
+Preserve the branch's intent while adopting current base behavior. Never resolve the whole file
+with an automatic ours or theirs choice. Drop a commit only when its exact change is already in
+the base. Put any new integration repair in its own explained commit.
 
-Never let an excluded path silently disappear from the report. Exclusion is a claim you
-are making, so it is stated where the user can contradict it.
+After the replay, compare `git range-diff` and the full old-head to new-head diff. Every changed
+patch or tree difference must be intentional and explained. Run focused tests, the full project
+gate, and required running-app checks before a lease-protected force-push.
 
-### Rebasing, and the tree-identity grip
+## Pipeline watch and failure loop
 
-Any operation that rewrites history is proven before it touches the real branch.
+After every push, record the PR head SHA and start a fresh watch. On every poll, verify the
+head has not changed. If it changed, discard conclusions about the old run and restart from
+the new head.
 
-**Before anything**: if the working tree is dirty, snapshot it. `git diff > ~/.agents/pr-ready-dirty-<date>.patch`
-and list the untracked paths. Do this even for files you have adjudicated as foreign,
-especially those, because they are the user's and not yours to lose.
+Do not stop at "checks pending". Poll until all jobs are terminal. Long-running and queued
+jobs are normal. Keep the user updated during long waits.
 
-**Never `git reset --hard`, `git checkout -- <path>`, `git restore`, or `git stash` to
-move or clean a branch with uncommitted changes present.** Each of them discards the
-user's work with no prompt. This has already destroyed a user's pending dependency
-override mid-run. To move a branch pointer safely use `git switch -C <branch> <sha>` or
-`git update-ref`, both of which refuse rather than discard when the tree conflicts. If
-you genuinely need a clean tree, commit or export the changes first, and say so.
+When a job fails:
 
-**The grip**: a rebase that preserves behavior produces the same tree. Capture it before
-and compare after.
+1. Open the exact failed run or job log with `gh run view <run-id> --log-failed`.
+2. Identify the failing command, test, error, and whether the same failure is already fixed
+   on the freshly fetched base.
+3. Reproduce the narrow failure locally. For a code defect, add or confirm a test that fails
+   for the defect before changing production code.
+4. Fix the cause, then run the focused test and the repository's required full gate.
+5. Commit and push once. Restart the watch for the new head SHA.
 
-```bash
-before=$(git rev-parse 'HEAD^{tree}')
-# ... rebase ...
-[ "$(git rev-parse 'HEAD^{tree}')" = "$before" ] || echo "TREE DIVERGED, a resolution was wrong"
-```
+Do not rerun unchanged failed CI merely hoping for green. Retry unchanged code only when the
+log proves an infrastructure failure or a known flaky test, and disclose that evidence.
 
-An identical tree hash means every conflict resolution reproduced the original content
-exactly. A different one means at least one was wrong, and `git diff <old-head> HEAD`
-shows precisely where. Run the probe first so this is proven with the real branch
-untouched:
+## Safety
 
-```bash
-pr-state.sh <n> --probe-rebase                     # linearize; drops merge commits
-pr-state.sh <n> --probe-rebase --preserve-merges   # keep all commits including merges
-```
+- Use an isolated worktree when new branch work is needed.
+- Preserve foreign dirty files. Never clean them with reset, checkout, restore, or stash.
+- Probe history rewrites first. Compare the old and rebased trees or inspect the full diff.
+- Use `git push --force-with-lease`, never bare force.
+- Disable editors for git continuation commands and prompts for PR creation.
+- Respect repository instructions for tests, running-app verification, authorship, and PR text.
 
-The probe runs in a detached worktree under `~/.agents/pr-ready-probe/`, removes itself,
-and keeps a log only when it fails. It never touches your branch, the PR, or the remote.
+## Final report
 
-Then the real one:
-
-1. `git fetch origin <base>`
-2. `git rebase origin/<base>`, adding `--rebase-merges` when the user wants every commit
-   kept. Linearizing a branch that contains merge commits discards their resolutions and
-   is why replays conflict against a base that already has the same changes.
-3. On conflict: keep this branch's intent, do not resurrect the base's version of code
-   this branch deliberately restructured. If the correct resolution is genuinely
-   ambiguous, that is a BLOCKED, not a guess.
-4. Check the tree hash against `before`. A divergence is a stop, not a note.
-5. Re-run the test suite. An identical tree makes this cheap to reason about but does not
-   replace it when the tree did change on purpose.
-6. `git push --force-with-lease`. Never bare `--force`.
-
-Force-pushing over a branch someone may have pulled, or over a PR with filed reviews,
-needs the user's explicit go-ahead first.
-
-### Never run a git command that can open an editor
-
-`git rebase --continue`, `git merge`, `git cherry-pick`, `git revert`, and
-`git commit --amend` all drop into `$EDITOR` and wait. Under an agent there is nobody to
-close it. One `rebase --continue` sat in vim for 1022 seconds before the run was killed,
-and completed in 0.3 seconds once the editor was disabled.
-
-Prefix with `GIT_EDITOR=true`, or pass `--no-edit`, or supply the message with `-m`:
-
-```bash
-GIT_EDITOR=true git rebase --continue
-git merge --no-edit origin/main
-```
-
-Claude Code happens to set `GIT_EDITOR=true` already. Codex does not, which is where this
-failure came from, so write the guard explicitly rather than depending on the harness.
-Same for anything else that prompts: `gh pr create` without `--title` and `--body` is
-interactive, and `GIT_TERMINAL_PROMPT=0` stops git blocking on a credential prompt.
-
-A timeout is the backstop, not the fix. It converts a hang into a shorter hang, and you
-still lose the in-progress rebase state. Bound long commands anyway, but disable the
-editor first.
-
-### MERGE_STATE is not the whole answer
-
-`mergeStateStatus: CLEAN` means a **merge commit** would apply. It says nothing about
-whether **rebase-merge** can replay the branch commit by commit. A PR can be CLEAN in the
-API and still show "This branch cannot be rebased due to conflicts" in the UI. That
-contradiction has already been reported as a false ready.
-
-There is no API field for rebase-mergeability. In particular:
-
-| Field | What it actually means |
-| --- | --- |
-| `mergeable` | Merge-commit conflict state, nothing more |
-| `mergeStateStatus` | Merge-commit readiness including checks and protection |
-| `viewerCanUpdateBranch` | Whether the "Update branch" button is available |
-| `rebaseMergeAllowed` | Whether the repo enables the button, not whether it would work |
-
-Never alias a field to a name that asserts something it does not measure. Reporting
-`viewerCanUpdateBranch` as `canBeRebased` produced a confident, wrong conclusion. The only
-evidence for rebase-mergeability is a replay, which is what `--probe-rebase` runs.
-
-### Watching checks
-
-Poll until every check reaches a terminal state. `gh pr checks <n> --watch` blocks, or
-re-run `pr-state.sh` on an interval. Long CI is normal, so do not give up and report
-"pushed, checks pending" as if that were done. That is the whole point of this skill.
-
-For a failure, read the actual log before changing anything:
-```bash
-gh run view <run-id> --log-failed
-```
-Fix the cause. Never retry a red check hoping it flakes green without saying so.
-
-### Review comments
-
-Poll them: bot reviews and human reviews both land after the push, not during it.
-
-Each comment gets one of two outcomes, and both are visible:
-- **Valid**: fix it, push, and say which commit addressed it.
-- **Invalid**: reply on the thread explaining why, so the thread is not silently ignored.
-
-Never resolve a thread by deleting the comment or by silence.
-
-## PR content
-
-Problem or goal, why, approach, tradeoffs, validation run, remaining risk.
-
-Link issues with `Closes #N` so GitHub closes them on merge. Do not close issues by hand
-while opening the PR. Never `--draft`. No AI attribution. No em dashes.
-
-## The final report
-
-Always end with this, filled in from real command output, never from memory:
-
-```
-PR-READY: #<n> <url>
-  Committed      <n> file(s), <sha> "<subject>"
-  Foreign        <path> excluded because <evidence>   (omit when none)
-  Pushed         <sha> -> origin/<branch>, remote head confirmed
-  PR             #<n>, non-draft, Closes #<issues>
-  Base           rebased onto origin/<base> at <sha>  (or: already current)
-  Mergeable      MERGE_STATE=CLEAN
-  Buttons        merge:<yes|no>  squash:<yes|no>  rebase:<yes|no, with the proof>
-  Checks         <n>/<n> green: <names>
-  Review         <n> threads, <n> fixed, <n> answered, 0 unresolved
-  Tests          <command> -> <result>
-  VERDICT        <the script's VERDICT, verbatim>
-```
-
-The Buttons line is not optional. "Ready to merge" without naming which button works is
-the failure this skill exists to prevent.
-
-If blocked, the same block with the failing line marked and one sentence on what is
-needed. Never print a line you did not verify this run.
+Report the PR URL, exact head SHA, base SHA, non-draft state, mergeability, green check count and
+names, review-thread result, tests actually run, and the settling command's final `VERDICT` verbatim.
+If blocked, report the same facts plus the single blocker and what is needed. Never report a step
+that was not verified in the current run.
