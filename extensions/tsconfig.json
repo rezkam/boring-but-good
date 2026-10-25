@@ -12,6 +12,7 @@
   },
   "include": [
     "coordinator-guard/**/*.ts",
-    "gemini-search/**/*.ts"
+    "gemini-search/**/*.ts",
+    "goal/**/*.ts"
   ]
 }

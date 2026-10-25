@@ -6,6 +6,7 @@ Each extension directory contains its entry point, supporting modules, tests, an
 
 - [Coordinator guard](coordinator-guard/README.md)
 - [Gemini Search](gemini-search/README.md)
+- [Goal](goal/README.md)
 
 ## Development
 
