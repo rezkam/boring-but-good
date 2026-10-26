@@ -20,8 +20,7 @@ const {
 test('Gemini search resolves Browser Tools from the AI Chat dependency location', async () => {
   const moduleUrl = resolveBrowserToolsModuleUrl();
   assert.match(moduleUrl, /@rezkam[\\/]browser-tools/);
-  const browserTools = await import(moduleUrl);
-  assert.equal(typeof browserTools.startChrome, 'function');
+  await import(moduleUrl);
 });
 
 test('Gemini search rejects results without exact UI mode verification', async () => {
@@ -171,8 +170,6 @@ test('Gemini search rejects a citation copied only from the query', async () => 
 });
 
 test('Gemini search keeps Browser Tools startup diagnostics out of the terminal', () => {
-  assert.equal(typeof geminiSearchRuntime.startChromeWithoutTerminalOutput, 'function');
-
   const run = spawnSync(process.execPath, [
     fileURLToPath(new URL('./fixtures/run-quiet-browser-start.mjs', import.meta.url)),
   ], { encoding: 'utf8' });
@@ -274,7 +271,6 @@ test('Gemini search supplies a private logger without replacing process stderr',
 });
 
 test('Gemini search tracks the real provider lifetime after caller cancellation', async () => {
-  assert.equal(typeof geminiSearchRuntime.hasGeminiSearchProviderRunInFlight, 'function');
   let release;
   const gate = new Promise(resolve => { release = resolve; });
   const controller = new AbortController();

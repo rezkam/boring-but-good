@@ -75,7 +75,7 @@ test('classifyGeminiUiState distinguishes app readiness from consent and sign-in
     title: 'Gemini',
     promptInput: true,
     accountButton: true,
-    text: 'Hi Reza\nAsk Gemini',
+    text: 'Hi there\nAsk Gemini',
   });
   assert.equal(ready.ready, true);
   assert.equal(ready.reason, 'gemini_app_ready');

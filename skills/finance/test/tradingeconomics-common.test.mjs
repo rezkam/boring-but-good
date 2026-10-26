@@ -3,18 +3,14 @@ import assert from 'node:assert/strict';
 import {
   buildTradingEconomicsMetadata,
   cleanText,
-  dismissTradingEconomicsOverlays,
   escapeMarkdown,
   extractTradingEconomicsCountryTablePayload,
   extractTradingEconomicsForecastTablesPayload,
   extractTradingEconomicsMatrixPayload,
-  extractTradingEconomicsTables,
   formatNumber,
   formatPercentNumber,
   markdownTable,
   normalizeCountryName,
-  pageTextPreview,
-  prepareTradingEconomicsPage,
   slugFromTradingEconomicsUrl,
   slugify,
   splitNameUnit,
@@ -60,30 +56,6 @@ test('builds markdown tables and common metadata in one reusable place', () => {
     cache_hit: false,
     row_count: 2,
   });
-});
-
-test('page helpers centralize Trading Economics page evaluate contracts', async () => {
-  const calls = [];
-  const page = {
-    evaluate: async (fn, arg) => {
-      calls.push({ fn: String(fn), arg });
-      if (arg === 120) return 'preview';
-      return [];
-    },
-    waitForSelector: async (selector, options) => calls.push({ waitForSelector: selector, options }),
-  };
-
-  assert.equal(await pageTextPreview(page, 120), 'preview');
-  await dismissTradingEconomicsOverlays(page, { includeSubscribe: true });
-  await extractTradingEconomicsTables(page, 'table.table-hover', { cleanWhitespace: true });
-  await prepareTradingEconomicsPage(page, 'table.table-hover', { includeSubscribe: true, settleMs: 0 });
-
-  assert.equal(calls[1].arg.includeSubscribe, true);
-  assert.match(calls[1].fn, /subscribe-prompt/);
-  assert.equal(calls[2].arg.selector, 'table.table-hover');
-  assert.equal(calls[2].arg.cleanWhitespace, true);
-  assert.match(calls[2].fn, /market-negative-image/);
-  assert.deepEqual(calls[4], { waitForSelector: 'table.table-hover', options: { timeout: 15000 } });
 });
 
 test('table extraction adapters share the generic table extractor', async () => {

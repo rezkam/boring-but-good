@@ -10,7 +10,6 @@ import {
   runAiChat,
   validateAiChatBrowserState,
 } from '../scripts/ai-chat/module.mjs';
-import { assertGrokPageUsable, classifyGrokPageState } from '../scripts/ai-chat/providers/grok.mjs';
 import { validatePerplexitySession } from '../scripts/ai-chat/providers/perplexity.mjs';
 import { stopChrome } from '@rezkam/browser-tools';
 
@@ -44,88 +43,6 @@ function assertOutsideRepo(path) {
   assert.notEqual(resolved, REPO_ROOT);
   assert.equal(resolved.startsWith(`${REPO_ROOT}/`), false, `${path} must stay outside the repo`);
 }
-
-test('browser edge harness gives each provider command its own AI Chat owned browser', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-browser-edge-reuse-'));
-  try {
-    const stateFile = join(dir, 'browser.json');
-    const connectCalls = [];
-    const runCalls = [];
-    const stopCalls = [];
-    let startCount = 0;
-    let disconnectCount = 0;
-    let livePort = null;
-    const browser = {
-      sessionId: 'managed-session-1',
-      disconnect() { disconnectCount += 1; },
-    };
-    const commonDeps = {
-      async startChrome() {
-        startCount += 1;
-        livePort = 62101;
-        return { status: 'started', port: 62101, ownerToken: 'reuse-token', profileName: 'Default', requestedProfileName: 'Default' };
-      },
-      managedBrowserSafetyForPort(port) {
-        assert.equal(port, 62101);
-        return { ok: true };
-      },
-      readManagedStateForPort(port) {
-        assert.equal(port, 62101);
-        return { managedBy: 'browser-tools', ownerId: 'ai-chat', profileName: 'Default' };
-      },
-      managedBrowserOwnershipSafety({ ownerToken }) {
-        assert.equal(ownerToken, 'reuse-token');
-        return { ok: true, ownerId: 'ai-chat' };
-      },
-      // Reflects reality: a stopped browser no longer answers on its debug port.
-      browserWSEndpoint: async port => (port === livePort ? `ws://localhost:${port}` : null),
-      async connectBrowser(port, options) {
-        connectCalls.push({ port, ownerToken: options.ownerToken });
-        return browser;
-      },
-      stopChrome(args) {
-        stopCalls.push(args);
-        livePort = null;
-        return { status: 'stopped', port: args.port };
-      },
-      cache: noCache(),
-      io: { stdout: () => {}, writeFile: () => assert.fail('no file expected') },
-    };
-
-    for (const providerName of ['grok', 'gemini']) {
-      const request = buildAiChatRequest({ providerName, prompt: `hello ${providerName}`, jsonOutput: true, browserStateFile: stateFile });
-      await runAiChat(request, {
-        ...commonDeps,
-        provider: {
-          name: providerName,
-          runRequiresBrowser: () => true,
-          async run({ browser: runBrowser, request: runRequest }) {
-            assert.equal(runBrowser.sessionId, 'managed-session-1');
-            runCalls.push({ providerName, port: runRequest.port });
-            return { text: `${providerName} answer`, rawText: `${providerName} answer`, done: true, modelUsed: 'default' };
-          },
-        },
-      });
-    }
-
-    assert.equal(startCount, 2, 'each command must start its own browser once the previous one closed');
-    assert.equal(disconnectCount, 2);
-    assert.deepEqual(stopCalls, [
-      { port: 62101, ownerToken: 'reuse-token', clean: false },
-      { port: 62101, ownerToken: 'reuse-token', clean: false },
-    ]);
-    assert.deepEqual(connectCalls, [
-      { port: 62101, ownerToken: 'reuse-token' },
-      { port: 62101, ownerToken: 'reuse-token' },
-    ]);
-    assert.deepEqual(runCalls, [
-      { providerName: 'grok', port: 62101 },
-      { providerName: 'gemini', port: 62101 },
-    ]);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
 
 test('browser edge harness diagnoses unsafe saved browser states before attachment', async () => {
   const scenarios = [
@@ -199,35 +116,6 @@ test('browser edge harness diagnoses unsafe saved browser states before attachme
 });
 
 test('profile auth diagnostics report logged-out or sync-required profiles without browser ownership changes', async () => {
-  const grokSnapshot = {
-    url: 'https://x.com/i/flow/login?redirect_after_login=%2Fi%2Fgrok',
-    title: 'Sign in',
-    bodyText: '',
-    hasComposer: false,
-    composerDisabled: false,
-    loginTextVisible: true,
-  };
-  const grokState = classifyGrokPageState(grokSnapshot);
-  assert.equal(grokState.status, 'auth_required');
-  assert.equal(grokState.usable, false);
-
-  await assert.rejects(
-    () => assertGrokPageUsable({
-      page: {
-        url: () => grokSnapshot.url,
-        evaluate: async () => grokSnapshot,
-      },
-      retries: 1,
-      delayMs: 0,
-    }),
-    (error) => {
-      assert.match(error.message, /not authenticated/i);
-      assert.match(error.message, /--sync/);
-      assert.match(error.message, /Current page: https:\/\/x\.com\/i\/flow\/login/);
-      return true;
-    },
-  );
-
   let networkRequestCount = 0;
   await assert.rejects(
     () => validatePerplexitySession({

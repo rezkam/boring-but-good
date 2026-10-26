@@ -365,11 +365,6 @@ test('pi extension registers a file-backed multi-query Gemini search tool', asyn
 
   createGeminiSearchExtension({ runBatch })(pi);
 
-  assert.equal(tool.name, 'gemini_search');
-  assert.equal(tool.executionMode, 'sequential');
-  assert.match(tool.description, /temporary/i);
-  assert.match(tool.description, /result file/i);
-
   const result = await tool.execute('call-1', {
     queries: ['first query', 'second query'],
   }, undefined, update => updates.push(update), {

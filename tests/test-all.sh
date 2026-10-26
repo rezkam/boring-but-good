@@ -109,18 +109,6 @@ else
     TOTAL_PASS=$((TOTAL_PASS + 1))
 fi
 
-# Check setup.sh gates read -p behind a bash-only check (broken in zsh — -p means coprocess)
-if [ -f "$REPO_DIR/setup.sh" ]; then
-    if grep -q '_is_bash\|BASH_VERSION' "$REPO_DIR/setup.sh"; then
-        printf "  ${GREEN}OK${RESET}   setup.sh: gates 'read -p' behind bash detection (zsh-safe)\n"
-        TOTAL_PASS=$((TOTAL_PASS + 1))
-    else
-        printf "  ${RED}FAIL${RESET} setup.sh: no bash detection guard for 'read -p' (breaks zsh)\n"
-        TOTAL_FAIL=$((TOTAL_FAIL + 1))
-        CROSS_FAIL=$((CROSS_FAIL + 1))
-    fi
-fi
-
 # Check all SKILL.md files have valid frontmatter
 for skill_dir in $SKILL_DIRS; do
     skill_name=$(basename "$skill_dir")

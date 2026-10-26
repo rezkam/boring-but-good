@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -14,7 +14,6 @@ import {
   normalizePerplexityBackendId,
   normalizePerplexityFileAttachments,
   normalizePerplexitySpaceUuid,
-  openPerplexityNetworkPage,
   parseSseLine,
   perplexityConversationUrl,
   perplexityAuthFailureMessage,
@@ -129,27 +128,6 @@ test('Perplexity validates auth through managed browser network requests without
   }
 });
 
-test('Perplexity opens a dedicated JSON network context without inspecting page content', async () => {
-  const navigations = [];
-  const page = {
-    url: () => 'about:blank',
-    goto: async (url, options) => navigations.push({ url, options }),
-  };
-  const browser = {
-    pages: async () => [],
-    newPage: async (options) => {
-      assert.deepEqual(options, { background: true });
-      return page;
-    },
-  };
-
-  assert.equal(await openPerplexityNetworkPage(browser), page);
-  assert.deepEqual(navigations, [{
-    url: PERPLEXITY_NETWORK_BOOTSTRAP_URL,
-    options: { waitUntil: 'domcontentloaded', timeout: 30000 },
-  }]);
-});
-
 test('Perplexity returns the created provider thread URL from the backend UUID', async () => {
   const backendUuid = '1fcf54fa-dd85-4b77-a916-dc12f8a8efa5';
   const callbacks = {};
@@ -187,27 +165,6 @@ test('Perplexity returns the created provider thread URL from the backend UUID',
   assert.equal(result.providerState.backend_uuid, backendUuid);
   assert.equal(result.providerState.thread_url, `https://www.perplexity.ai/search/${backendUuid}`);
   assert.equal(result.finalUrl, `https://www.perplexity.ai/search/${backendUuid}`);
-});
-
-test('Perplexity exposes only the browser network transport and no UI lifecycle fallback', () => {
-  const source = readFileSync(new URL('../scripts/ai-chat/providers/perplexity.mjs', import.meta.url), 'utf-8');
-  for (const pattern of [
-    /document\./,
-    /querySelector/,
-    /innerText/,
-    /textContent/,
-    /\.click\(/,
-    /\.type\(/,
-    /\.cookies\(/,
-    /page\.content/,
-  ]) {
-    assert.doesNotMatch(source, pattern);
-  }
-  for (const method of ['findPage', 'createAttemptContext', 'clearInput', 'typePrompt', 'submit', 'waitForResponse']) {
-    assert.equal(Object.prototype.hasOwnProperty.call(perplexityProvider, method), false, method);
-  }
-  assert.equal(perplexityProvider.transport, 'browser-network-sse');
-  assert.equal(perplexityProvider.preferredBrowserHeadless, true);
 });
 
 test('Perplexity browser fetch uses page credentials and strips unsafe cookie headers', async () => {

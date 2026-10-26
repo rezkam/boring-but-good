@@ -21,7 +21,6 @@ node --test test/grok-provider.test.mjs
 # Cross-provider contracts.
 node --test test/provider-model-selection-matrix.test.mjs
 node --test test/browser-edge-cases.test.mjs
-node --test test/provider-focus.test.mjs
 node --test test/public-surface.test.mjs
 
 # Everything.

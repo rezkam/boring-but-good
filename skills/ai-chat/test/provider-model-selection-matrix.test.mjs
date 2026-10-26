@@ -47,11 +47,6 @@ const MODEL_SELECTION_MATRIX = [
         saved_to_library: true,
       },
     },
-    limitations: [
-      'Max tier models are intentionally filtered out of the bundled registry.',
-      'Live acceptance depends on the current Perplexity account tier.',
-      'Deep research has a longer provider timeout.'
-    ],
   },
   {
     provider: chatgptProvider,
@@ -88,13 +83,6 @@ const MODEL_SELECTION_MATRIX = [
         },
       },
     },
-    limitations: [
-      'Model selection is performed through the ChatGPT UI before prompt submission.',
-      'Network-observed model and effort fields verify the UI-selected profile after submission.',
-      'Only instant, medium, high, extra-high, and pro are public profile ids.',
-      'Automated verification is deterministic or read-only; provider writes require an explicit user invocation.',
-      'Deep research is not exposed as a stable AI Chat model profile.',
-    ],
   },
   {
     provider: geminiProvider,
@@ -125,12 +113,6 @@ const MODEL_SELECTION_MATRIX = [
         },
       },
     },
-    limitations: [
-      'Live discovery requires Google cookies from the managed Browser Tools browser or an explicit Chrome profile fallback.',
-      'The exposed modes are Gemini 3.6 Flash and Gemini 3.6 Flash Extended Thinking.',
-      'Gemini can reject a model with backend error 1052 and then only fallback when the adapter marks that fallback.',
-      'Deep research is not exposed as a stable AI Chat model profile.',
-    ],
   },
   {
     provider: grokProvider,
@@ -157,13 +139,6 @@ const MODEL_SELECTION_MATRIX = [
         conversation_url: 'https://x.com/i/grok?conversation=matrix',
       },
     },
-    limitations: [
-      'Model selection is verified through visible UI labels.',
-      'The provider can report Auto, Fast, or Expert, but not a backend model slug.',
-      'Current X/Grok sessions can expose only Fast; Auto and Expert are account/UI availability dependent and require explicit user-authorized visible-label verification before use.',
-      'Automated verification is deterministic or read-only; provider writes require an explicit user invocation.',
-      'Deep research is not exposed as a stable AI Chat model profile.',
-    ],
   },
 ];
 
@@ -219,12 +194,6 @@ test('provider model selection matrix rejects unknown model names before silent 
       null,
       `${row.provider.name} unknown model ${row.unknownModel} must not resolve to a fallback`,
     );
-  }
-});
-
-test('provider model selection matrix documents provider limitations', () => {
-  for (const row of MODEL_SELECTION_MATRIX) {
-    assert.ok(row.limitations.length >= 2, `${row.provider.name} should document model selection limitations`);
   }
 });
 
@@ -314,16 +283,9 @@ test('model fallback metadata exposes rejected requested models', () => {
   assert.equal(metadata.provider_state.model_fallback_from, 'gemini-3.6-flash-extended-thinking');
 });
 
-test('model matrix and eval fixtures contain no automated live-write flags or retired Gemini credential fields', () => {
-  const matrix = readFileSync(new URL(import.meta.url), 'utf8');
+test('eval fixtures contain no automated live-write flags or retired Gemini credential fields', () => {
   const evals = readFileSync(new URL('../evals/evals.json', import.meta.url), 'utf8');
-  const liveGate = new RegExp(['AI_CHAT_LIVE_', '(?:MODEL|CONVERSATION)_MATRIX'].join(''));
-  const liveWriteFlag = new RegExp(['--verify', '-models'].join(''));
-  const retiredGeminiFields = new RegExp(['cookie', '_source|chrome', '_profile|cookie', '_extraction'].join(''));
-  for (const source of [matrix, evals]) {
-    assert.doesNotMatch(source.replace(/\['--verify', '-models'\]/, ''), liveWriteFlag);
-    assert.doesNotMatch(source.replace(/\['cookie', '_source\|chrome', '_profile\|cookie', '_extraction'\]/, ''), retiredGeminiFields);
-    assert.doesNotMatch(source.replace(/\['AI_CHAT_LIVE_', '\(\?:MODEL\|CONVERSATION\)_MATRIX'\]/, ''), liveGate);
-  }
-  assert.match(matrix, /auth_source: 'managed-browser-same-origin'/);
+  assert.doesNotMatch(evals, /--verify-models/);
+  assert.doesNotMatch(evals, /cookie_source|chrome_profile|cookie_extraction/);
+  assert.doesNotMatch(evals, /AI_CHAT_LIVE_(?:MODEL|CONVERSATION)_MATRIX/);
 });

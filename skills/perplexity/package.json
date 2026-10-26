@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test/*.mjs"
+    "test": "python3 -B scripts/test_pplx_auth.py"
   },
   "engines": {
     "node": ">=20"

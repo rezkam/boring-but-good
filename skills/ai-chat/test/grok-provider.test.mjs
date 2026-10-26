@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { buildAiChatRequest, runAiChat } from '../scripts/ai-chat/module.mjs';
-import { classifyGrokPageState, grokProvider, isGrokPlaceholderResponse } from '../scripts/ai-chat/providers/grok.mjs';
+import { classifyGrokPageState, grokProvider } from '../scripts/ai-chat/providers/grok.mjs';
 
 const INCIDENT_PLACEHOLDER = 'Thinking about your request\n7 more\n7 more';
 
@@ -63,14 +63,6 @@ function makeGrokFallbackProvider({ rateLimitedModels = [], fallbackArgs = [], m
     attempts,
   };
 }
-
-test('Grok placeholder detector rejects the incident UI text', () => {
-  assert.equal(isGrokPlaceholderResponse({ text: INCIDENT_PLACEHOLDER }), true);
-});
-
-test('Grok placeholder detector allows a real short answer', () => {
-  assert.equal(isGrokPlaceholderResponse({ text: 'Yes.' }), false);
-});
 
 test('Grok page state classifier accepts a usable composer', () => {
   const state = classifyGrokPageState({

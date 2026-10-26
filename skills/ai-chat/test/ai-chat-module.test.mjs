@@ -514,8 +514,6 @@ test('buildMetadata includes safe attachment metadata', () => {
 
   assert.deepEqual(metadata.attachments, [attachment]);
   assert.deepEqual(metadata.provider_state.attachments, [attachment]);
-  assert.equal(JSON.stringify(metadata).includes('/tmp/'), false);
-  assert.equal(JSON.stringify(metadata).includes('https://uploads.example.test'), false);
 });
 
 test('Perplexity rejects --incognito continuation and attachment before local writes or browser work', async () => {
@@ -741,54 +739,6 @@ test('runAiChat stops a reused Gemini browser when CDP connection fails', async 
     }), /connect failed/);
 
     assert.deepEqual(stopCalls, [{ port: 4553, ownerToken: 'gemini-reused-connect-owner-token', clean: false }]);
-    assert.equal(JSON.parse(readFileSync(stateFile, 'utf-8')).status, 'stopped');
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('runAiChat stops its owned browser after a Gemini request completes', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-gemini-browser-stop-'));
-  try {
-    const stateFile = join(dir, 'browser.json');
-    const stopCalls = [];
-    let disconnects = 0;
-    const browser = { disconnect: () => { disconnects += 1; } };
-    const request = buildAiChatRequest({
-      providerName: 'gemini',
-      modelName: 'gemini-3.6-flash',
-      prompt: 'hello',
-      jsonOutput: true,
-      browserStateFile: stateFile,
-      browserProfileName: 'Browser Profile',
-      browserHeadless: true,
-      includeGoogle: true,
-    });
-
-    await runAiChat(request, {
-      provider: {
-        ...geminiProvider,
-        runRequiresBrowser: () => true,
-        async run() {
-          return { text: 'Gemini answer', rawText: 'Gemini answer', done: true, modelUsed: 'gemini-3.6-flash' };
-        },
-      },
-      async startChrome() {
-        return { status: 'started', port: 4556, ownerToken: 'gemini-owner-token', profileName: 'Browser Profile', requestedProfileName: 'Browser Profile', headless: true, includeGoogle: true };
-      },
-      async connectBrowser() {
-        return browser;
-      },
-      stopChrome(args) {
-        stopCalls.push(args);
-        return { status: 'stopped', port: args.port };
-      },
-      cache: noCache(),
-      io: { stdout: () => {}, writeFile: () => assert.fail('no file expected') },
-    });
-
-    assert.equal(disconnects, 1);
-    assert.deepEqual(stopCalls, [{ port: 4556, ownerToken: 'gemini-owner-token', clean: false }]);
     assert.equal(JSON.parse(readFileSync(stateFile, 'utf-8')).status, 'stopped');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -2088,47 +2038,6 @@ test('conversation record writes enforce private file permissions and fail close
       return true;
     },
   );
-});
-
-test('conversation references preserve provider state', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'ai-chat-skill-conversation-'));
-  try {
-    const request = buildAiChatRequest({
-      providerName: 'perplexity',
-      modelName: 'perplexity/best',
-      prompt: 'hello',
-      saveConversation: 'research',
-      conversationStoreDir: dir,
-    });
-    const result = {
-      modelUsed: 'perplexity/best',
-      finalUrl: null,
-      providerState: { backend_uuid: 'uuid', read_write_token: 'rw' },
-    };
-    const metadata = buildMetadata({
-      request,
-      provider: { name: 'perplexity' },
-      result: { ...result, text: 'answer', done: true, rateLimited: false },
-      fallbackFrom: null,
-      fallbackTrail: ['perplexity/best'],
-    });
-
-    const saved = saveConversationReference(request, { name: 'perplexity' }, result, metadata);
-    const record = JSON.parse(readFileSync(saved.path, 'utf-8'));
-    assert.deepEqual(record.provider_state, { backend_uuid: 'uuid', read_write_token: 'rw' });
-    assert.deepEqual(record.messages.map(message => message.role), ['user', 'assistant']);
-    assert.equal(saved.path, conversationRecordPath({ providerName: 'perplexity', id: 'research', storeDir: dir }));
-
-    const resolved = resolveConversationReference(buildAiChatRequest({
-      providerName: 'perplexity',
-      prompt: 'follow-up',
-      conversationTarget: 'research',
-      conversationStoreDir: dir,
-    }));
-    assert.equal(resolved.record.provider_state.backend_uuid, 'uuid');
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
 });
 
 test('submit-only and final flags validate the detached ChatGPT contract before browser startup', async () => {

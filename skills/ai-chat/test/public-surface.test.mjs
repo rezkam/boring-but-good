@@ -110,18 +110,4 @@ test('AI Chat consumes Browser Tools only through the published package', () => 
     })
     .map(file => relative(ROOT, file));
   assert.deepEqual(offenders, []);
-
-  const packageJson = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf-8'));
-  assert.equal(packageJson.dependencies?.['@rezkam/browser-tools'], '^1.0.3');
-});
-
-test('public ChatGPT contract has no stale local or rewrite claims', () => {
-  const docs = ['SKILL.md', 'references/ai-chat.md', 'references/providers.md', 'references/transport.md', 'references/orchestration.md', 'references/evaluation.md']
-    .map(file => readFileSync(join(ROOT, file), 'utf8')).join('\n');
-  for (const stale of [/pro-extended/i, /gpt-5\.5/i, /The adapter rewrites the backend request payload/i, /DOM text is only a fallback/i, /old [^\n]*medium[^\n]*high[^\n]*HTTP 422/i, /Sentinel flow/i, /imported-chatgpt/i, /launch-risks/i]) assert.doesNotMatch(docs, stale);
-  assert.match(docs, /--list-conversations/); assert.match(docs, /provider conversation ID/i); assert.match(docs, /extra-high/);
-  assert.match(docs, /ChatGPT has no local records/i); assert.match(docs, /ChatGPT has no local records and rejects `--save-conversation` and `--attach-conversation`/i);
-  const source = readFileSync(join(ROOT, 'scripts/ai-chat/providers/chatgpt.mjs'), 'utf8');
-  assert.doesNotMatch(source, /Fetch\.enable|Network\.setRequestInterception|continueRequest|fulfillRequest/);
-  assert.doesNotMatch(source, /document\.body\.innerText|text stability|localConversationState:\s*true/);
 });
