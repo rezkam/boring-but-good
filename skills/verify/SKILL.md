@@ -16,7 +16,7 @@ Do not invent one. Read it from the repo, in this order:
 2. the project's build or task files: `package.json` scripts, `go.mod` with `go test ./...`,
    `pom.xml`, `build.gradle`, `Cargo.toml`, `pyproject.toml`, `justfile`, `Taskfile.yml`
 3. `.github/workflows/*.yml`, which is the authority on what must pass to merge
-4. the repo's `CLAUDE.md`, `AGENTS.md`, or `CONTEXT-MAP.md`
+4. the repo's `CLAUDE.md` or `AGENTS.md`
 
 If no command exists, say so and propose one. Reading the code is not a substitute for
 running it.

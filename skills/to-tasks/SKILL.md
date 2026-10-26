@@ -29,7 +29,7 @@ For Jira, ask for any missing Jira project key, task type, or required labels be
 
 ### 2. Explore the codebase (optional)
 
-If you have not already explored the codebase, do so to understand the current state of the code. Task titles and descriptions should use the project's domain glossary vocabulary, and respect ADRs in the area you're touching.
+If you have not already explored the codebase, do so to understand the current state of the code. Task titles and descriptions should use the project's own terms.
 
 ### 3. Draft vertical slices
 

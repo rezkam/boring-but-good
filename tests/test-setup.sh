@@ -1,7 +1,7 @@
 #!/bin/bash
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/forbidden.sh"
 # Test suite for setup.sh
-# Tests: syntax, structure, harness detection, java-21-to-25-migration install logic, codex install logic, summary
+# Tests: syntax, structure, harness detection, java-21-to-25-migration install logic, summary
 # RULE: ALL tests are READ-ONLY. No files are created, modified, or deleted outside $SANDBOX.
 # Uses a temp sandbox to verify symlink/install behavior without touching real config.
 
@@ -36,7 +36,7 @@ else
     fail "setup.sh should read skills from skills/"
 fi
 
-for skill in ai-chat argocd codex commit dependency-track finance java-21-to-25-migration jenkins jira perplexity pr-ready skanetrafiken sonarqube tdd to-tasks verify; do
+for skill in ai-chat argocd commit dependency-track finance java-21-to-25-migration jenkins jira perplexity pr-ready skanetrafiken sonarqube tdd to-tasks verify; do
     if [ -f "${REPO_DIR}/skills/${skill}/SKILL.md" ]; then
         pass "${skill} is under skills/"
     else
@@ -105,7 +105,7 @@ else
 fi
 
 MOVED_SKILLS_LINE=$(grep '^MOVED_SKILLS=' "$SETUP" || true)
-for skill in ai-chat argocd codex commit dependency-track finance java-21-to-25-migration jenkins jira perplexity pr-ready skanetrafiken sonarqube tdd to-tasks verify; do
+for skill in ai-chat argocd commit dependency-track finance java-21-to-25-migration jenkins jira perplexity pr-ready skanetrafiken sonarqube tdd to-tasks verify; do
     if printf '%s\n' "$MOVED_SKILLS_LINE" | grep -q " ${skill}\|\"${skill} \| ${skill}\""; then
         pass "Migration includes ${skill}"
     else
@@ -162,7 +162,7 @@ header "Setup: Skill selection menu"
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # All skills must appear in the selection menu
-for skill in dependency-track jenkins jira to-tasks sonarqube argocd skanetrafiken java-21-to-25-migration codex; do
+for skill in dependency-track jenkins jira to-tasks sonarqube argocd skanetrafiken java-21-to-25-migration; do
     if grep -q "$skill" "$SETUP"; then
         pass "Skill '${skill}' referenced in setup.sh"
     else
@@ -172,10 +172,10 @@ done
 
 # All skills in select_skills menu
 MENU_ITEMS=$(sed -n '/^select_skills/,/^}/p' "$SETUP" | grep -c 'printf.*BOLD.*RESET.*DIM')
-if [ "$MENU_ITEMS" -ge 9 ]; then
-    pass "Selection menu has ${MENU_ITEMS} items (expected ≥9)"
+if [ "$MENU_ITEMS" -ge 8 ]; then
+    pass "Selection menu has ${MENU_ITEMS} items (expected ≥8)"
 else
-    fail "Selection menu has ${MENU_ITEMS} items (expected ≥9)"
+    fail "Selection menu has ${MENU_ITEMS} items (expected ≥8)"
 fi
 
 # 'all' selects all skills including java migration
@@ -192,35 +192,7 @@ else
     fail "'all' selection does not include INSTALL_TO_TASKS"
 fi
 
-if sed -n '/^select_skills/,/^}/p' "$SETUP" | grep -q 'INSTALL_CODEX_REVIEW=true'; then
-    pass "'all' selection includes INSTALL_CODEX_REVIEW"
-else
-    fail "'all' selection does not include INSTALL_CODEX_REVIEW"
-fi
 
-if sed -n '/^select_skills/,/^}/p' "$SETUP" | grep -q '9) INSTALL_CODEX_REVIEW=true'; then
-    pass "Selection 9 enables codex"
-else
-    fail "Selection 9 should enable codex"
-fi
-
-# ═══════════════════════════════════════════════════════════════════════════════
-header "Setup: codex dependency gate"
-# ═══════════════════════════════════════════════════════════════════════════════
-
-DEPS_BODY=$(sed -n '/^check_and_install_deps/,/^}/p' "$SETUP")
-
-if echo "$DEPS_BODY" | grep -q 'INSTALL_CODEX_REVIEW' && echo "$DEPS_BODY" | grep -q 'has_cmd codex'; then
-    pass "codex checks for codex CLI"
-else
-    fail "codex should check for codex CLI"
-fi
-
-if echo "$DEPS_BODY" | grep -q 'Skipping codex skill'; then
-    pass "codex is skipped when codex CLI is missing"
-else
-    fail "codex should be skipped when codex CLI is missing"
-fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
 header "Setup: AGENT_HARNESS variable"
@@ -434,11 +406,6 @@ else
     fail "Summary should include java-21-to-25-migration"
 fi
 
-if echo "$SUMMARY_BODY" | grep -q 'INSTALL_CODEX_REVIEW'; then
-    pass "Summary includes codex"
-else
-    fail "Summary should include codex"
-fi
 
 if echo "$SUMMARY_BODY" | grep -q 'AGENT_HARNESS'; then
     pass "Summary shows harness type"
@@ -494,17 +461,7 @@ else
     fail "INSTALL_TO_TASKS not counted in remaining skills check"
 fi
 
-if echo "$MAIN_BODY" | grep -q 'INSTALL_CODEX_REVIEW.*remaining'; then
-    pass "INSTALL_CODEX_REVIEW counted in remaining check"
-else
-    fail "INSTALL_CODEX_REVIEW not counted in remaining skills check"
-fi
 
-if echo "$MAIN_BODY" | grep -q 'INSTALL_CODEX_REVIEW.*install_skill "codex"'; then
-    pass "INSTALL_CODEX_REVIEW installs codex skill"
-else
-    fail "INSTALL_CODEX_REVIEW should install codex skill"
-fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
 header "Setup: java-21-to-25-migration source directory"
@@ -772,11 +729,6 @@ else
     fail "Help text should mention java-21-to-25-migration"
 fi
 
-if echo "$HELP_BODY" | grep -q 'codex'; then
-    pass "Help text mentions codex"
-else
-    fail "Help text should mention codex"
-fi
 
 if echo "$HELP_BODY" | grep -qi 'claude code.*pi\|pi.*claude'; then
     pass "Help text mentions both harnesses"
@@ -794,7 +746,7 @@ fi
 header "Setup: All skills have source directories"
 # ═══════════════════════════════════════════════════════════════════════════════
 
-for skill in dependency-track jenkins jira to-tasks sonarqube argocd skanetrafiken java-21-to-25-migration codex; do
+for skill in dependency-track jenkins jira to-tasks sonarqube argocd skanetrafiken java-21-to-25-migration; do
     skill_dir="${REPO_DIR}/skills/${skill}"
     if [ -d "$skill_dir" ]; then
         pass "${skill}/ directory exists"
@@ -814,7 +766,7 @@ header "Setup: Connectivity test only for remote-config skills"
 
 # The connectivity test prompt should only appear when a service with remote
 # config is selected (dtrack, jenkins, jira, sonarqube), not for skanetrafiken,
-# to-tasks, java-21-to-25-migration, or codex which need no remote config.
+# to-tasks, or java-21-to-25-migration, which need no remote config.
 
 MAIN_BODY=$(sed -n '/^main()/,/^}/p' "$SETUP")
 
@@ -834,7 +786,7 @@ for remote_skill in INSTALL_DTRACK INSTALL_JENKINS INSTALL_JIRA INSTALL_SONAR; d
 done
 
 # No-config skills must NOT set has_remote
-for local_skill in INSTALL_SKANE INSTALL_TO_TASKS INSTALL_JAVA_MIG INSTALL_CODEX_REVIEW; do
+for local_skill in INSTALL_SKANE INSTALL_TO_TASKS INSTALL_JAVA_MIG; do
     if echo "$MAIN_BODY" | grep -q "${local_skill}.*has_remote"; then
         fail "${local_skill} should not set has_remote (no remote config)"
     else

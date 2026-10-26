@@ -21,7 +21,7 @@ If a worktree is in use, include its full path and branch so the next agent can 
 Separate what was verified from what was not run or is waiting on the user. End with the first
 concrete step for the next session.
 
-Do not duplicate content already captured in other artifacts (specs, plans, ADRs, issues,
+Do not duplicate content already captured in other artifacts (specs, plans, issues,
 commits, diffs). Reference them by full path or URL instead. Write home paths with `~` and leave
 out personal or machine-specific data, since the file may be committed.
 

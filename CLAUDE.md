@@ -30,8 +30,8 @@ The live test sections in `tests/test-*.sh` run only when the corresponding serv
 - ArgoCD: `GET /api/v1/session/userinfo` (health check), `GET .../applications` (list apps), `GET .../projects` (list projects)
 - The "invalid type detection" test calls `jira-create.sh` but it exits at type validation before any write API call
 
-The setup and codex suites reach no server at all. Keep them offline; do not add
-a live section to them without re-auditing this rule.
+The setup suite reaches no server at all. Keep it offline; do not add
+a live section to it without re-auditing this rule.
 
 If you add a live test, verify the full call chain to confirm nothing writes to the server.
 
@@ -54,8 +54,8 @@ Run `npm --prefix extensions run validate` for the full Pi extension unit and ty
   `jenkins-test-failures.sh` must **not** have `set -e` (it handles 404s with `|| true`), and
   `tests/test-jenkins.sh` fails if it gains one. Check the skill's own suite before adding or
   removing the line.
-- **Shebangs are mixed.** Both `#!/bin/bash` and `#!/usr/bin/env bash` are in use; `skills/codex/`,
-  `setup.sh`, and `skills/pr-ready/pr-state.sh` take the `env` form. Match the directory you
+- **Shebangs are mixed.** Both `#!/bin/bash` and `#!/usr/bin/env bash` are in use; `setup.sh`
+  and `skills/pr-ready/pr-state.sh` take the `env` form. Match the directory you
   are editing. Scripts should also pass `zsh -n`, which the jira and argocd suites check.
 - Config: `~/.boring/<skill>/` with separate files per value (not a single config file)
 - Error messages follow: what failed, then context, then common causes, then recovery commands
