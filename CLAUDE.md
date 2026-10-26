@@ -7,8 +7,7 @@ in a `scripts/` folder, others keep them at the skill root, and several are pros
 
 This file deliberately does not inventory the skills or the test suites. Run `ls skills` and read
 `tests/test-all.sh` for the current list: every previous attempt to keep an inventory here went
-stale and misled the next reader. `code-review/` is a prompt and rubric set, and `tests/` is
-the suite runner.
+stale and misled the next reader. `tests/` is the suite runner.
 
 ## Architecture
 

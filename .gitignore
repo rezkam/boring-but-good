@@ -9,9 +9,8 @@ venv/
 __pycache__/
 *.py[cod]
 
-# Generated logs and review artifacts
+# Generated logs
 *.log
-code-review/runs/
 sama_dm_thread_chat_view.html
 
 # Agent local state
