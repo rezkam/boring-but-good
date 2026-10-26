@@ -12,7 +12,7 @@ CYAN=$'\033[0;36m'; BOLD=$'\033[1m'; DIM=$'\033[2m'; RESET=$'\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILLS_SRC="${SCRIPT_DIR}/skills"
-MOVED_SKILLS="ai-chat argocd codex commit coordinator dependency-track finance java-21-to-25-migration jenkins jira perplexity pr-ready skanetrafiken sonarqube tdd to-tasks verify"
+MOVED_SKILLS="ai-chat argocd codex commit dependency-track finance java-21-to-25-migration jenkins jira perplexity pr-ready skanetrafiken sonarqube tdd to-tasks verify"
 LEGACY_WORKFLOW_TOOL_SKILLS="argocd dependency-track jenkins jira sonarqube"
 BORING_DIR="${HOME}/.boring"
 
@@ -408,7 +408,7 @@ banner() {
 }
 
 # ── Skill selection ─────────────────────────────────────────────────────────
-INSTALL_DTRACK=false; INSTALL_JENKINS=false; INSTALL_JIRA=false; INSTALL_TO_TASKS=false; INSTALL_SONAR=false; INSTALL_SKANE=false; INSTALL_JAVA_MIG=false; INSTALL_ARGOCD=false; INSTALL_CODEX_REVIEW=false; INSTALL_COORDINATOR=false
+INSTALL_DTRACK=false; INSTALL_JENKINS=false; INSTALL_JIRA=false; INSTALL_TO_TASKS=false; INSTALL_SONAR=false; INSTALL_SKANE=false; INSTALL_JAVA_MIG=false; INSTALL_ARGOCD=false; INSTALL_CODEX_REVIEW=false
 INSTALL_DIR=""
 AGENT_HARNESS="claude-code"
 
@@ -424,14 +424,13 @@ select_skills() {
     printf "    %b  argocd                  %b\n" "${BOLD}7${RESET}" "${DIM}— GitOps deployments: sync, status, rollback${RESET}"
     printf "    %b  java-21-to-25-migration %b\n" "${BOLD}8${RESET}" "${DIM}— JDK 21→25 migration (no config needed)${RESET}"
     printf "    %b  codex                  %b\n" "${BOLD}9${RESET}" "${DIM}— Codex review sessions, reports, and follow-up${RESET}"
-    printf "    %b coordinator             %b\n" "${BOLD}10${RESET}" "${DIM}Own a task set: plan, dispatch subagents, verify, one PR${RESET}"
     echo ""
 
     local selection
     ask selection "Skills to install" "all"
 
     if [ "$selection" = "all" ]; then
-        INSTALL_DTRACK=true; INSTALL_JENKINS=true; INSTALL_JIRA=true; INSTALL_TO_TASKS=true; INSTALL_SONAR=true; INSTALL_SKANE=true; INSTALL_ARGOCD=true; INSTALL_JAVA_MIG=true; INSTALL_CODEX_REVIEW=true; INSTALL_COORDINATOR=true
+        INSTALL_DTRACK=true; INSTALL_JENKINS=true; INSTALL_JIRA=true; INSTALL_TO_TASKS=true; INSTALL_SONAR=true; INSTALL_SKANE=true; INSTALL_ARGOCD=true; INSTALL_JAVA_MIG=true; INSTALL_CODEX_REVIEW=true
     else
         for s in $selection; do
             case "$s" in
@@ -444,7 +443,6 @@ select_skills() {
                 7) INSTALL_ARGOCD=true    ;;
                 8) INSTALL_JAVA_MIG=true  ;;
                 9) INSTALL_CODEX_REVIEW=true ;;
-                10) INSTALL_COORDINATOR=true ;;
                 *) warn "Unknown selection: $s (skipping)" ;;
             esac
         done
@@ -470,7 +468,6 @@ select_skills() {
     [ "$INSTALL_ARGOCD"   = "true" ] && count=$((count + 1))
     [ "$INSTALL_JAVA_MIG" = "true" ] && count=$((count + 1))
     [ "$INSTALL_CODEX_REVIEW" = "true" ] && count=$((count + 1))
-    [ "$INSTALL_COORDINATOR" = "true" ] && count=$((count + 1))
 
     [ "$count" -eq 0 ] && { warn "No skills selected. Nothing to do."; exit 0; }
     info "Selected ${count} skill(s) to install."
@@ -1284,7 +1281,6 @@ print_summary() {
     [ "$INSTALL_ARGOCD"   = "true" ] && _summary_skill "argocd"
     [ "$INSTALL_SKANE"    = "true" ] && _summary_skill "skanetrafiken"
     [ "$INSTALL_CODEX_REVIEW" = "true" ] && _summary_skill "codex"
-    [ "$INSTALL_COORDINATOR" = "true" ] && _summary_skill "coordinator"
 
     # In 'both' mode, also show Pi copies
     if [ "$AGENT_HARNESS" = "both" ]; then
@@ -1297,7 +1293,6 @@ print_summary() {
         [ "$INSTALL_ARGOCD"   = "true" ] && _summary_pi "argocd"
         [ "$INSTALL_SKANE"    = "true" ] && _summary_pi "skanetrafiken"
         [ "$INSTALL_CODEX_REVIEW" = "true" ] && _summary_pi "codex"
-        [ "$INSTALL_COORDINATOR" = "true" ] && _summary_pi "coordinator"
     fi
 
     # java-21-to-25-migration: agent and/or skill
@@ -1377,7 +1372,6 @@ main() {
     [ "$INSTALL_ARGOCD"   = "true" ] && remaining=$((remaining + 1))
     [ "$INSTALL_JAVA_MIG" = "true" ] && remaining=$((remaining + 1))
     [ "$INSTALL_CODEX_REVIEW" = "true" ] && remaining=$((remaining + 1))
-    [ "$INSTALL_COORDINATOR" = "true" ] && remaining=$((remaining + 1))
     if [ "$remaining" -eq 0 ]; then
         echo ""
         warn "No skills remaining after dependency checks."
@@ -1395,7 +1389,6 @@ main() {
     [ "$INSTALL_SKANE"    = "true" ] && install_skill "skanetrafiken"      # no config needed
     [ "$INSTALL_JAVA_MIG" = "true" ] && install_java_migration             # harness-aware install
     [ "$INSTALL_CODEX_REVIEW" = "true" ] && install_skill "codex"    # no config needed
-    [ "$INSTALL_COORDINATOR" = "true" ] && install_skill "coordinator"     # no config needed
 
     # Only offer connectivity tests if a service with remote config was installed
     local has_remote=false

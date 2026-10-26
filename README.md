@@ -21,7 +21,6 @@ Skills that give coding agents the ability to interact with real engineering sys
 | [**codex**](skills/codex/) | Run non-interactive Codex code review sessions, track long-running jobs, and continue review threads with extra prompts. |
 | [**commit**](skills/commit/) | Stage and commit only the intended changes. |
 | [**handoff**](skills/handoff/) | Compact the current conversation into a handoff document for the next agent. |
-| [**coordinator**](skills/coordinator/) | Drive multi-slice coding campaigns from an approved plan to a merge-ready pull request. |
 | [**perplexity**](skills/perplexity/) | Search, research, chat, and analyze files through Perplexity WebUI. |
 | [**pr-ready**](skills/pr-ready/) | Commit, push, open, and verify a merge-ready pull request without merging it. |
 | [**research**](skills/research/) | Research a question against primary sources in a background agent and save cited findings as Markdown. |

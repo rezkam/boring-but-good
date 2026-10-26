@@ -36,7 +36,7 @@ else
     fail "setup.sh should read skills from skills/"
 fi
 
-for skill in ai-chat argocd codex commit coordinator dependency-track finance java-21-to-25-migration jenkins jira perplexity pr-ready skanetrafiken sonarqube tdd to-tasks verify; do
+for skill in ai-chat argocd codex commit dependency-track finance java-21-to-25-migration jenkins jira perplexity pr-ready skanetrafiken sonarqube tdd to-tasks verify; do
     if [ -f "${REPO_DIR}/skills/${skill}/SKILL.md" ]; then
         pass "${skill} is under skills/"
     else
@@ -69,7 +69,7 @@ fi
 # the repository extension root lets pi discover and install them independently of skills.
 header "Setup: Canonical extension layout"
 EXTENSIONS_DIR="${REPO_DIR}/extensions"
-for extension in coordinator-guard gemini-search; do
+for extension in gemini-search; do
     if [ -f "${EXTENSIONS_DIR}/${extension}/index.ts" ]; then
         pass "${extension} is under extensions/"
     else
@@ -105,7 +105,7 @@ else
 fi
 
 MOVED_SKILLS_LINE=$(grep '^MOVED_SKILLS=' "$SETUP" || true)
-for skill in ai-chat argocd codex commit coordinator dependency-track finance java-21-to-25-migration jenkins jira perplexity pr-ready skanetrafiken sonarqube tdd to-tasks verify; do
+for skill in ai-chat argocd codex commit dependency-track finance java-21-to-25-migration jenkins jira perplexity pr-ready skanetrafiken sonarqube tdd to-tasks verify; do
     if printf '%s\n' "$MOVED_SKILLS_LINE" | grep -q " ${skill}\|\"${skill} \| ${skill}\""; then
         pass "Migration includes ${skill}"
     else
