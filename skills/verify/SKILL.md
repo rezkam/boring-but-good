@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Establish that a change actually works before reporting it done, and report what was run in a fixed shape. Use before any completion claim, when the user asks "did you run it" or "is it done", and after any fix that has not been executed.
+description: Establish that a code change actually works before reporting it done, and report what was run in a fixed shape. Use whenever you are about to say a change works, is fixed, or is done, before committing or opening a PR, even if the user did not ask; also when the user asks "did you run it" or "is it done", and after any fix that has not been executed.
 ---
 
 # Verify
@@ -13,7 +13,8 @@ having run it.
 Do not invent one. Read it from the repo, in this order:
 
 1. `Makefile` targets
-2. `package.json` scripts, `go.mod` with `go test ./...`, `pom.xml`, `pyproject.toml`
+2. the project's build or task files: `package.json` scripts, `go.mod` with `go test ./...`,
+   `pom.xml`, `build.gradle`, `Cargo.toml`, `pyproject.toml`, `justfile`, `Taskfile.yml`
 3. `.github/workflows/*.yml`, which is the authority on what must pass to merge
 4. the repo's `CLAUDE.md`, `AGENTS.md`, or `CONTEXT-MAP.md`
 
@@ -33,8 +34,8 @@ recorded before starting, or re-run at the base commit in a separate worktree. N
 `git stash` or `git checkout` the working tree to find out: that discards uncommitted
 work. See the `tdd` skill's `baseline.md`.
 
-Green tests are not proof a feature exists. If the change is user-visible, drive it: the
-`run` skill launches the app for exactly this.
+Green tests are not proof a feature exists. If the change is user-visible, drive it: use
+the `run` skill where the harness has one, otherwise launch the app or CLI yourself.
 
 ## Report in this shape
 
@@ -49,9 +50,22 @@ Risk:       <what is still unverified>
 `Not run` and `Risk` are the two lines that make this worth reading. A report with both
 empty is usually a report that did not look.
 
+Example:
+
+```
+Ran:        make test; npm --prefix web run test
+Passed:     go: 412 tests, exit 0; web: 88 tests, exit 0
+Failed:     none
+Not run:    make e2e, needs a local Postgres that is not running here
+Risk:       the migration path is covered only by e2e, so it is unverified
+```
+
 ## Never
 
-- claim green from a partial run, a type check alone, or a successful build
-- say "should work" or "this fixes it" about something that was never executed
-- report done while a suite is still running
-- retry a red check hoping it flakes green without saying that is what you are doing
+- claim green from a partial run, a type check alone, or a successful build: those prove
+  it compiles, not that it behaves
+- say "should work" or "this fixes it" about something that was never executed: the
+  reader will act on it as if it were checked
+- report done while a suite is still running: the result you would report does not exist yet
+- retry a red check hoping it flakes green without saying so: a silent retry hides a real
+  failure
