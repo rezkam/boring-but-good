@@ -23,6 +23,7 @@ Skills that give coding agents the ability to interact with real engineering sys
 | [**coordinator**](skills/coordinator/) | Drive multi-slice coding campaigns from an approved plan to a merge-ready pull request. |
 | [**perplexity**](skills/perplexity/) | Search, research, chat, and analyze files through Perplexity WebUI. |
 | [**pr-ready**](skills/pr-ready/) | Commit, push, open, and verify a merge-ready pull request without merging it. |
+| [**research**](skills/research/) | Research a question against primary sources in a background agent and save cited findings as Markdown. |
 | [**tdd**](skills/tdd/) | Write a failing test first, prove it detects the behavior, then make it pass. |
 | [**verify**](skills/verify/) | Run the changed behavior and report concrete verification evidence. |
 
