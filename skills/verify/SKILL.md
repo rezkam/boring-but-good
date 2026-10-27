@@ -32,7 +32,7 @@ Investigate before retrying.
 To decide whether a failure pre-dates your change, compare against the baseline you
 recorded before starting, or re-run at the base commit in a separate worktree. Never
 `git stash` or `git checkout` the working tree to find out: that discards uncommitted
-work. See the `tdd` skill's `baseline.md`.
+work.
 
 Green tests are not proof a feature exists. If the change is user-visible, drive it: use
 the `run` skill where the harness has one, otherwise launch the app or CLI yourself.
