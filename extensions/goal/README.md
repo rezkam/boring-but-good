@@ -30,6 +30,11 @@ Aborts leave the goal active without immediately queuing another turn. Failed
 compactions resume an idle active goal. Transient model errors retry until three
 consecutive turns fail; usage-limit errors stop continuation immediately.
 
+For goals without a token budget, the footer refreshes elapsed active time every
+second, including during long turns, compaction, and idle waits after an abort.
+Pausing stops elapsed-time tracking and the live refresh. Budgeted goals show
+token usage instead.
+
 ## Tests
 
 ```bash

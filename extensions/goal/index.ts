@@ -378,6 +378,13 @@ export default function goalExtension(pi: ExtensionAPI) {
 	let activeGoalIdAtAgentStart: string | null = null;
 	let continuationQueued = false;
 	let consecutiveErrorTurns = 0;
+	let statusTimer: ReturnType<typeof setInterval> | undefined;
+
+	function stopStatusTimer(): void {
+		if (statusTimer === undefined) return;
+		clearInterval(statusTimer);
+		statusTimer = undefined;
+	}
 
 	function currentGoalSnapshot(): Goal | null {
 		if (!goal) return null;
@@ -407,6 +414,15 @@ export default function goalExtension(pi: ExtensionAPI) {
 	}
 
 	function updateStatus(ctx: ExtensionContext): void {
+		// Elapsed time must keep rendering even while a turn, compaction, or idle wait emits no events.
+		if (ctx.hasUI && goal?.status === "active" && goal.tokenBudget === undefined) {
+			if (statusTimer === undefined) {
+				statusTimer = setInterval(() => updateStatus(ctx), 1_000);
+				statusTimer.unref();
+			}
+		} else {
+			stopStatusTimer();
+		}
 		if (!ctx.hasUI) return;
 		if (!goal) {
 			ctx.ui.setStatus("goal", undefined);
@@ -556,6 +572,7 @@ export default function goalExtension(pi: ExtensionAPI) {
 	}
 
 	function reconstructState(ctx: ExtensionContext): void {
+		stopStatusTimer();
 		consecutiveErrorTurns = 0;
 		goal = null;
 		activeSinceMs = null;
@@ -575,6 +592,7 @@ export default function goalExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => reconstructState(ctx));
 	pi.on("session_tree", async (_event, ctx) => reconstructState(ctx));
+	pi.on("session_shutdown", async () => stopStatusTimer());
 
 	pi.on("before_agent_start", async (event) => {
 		const snapshot = currentGoalSnapshot();
