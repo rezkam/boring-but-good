@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export default function codexFastMode(pi: ExtensionAPI): void {
-	let enabled = true;
+	let enabled = false;
 	const isCodex = (model: ExtensionContext["model"]) =>
 		model?.provider === "openai-codex" && model.api === "openai-codex-responses";
 
