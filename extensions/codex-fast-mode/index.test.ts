@@ -4,15 +4,20 @@ import codexFastMode from "./index.ts";
 
 function setup() {
 	const handlers = new Map<string, Function>();
+	const commands = new Map<string, any>();
+	const notices: string[] = [];
 	const statuses: (string | undefined)[] = [];
-	codexFastMode({ on: (name: string, handler: Function) => handlers.set(name, handler) } as any);
+	codexFastMode({
+		on: (name: string, handler: Function) => handlers.set(name, handler),
+		registerCommand: (name: string, command: any) => commands.set(name, command),
+	} as any);
 	const ctx = {
 		model: { provider: "openai-codex", api: "openai-codex-responses" },
 		hasUI: true,
-		ui: { setStatus: (_key: string, value: string | undefined) => statuses.push(value),
+		ui: { notify: (text: string) => notices.push(text), setStatus: (_key: string, value: string | undefined) => statuses.push(value),
 			theme: { fg: (_color: string, value: string) => value } },
 	};
-	return { ctx, statuses, emit: (name: string, event = {}) => handlers.get(name)!(event, ctx) };
+	return { ctx, statuses, notices, command: (args: string) => commands.get("codex-fast")?.handler(args, ctx), emit: (name: string, event = {}) => handlers.get(name)!(event, ctx) };
 }
 
 test("requests priority while preserving the rest of the payload", () => {
@@ -40,4 +45,33 @@ test("footer follows startup and model selection including switching back", () =
 	ctx.hasUI = false;
 	emit("session_start");
 	assert.equal(statuses.length, 3);
+});
+
+
+test("off restores normal requests across model switches and on restores priority", async () => {
+	const { ctx, emit, command, statuses } = setup();
+	emit("session_start");
+	await command("off");
+	assert.equal(statuses.at(-1), undefined);
+	const payload = { model: "test-model", input: [] };
+	assert.equal(emit("before_provider_request", { payload }), undefined);
+	emit("model_select", { model: { provider: "other", api: "other" } });
+	emit("model_select", { model: ctx.model });
+	assert.equal(statuses.at(-1), undefined);
+	assert.equal(emit("before_provider_request", { payload }), undefined);
+	await command("on");
+	assert.equal(statuses.at(-1), "Codex fast: priority");
+	assert.deepEqual(emit("before_provider_request", { payload }), { ...payload, service_tier: "priority" });
+});
+
+test("status and invalid arguments leave the setting unchanged", async () => {
+	const { command, emit, notices } = setup();
+	await command("");
+	assert.match(notices.at(-1)!, /on/i);
+	await command("off");
+	await command("invalid");
+	assert.match(notices.at(-1)!, /Usage:/);
+	assert.equal(emit("before_provider_request", { payload: {} }), undefined);
+	await command("");
+	assert.match(notices.at(-1)!, /off/i);
 });
