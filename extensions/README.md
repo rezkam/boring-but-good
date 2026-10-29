@@ -5,6 +5,7 @@ Pi extensions live here as harness resources, separately from workflow skills un
 Each extension directory contains its entry point, supporting modules, tests, and installation instructions. Install an extension by following its own README:
 
 - [Gemini Search](gemini-search/README.md)
+- [Codex fast mode](codex-fast-mode/README.md)
 - [Goal](goal/README.md)
 
 ## Development
