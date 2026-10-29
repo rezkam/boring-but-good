@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test gemini-search/test/*.test.mjs goal/*.test.ts",
+    "test": "node --test gemini-search/test/*.test.mjs goal/*.test.ts codex-fast-mode/*.test.ts",
     "typecheck": "tsc --noEmit",
     "validate": "npm test && npm run typecheck"
   },

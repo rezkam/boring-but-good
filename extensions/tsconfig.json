@@ -12,6 +12,7 @@
   },
   "include": [
     "gemini-search/**/*.ts",
-    "goal/**/*.ts"
+    "goal/**/*.ts",
+    "codex-fast-mode/**/*.ts"
   ]
 }
