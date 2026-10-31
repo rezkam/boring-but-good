@@ -18,6 +18,7 @@ Skills that give coding agents the ability to interact with real engineering sys
 | [**java-21-to-25-migration**](skills/java-21-to-25-migration/) | Migrate a Java project from JDK 21 to JDK 25 with a phased plan covering all breaking changes. |
 | [**finance**](skills/finance/) | Fetch browser-authenticated market and macroeconomic data through Browser Tools managed Chrome. |
 | [**ai-chat**](skills/ai-chat/) | Query browser-authenticated AI providers and power the file-backed `gemini_search` pi extension. |
+| [**code-review**](skills/code-review/) | Review PRs, branches, local changes, snapshots, or codebases for concrete, material defects without editing code. |
 | [**commit**](skills/commit/) | Stage and commit only the intended changes. |
 | [**handoff**](skills/handoff/) | Compact the current conversation into a handoff document for the next agent. |
 | [**perplexity**](skills/perplexity/) | Search, research, chat, and analyze files through Perplexity WebUI. |
