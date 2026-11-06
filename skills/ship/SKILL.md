@@ -27,22 +27,20 @@ behavior in the running app, not only unit tests. Report in the `verify` shape.
 A failing check that pre-dates the change is still a blocker for shipping. Say so; do not
 skip it.
 
-## 3. Correctness verification
+## 3. Pre-release verification
 
-Run the agent described in [`correctness-verification.md`](correctness-verification.md)
-against the diff, with these limits:
+Run the `pre-release-verification` skill on the candidate revision, rebased on `origin/main`,
+against `main` as the target. Invoking `ship` is the authorization to push that skill
+withholds by default, and it covers only the push in step 4.
 
-- Scope it to the diff and the components it touches, not the whole repository.
-- Derive the properties first. A one-line fix needs a failing test that bites; a change to
-  state, concurrency, ordering, money, identity, or storage needs more.
-- Use formal methods where they pay: TLA+ or a model checker for a state machine with
-  interleavings or retries, property-based and stateful tests for invariants, deterministic
-  simulation for timing and storage. Prefer what the repository already has. Skip a method
-  that does not match a real risk, and say that it was skipped and why.
-- Keep the artifacts that stay useful (tests, models, specs) in the change. Keep the report
-  out of the repository unless the repository already keeps such reports.
-- A counterexample or an unproven required property blocks the push. Fix the code or report
-  the blocker; never weaken a property to get green.
+- Scope it to the diff and the existing behavior the diff can affect.
+- Keep the artifacts that stay useful (tests, models, specs, the entry-point command) in the
+  change. Keep the report out of the repository unless the repository already keeps such
+  reports.
+- Push only on `PASS`. `FAIL` and `BLOCKED` both stop the push. Fix the code or report the
+  blocker; never weaken a property or skip a required check to get `PASS`.
+- The result is bound to one revision. Any later commit or rebase needs the affected checks
+  rerun.
 
 ## 4. Push
 
@@ -78,7 +76,7 @@ a read-only check before calling it shipped.
 ```
 Pushed:        <sha> to main
 Local gate:    <exact command and counts>
-Correctness:   <properties checked, methods used, results, what was skipped and why>
+Verification:  <PASS | FAIL | BLOCKED, properties checked, methods used, what was skipped and why>
 Rollout:       <runs for this sha and their conclusions>
 Not run:       <skipped checks and why>
 Risk:          <what is still unverified>
