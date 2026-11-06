@@ -12,7 +12,7 @@ CYAN=$'\033[0;36m'; BOLD=$'\033[1m'; DIM=$'\033[2m'; RESET=$'\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILLS_SRC="${SCRIPT_DIR}/skills"
-MOVED_SKILLS="ai-chat argocd commit dependency-track finance java-21-to-25-migration jenkins jira perplexity pre-release-verification pr-ready skanetrafiken ship sonarqube tdd to-tasks verify"
+MOVED_SKILLS="ai-chat argocd commit dependency-track finance java-21-to-25-migration jenkins jira perplexity pr-ready skanetrafiken ship sonarqube tdd to-tasks verify"
 LEGACY_WORKFLOW_TOOL_SKILLS="argocd dependency-track jenkins jira sonarqube"
 BORING_DIR="${HOME}/.boring"
 

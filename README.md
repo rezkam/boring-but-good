@@ -24,8 +24,7 @@ Skills that give coding agents the ability to interact with real engineering sys
 | [**perplexity**](skills/perplexity/) | Search, research, chat, and analyze files through Perplexity WebUI. |
 | [**pr-ready**](skills/pr-ready/) | Commit, push, open, and verify a merge-ready pull request without merging it. |
 | [**research**](skills/research/) | Research a question against primary sources in a background agent and save cited findings as Markdown. |
-| [**pre-release-verification**](skills/pre-release-verification/) | Create and run executable correctness verification before merging or deploying, and return PASS, FAIL or BLOCKED. |
-| [**ship**](skills/ship/) | Verify locally, run pre-release verification, push to `main` where pull requests are disabled, and watch CI and deploy. |
+| [**ship**](skills/ship/) | Verify locally, run executable correctness verification, push to `main` where pull requests are disabled, and watch CI and deploy. |
 | [**tdd**](skills/tdd/) | Write a failing test first, prove it detects the behavior, then make it pass. |
 | [**verify**](skills/verify/) | Run the changed behavior and report concrete verification evidence. |
 
