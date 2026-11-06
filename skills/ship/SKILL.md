@@ -1,6 +1,6 @@
 ---
 name: ship
-description: Verify a change with executable evidence, push it straight to the default branch, and watch CI and deploy, for repositories that have pull requests disabled and ship continuously. Use when the user says ship it, push to main, or deploy, and in any repo whose instructions say pull requests are disabled. Do not use where a pull request review is required; use pr-ready there.
+description: Verify a change with executable evidence, push it straight to the default branch, and watch CI and deploy, for repositories that ship continuously to main. Use when the user says ship it, push to main, or deploy.
 ---
 
 # Ship
