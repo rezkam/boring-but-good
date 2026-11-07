@@ -1,12 +1,21 @@
 ---
 name: verify
-description: Establish that a code change actually works before reporting it done, and report what was run in a fixed shape. Also the release gate, which implements and runs correctness verification, including formal methods where they pay, before merging or deploying. Use whenever you are about to say a change works, is fixed, or is done, before committing, pushing, or opening a PR, even if the user did not ask; also when the user asks "did you run it" or "is it done", and after any fix that has not been executed.
+description: Establish that a change, or the whole codebase when there is no change, actually works, and report what was run in a fixed shape. Also the release gate, which implements and runs correctness verification, including formal methods where they pay, before merging or deploying. Use whenever you are about to say something works, is fixed, or is done, before committing, pushing, or opening a PR, even if the user did not ask; also when the user asks to verify the repository, "did you run it" or "is it done", and after any fix that has not been executed.
 ---
 
 # Verify
 
-You are about to tell someone a change works. The only thing that makes that true is
+You are about to tell someone that something works. The only thing that makes that true is
 having run it.
+
+## Scope: the change, or the whole codebase
+
+With a change (uncommitted work, a branch, a diff, a revision), verify that change and the
+existing behavior it can affect. With no change, or when asked to verify the repository, verify
+the whole codebase at its current revision: every required check, every component, and the
+release-critical properties of the system as a whole. Do not shrink a whole-codebase request to
+the last commit or to the tests that are easiest to run. State the scope and the revision at the
+top of the report.
 
 ## Find the project's real command
 
@@ -40,9 +49,10 @@ the `run` skill where the harness has one, otherwise launch the app or CLI yours
 ## Report in this shape
 
 ```
+Scope:      <change, or whole codebase, and the revision>
 Ran:        <exact command>
 Passed:     <what passed, with counts>
-Failed:     <what failed, and whether it pre-dates the change>
+Failed:     <what failed, and whether it pre-dates the change, if any>
 Not run:    <what was skipped, and why>
 Risk:       <what is still unverified>
 ```
@@ -62,8 +72,9 @@ Risk:       the migration path is covered only by e2e, so it is unverified
 
 ## Pre-release verification
 
-Use this when the change will merge into the default branch or reach production, and
-whenever the user or the repository asks for a release gate. The sections above are its
+Use this when a change will merge into the default branch or reach production, when a
+revision or the whole codebase is about to be released, and whenever the user or the repository
+asks for a release gate. The sections above are its
 floor; this section adds executable verification of correctness properties. Establish whether
 the candidate satisfies its intended requirements through executable evidence. Create and run
 verification artifacts, not just a review or a proposed test plan.
@@ -71,7 +82,8 @@ verification artifacts, not just a review or a proposed test plan.
 ### Scope and approach
 
 Verify the candidate revision against the intended target branch, including affected existing
-behavior. Identify release-critical properties and required checks. Derive them from
+behavior. With no change to verify, the candidate is the whole codebase at the current
+revision, and the properties cover every component and the system's end-to-end behavior. Identify release-critical properties and required checks. Derive them from
 requirements, not merely the current implementation. Make inferred requirements and
 assumptions explicit.
 
