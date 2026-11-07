@@ -22,8 +22,7 @@ land. Never force-push without explicit approval.
 
 ## 2. Verify
 
-Run the `verify` skill, including its pre-release verification section, on the candidate
-revision. Deliver only on `PASS`. `FAIL` and `BLOCKED` both stop here: fix the cause or report
+Run the `verify` skill on the candidate revision. Deliver only on `PASS`. `FAIL` and `BLOCKED` both stop here: fix the cause or report
 the blocker, never weaken a check to get `PASS`. Any later commit or rebase needs the
 affected checks rerun.
 
@@ -76,7 +75,7 @@ infrastructure failure, and say so.
 ```
 Mode:          pull request | direct to main
 Delivered:     <PR URL or pushed sha>
-Verification:  <PASS | FAIL | BLOCKED, with the verify report>
+Verification:  <PASS | FAIL | BLOCKED, with the verify result and how to reproduce it>
 Checks:        <runs for this head and their conclusions>
 Not run:       <skipped checks and why>
 Risk:          <what is still unverified>

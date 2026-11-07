@@ -1,12 +1,13 @@
 ---
 name: verify
-description: Establish that a change, or the whole codebase when there is no change, actually works, and report what was run in a fixed shape. Also the release gate, which implements and runs correctness verification, including formal methods where they pay, before merging or deploying. Use whenever you are about to say something works, is fixed, or is done, before committing, pushing, or opening a PR, even if the user did not ask; also when the user asks to verify the repository, "did you run it" or "is it done", and after any fix that has not been executed.
+description: Establish that a change, or the whole codebase when there is no change, actually works, by formal proof where the properties allow and by reproducible executable verification otherwise. It is the release gate before merging or deploying. Use whenever you are about to say something works, is fixed, or is done, before committing, pushing, or opening a PR, even if the user did not ask; also when the user asks to verify the repository, "did you run it" or "is it done", and after any fix that has not been verified.
 ---
 
 # Verify
 
-You are about to tell someone that something works. The only thing that makes that true is
-having run it.
+You are about to tell someone that something works. Establish that it does by formally proving
+it where the properties allow, and by verification that anyone can rerun and get the same
+result. A claim without a proof or a reproducible run is not verified.
 
 ## Scope: the change, or the whole codebase
 
@@ -15,67 +16,13 @@ existing behavior it can affect. With no change, or when asked to verify the rep
 the whole codebase at its current revision: every required check, every component, and the
 release-critical properties of the system as a whole. Do not shrink a whole-codebase request to
 the last commit or to the tests that are easiest to run. State the scope and the revision at the
-top of the report.
-
-## Find the project's real command
-
-Do not invent one. Read it from the repo, in this order:
-
-1. `Makefile` targets
-2. the project's build or task files: `package.json` scripts, `go.mod` with `go test ./...`,
-   `pom.xml`, `build.gradle`, `Cargo.toml`, `pyproject.toml`, `justfile`, `Taskfile.yml`
-3. `.github/workflows/*.yml`, which is the authority on what must pass to merge
-4. the repo's `CLAUDE.md` or `AGENTS.md`
-
-If no command exists, say so and propose one. Reading the code is not a substitute for
-running it.
-
-## Run the whole thing, keep the output
-
-Run the relevant suite, not only the test you touched, and paste real counts, failure
-names, and exit status. Never paraphrase a result you did not see.
-
-A suite that hangs is usually a missing service or a cancelled context, not a flake.
-Investigate before retrying.
-
-To decide whether a failure pre-dates your change, compare against the baseline you
-recorded before starting, or re-run at the base commit in a separate worktree. Never
-`git stash` or `git checkout` the working tree to find out: that discards uncommitted
-work.
-
-Green tests are not proof a feature exists. If the change is user-visible, drive it: use
-the `run` skill where the harness has one, otherwise launch the app or CLI yourself.
-
-## Report in this shape
-
-```
-Scope:      <change, or whole codebase, and the revision>
-Ran:        <exact command>
-Passed:     <what passed, with counts>
-Failed:     <what failed, and whether it pre-dates the change, if any>
-Not run:    <what was skipped, and why>
-Risk:       <what is still unverified>
-```
-
-`Not run` and `Risk` are the two lines that make this worth reading. A report with both
-empty is usually a report that did not look.
-
-Example:
-
-```
-Ran:        make test; npm --prefix web run test
-Passed:     go: 412 tests, exit 0; web: 88 tests, exit 0
-Failed:     none
-Not run:    make e2e, needs a local Postgres that is not running here
-Risk:       the migration path is covered only by e2e, so it is unverified
-```
+top of the result.
 
 ## Pre-release verification
 
 Use this when a change will merge into the default branch or reach production, when a
 revision or the whole codebase is about to be released, and whenever the user or the repository
-asks for a release gate. The sections above are its
-floor; this section adds executable verification of correctness properties. Establish whether
+asks for a release gate. Establish whether
 the candidate satisfies its intended requirements through executable evidence. Create and run
 verification artifacts, not just a review or a proposed test plan.
 
@@ -99,8 +46,9 @@ Do not use every method by default. Say which were skipped and why.
 
 ### Implementation and execution
 
-Create a repeatable workflow with a clear entry point, exact commands, and acceptance
-criteria. Run existing relevant checks and add missing verification. Keep the artifacts that
+Make the verification reproducible. Create a repeatable workflow with a clear entry point, exact
+commands, pinned versions, recorded seeds, and acceptance criteria, so a fresh checkout reruns it
+and reaches the same result. Run existing relevant checks and add missing verification. Keep the artifacts that
 stay useful (tests, models, specs, the entry-point command) in the change. Keep the report out
 of the repository unless the repository already keeps such reports.
 

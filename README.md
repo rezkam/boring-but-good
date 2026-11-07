@@ -26,7 +26,7 @@ Skills that give coding agents the ability to interact with real engineering sys
 | [**research**](skills/research/) | Research a question against primary sources in a background agent and save cited findings as Markdown. |
 | [**ship**](skills/ship/) | Verify, then open a pull request and watch CI, or push straight to `main` when the repository ships that way. |
 | [**tdd**](skills/tdd/) | Write a failing test first, prove it detects the behavior, then make it pass. |
-| [**verify**](skills/verify/) | Run the changed behavior and report concrete evidence, and run executable pre-release verification (property tests, model checking, proofs) as a release gate. |
+| [**verify**](skills/verify/) | Establish that a change or the whole codebase works by formal proof and reproducible executable verification, and gate release with PASS, FAIL or BLOCKED. |
 
 Pi extensions live separately under [`extensions/`](extensions/). This keeps executable harness integrations independent from the skills that document their workflows.
 
