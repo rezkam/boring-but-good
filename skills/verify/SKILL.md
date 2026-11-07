@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Establish that a code change actually works before reporting it done, and report what was run in a fixed shape. Also the release gate: implement and run correctness verification, including formal methods where they pay, before merging or deploying. Use whenever you are about to say a change works, is fixed, or is done, before committing, pushing, or opening a PR, even if the user did not ask; also when the user asks "did you run it" or "is it done", and after any fix that has not been executed.
+description: Establish that a code change actually works before reporting it done, and report what was run in a fixed shape. Also the release gate, which implements and runs correctness verification, including formal methods where they pay, before merging or deploying. Use whenever you are about to say a change works, is fixed, or is done, before committing, pushing, or opening a PR, even if the user did not ask; also when the user asks "did you run it" or "is it done", and after any fix that has not been executed.
 ---
 
 # Verify
