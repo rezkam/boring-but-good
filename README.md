@@ -24,9 +24,9 @@ Skills that give coding agents the ability to interact with real engineering sys
 | [**perplexity**](skills/perplexity/) | Search, research, chat, and analyze files through Perplexity WebUI. |
 | [**pr-ready**](skills/pr-ready/) | Commit, push, open, and verify a merge-ready pull request without merging it. |
 | [**research**](skills/research/) | Research a question against primary sources in a background agent and save cited findings as Markdown. |
-| [**ship**](skills/ship/) | Verify locally, run executable correctness verification, push to `main`, and watch CI and deploy. |
+| [**ship**](skills/ship/) | Verify, then open a pull request and watch CI, or push straight to `main` when the repository ships that way. |
 | [**tdd**](skills/tdd/) | Write a failing test first, prove it detects the behavior, then make it pass. |
-| [**verify**](skills/verify/) | Run the changed behavior and report concrete verification evidence. |
+| [**verify**](skills/verify/) | Run the changed behavior and report concrete evidence, and run executable pre-release verification (property tests, model checking, proofs) as a release gate. |
 
 Pi extensions live separately under [`extensions/`](extensions/). This keeps executable harness integrations independent from the skills that document their workflows.
 
