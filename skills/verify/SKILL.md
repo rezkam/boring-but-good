@@ -1,71 +1,93 @@
 ---
 name: verify
-description: Establish that a code change actually works before reporting it done, and report what was run in a fixed shape. Use whenever you are about to say a change works, is fixed, or is done, before committing or opening a PR, even if the user did not ask; also when the user asks "did you run it" or "is it done", and after any fix that has not been executed.
+description: Establish that a change, or the whole codebase when nothing has changed, actually works, by formal proof where the properties allow and by reproducible executable verification otherwise. This is the release gate before merging or deploying. Use it whenever you are about to say something works, is fixed, is done, or is ready, before committing, pushing, merging or deploying, whenever the user asks to verify, prove, check or test a change or the repository, or asks "did you run it" or "is it done", and after any fix that has not been verified, even if the user did not ask.
 ---
 
 # Verify
 
-You are about to tell someone a change works. The only thing that makes that true is
-having run it.
+Saying that something works is a claim other people will act on, so it needs evidence they can
+check. Establish that it works by formally proving it where the properties allow, and by
+verification that anyone can rerun with the same result. A claim without a proof or a
+reproducible run is not verified.
 
-## Find the project's real command
+The aim is executable evidence. Create and run verification artifacts; a review or a proposed
+test plan does not count.
 
-Do not invent one. Read it from the repo, in this order:
+## Scope: the change, or the whole codebase
 
-1. `Makefile` targets
-2. the project's build or task files: `package.json` scripts, `go.mod` with `go test ./...`,
-   `pom.xml`, `build.gradle`, `Cargo.toml`, `pyproject.toml`, `justfile`, `Taskfile.yml`
-3. `.github/workflows/*.yml`, which is the authority on what must pass to merge
-4. the repo's `CLAUDE.md` or `AGENTS.md`
+With a change (uncommitted work, a branch, a diff, a revision), verify that change against the
+intended target branch, including the existing behavior it can affect. With no change, or when
+asked to verify the repository, the candidate is the whole codebase at its current revision:
+every component and the system's end-to-end behavior. Do not shrink a whole-codebase request to
+the last commit or to the checks that are easiest to run. State the scope and the revision at
+the top of the result.
 
-If no command exists, say so and propose one. Reading the code is not a substitute for
-running it.
+## Choose the properties and methods
 
-## Run the whole thing, keep the output
+Identify the release-critical properties and the required checks. Derive them from the
+requirements, not from what the current implementation happens to do, and write down every
+inferred requirement and assumption so a reader can disagree with it.
 
-Run the relevant suite, not only the test you touched, and paste real counts, failure
-names, and exit status. Never paraphrase a result you did not see.
+Prefer the repository's own tooling, then select methods by actual risk:
 
-A suite that hangs is usually a missing service or a cancelled context, not a flake.
-Investigate before retrying.
+- Property-based and stateful testing for inputs, sequences, and invariants.
+- Deterministic simulation testing for controlled scheduling and fault injection.
+- TLA+/TLC for state-machine model checking; TLAPS or Lean 4 for machine-checked proofs where
+  a proof is appropriate.
+- Docker Compose or Testcontainers for real-service integration and recovery.
 
-To decide whether a failure pre-dates your change, compare against the baseline you
-recorded before starting, or re-run at the base commit in a separate worktree. Never
-`git stash` or `git checkout` the working tree to find out: that discards uncommitted
-work.
+Using every method by default adds cost without evidence. Pick the ones that match a real risk
+and say which were skipped and why.
 
-Green tests are not proof a feature exists. If the change is user-visible, drive it: use
-the `run` skill where the harness has one, otherwise launch the app or CLI yourself.
+## Build and run it
 
-## Report in this shape
+Make the verification reproducible: a clear entry point, exact commands, pinned versions,
+recorded seeds, and acceptance criteria, so a fresh checkout reruns it and reaches the same
+result. Run the existing relevant checks and add what is missing. Keep the artifacts that stay
+useful (tests, models, specs, the entry-point command) in the change, and keep the report out of
+the repository unless it already keeps such reports. Start any test database the repository
+provides before the run and tear it down after, including after a failure.
 
-```
-Ran:        <exact command>
-Passed:     <what passed, with counts>
-Failed:     <what failed, and whether it pre-dates the change>
-Not run:    <what was skipped, and why>
-Risk:       <what is still unverified>
-```
+Test what will actually ship: the candidate release artifact, pinned dependencies, and
+production-relevant configuration. Exercise failure paths, not only successful requests, and
+include compatibility, migrations, and rollback where they apply.
 
-`Not run` and `Risk` are the two lines that make this worth reading. A report with both
-empty is usually a report that did not look.
+Look for counterexamples and minimize the ones you find. Where practical, introduce a controlled
+violation and confirm that the matching check fails, because a check that cannot fail proves
+nothing. Never weaken a requirement or an assertion to get a passing result.
 
-Example:
+Keep destructive tests in disposable environments, and document the production differences
+Docker cannot reproduce. Change verification artifacts as needed; change production code only
+when authorized. Rerun the affected checks after every change.
 
-```
-Ran:        make test; npm --prefix web run test
-Passed:     go: 412 tests, exit 0; web: 88 tests, exit 0
-Failed:     none
-Not run:    make e2e, needs a local Postgres that is not running here
-Risk:       the migration path is covered only by e2e, so it is unverified
-```
+## Make it readable
 
-## Never
+Write for engineers who know state machines but not necessarily formal languages. Identify the
+state, the transitions, the properties, and the assumptions. Explain each important claim and any
+non-obvious notation in plain English, and use a small example or trace where it helps. Show how
+each model corresponds to the implementation, what it abstracts away, and what remains
+unchecked.
 
-- claim green from a partial run, a type check alone, or a successful build: those prove
-  it compiles, not that it behaves
-- say "should work" or "this fixes it" about something that was never executed: the
-  reader will act on it as if it were checked
-- report done while a suite is still running: the result you would report does not exist yet
-- retry a red check hoping it flakes green without saying so: a silent retry hides a real
-  failure
+## Evidence and verdict
+
+Bind every result to the exact revision and release artifact tested, so it cannot be mistaken for
+evidence about something else. Keep the commands, observed results, relevant logs, seeds,
+counterexamples, model bounds, and proof assumptions, and keep expected outcomes separate from
+what actually ran.
+
+Say which kind of evidence each result is: empirical testing, model checking, or machine-checked
+proof. A formal proof must be complete, with its assumptions and axioms disclosed. Passing tests
+do not establish unrestricted correctness, and a proved model is not a proved implementation.
+
+Return one verdict:
+
+- **PASS:** the release-critical properties have adequate evidence and every required check
+  passed for the candidate.
+- **FAIL:** a required check failed or a correctness violation was demonstrated.
+- **BLOCKED:** required verification is incomplete, unavailable, or inconclusive.
+
+Deliver the runnable artifacts, the reproduction instructions, and the remaining risks. Never
+mark an unexecuted check as passed, report a result while a suite is still running, or retry a
+red check without saying so, since each of those hides a real failure. The verdict covers one
+revision, so any later commit or rebase needs the affected checks rerun. Verifying does not
+authorize merging, pushing, or deploying.
