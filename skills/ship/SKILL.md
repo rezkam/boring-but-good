@@ -1,15 +1,17 @@
 ---
 name: ship
-description: Verify a change, then deliver it by opening a pull request and watching its CI pass, or by pushing straight to main when the repository says so. Use when the user says ship it, open a PR, push to main, or deploy.
+description: Verify a change, then deliver it by opening a pull request and watching its CI pass, or by pushing straight to main when the repository says so. Use it whenever the user says ship it, send it, open a PR, push to main, deploy, or release, or asks to get finished work delivered, even if they do not name a mode.
 ---
 
 # Ship
 
-Deliver verified work. The delivery mode is a pull request unless the repository's
-instructions say to push straight to `main`; look for that in `AGENTS.md`, the README, and
-whether pull requests are enabled on the remote. If the instructions are silent, use a pull
-request. End with `SHIPPED` or one concrete blocker. Invoking this skill authorizes the
-delivery below and nothing else. It never merges a pull request.
+Deliver verified work. Nothing should reach the base branch or production on unverified
+evidence, so verification comes first and delivery second. The mode is a pull request unless
+the repository says to push straight to `main`; look in `AGENTS.md`, the README, and whether
+pull requests are enabled on the remote. If they are silent, use a pull request.
+
+End with `SHIPPED` or one concrete blocker. Invoking this skill authorizes the delivery below
+and nothing else. It never merges a pull request.
 
 ## 1. Scope
 
@@ -18,7 +20,7 @@ everything else alone and never stage with `-A`, `.`, or `-u`. Follow the `commi
 staging and the message. Work in an isolated worktree when other sessions may be active.
 
 Fetch and rebase onto the current base (`origin/main`) so the evidence is about what will
-land. Never force-push without explicit approval.
+land. Force-pushing can destroy remote work, so do it only with explicit approval.
 
 ## 2. Verify
 
