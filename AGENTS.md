@@ -9,6 +9,10 @@ This file deliberately does not inventory the skills or the test suites. Run `ls
 `tests/test-all.sh` for the current list: every previous attempt to keep an inventory here went
 stale and misled the next reader. `tests/` is the suite runner.
 
+## Delivery
+
+Push changes directly to `main` unless the user explicitly asks for a different branch or a pull request.
+
 ## Architecture
 
 - **Config loaders** (`_config.sh`): Read credentials from `~/.boring/<skill>/` files. Environment variables take precedence over files (`if [ -z "$VAR" ] && [ -f file ]`).
