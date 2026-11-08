@@ -10,10 +10,6 @@ AI Chat is the shared entry point for browser-authenticated AI providers. It dep
 
 Use this skill when the task is about using AI provider web sessions as tools. Do not use it for normal page browsing.
 
-## Pi Gemini Search extension
-
-The companion extension lives separately at [`extensions/gemini-search/`](../../extensions/gemini-search/README.md). It registers `gemini_search`, a file-backed web research tool fixed to Gemini 3.6 Flash Extended Thinking and verified temporary chats. It accepts one query or up to five queries, shows progress while each browser request runs, and returns private result-file paths for pi's `read` tool. The extension imports this skill's runtime, so install both from the same repository checkout.
-
 ## Browser lifecycle contract
 
 AI Chat owns its normal Browser Tools browser lifecycle.
