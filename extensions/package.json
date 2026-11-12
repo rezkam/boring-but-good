@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test goal/*.test.ts codex-fast-mode/*.test.ts",
+    "test": "node --test goal/*.test.ts codex-fast-mode/*.test.ts codex-limits-status/test/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "validate": "npm test && npm run typecheck"
   },

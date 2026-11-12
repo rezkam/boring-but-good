@@ -12,6 +12,7 @@
   },
   "include": [
     "goal/**/*.ts",
-    "codex-fast-mode/**/*.ts"
+    "codex-fast-mode/**/*.ts",
+    "codex-limits-status/**/*.ts"
   ]
 }

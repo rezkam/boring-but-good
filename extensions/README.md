@@ -6,6 +6,7 @@ Each extension directory contains its entry point, supporting modules, tests, an
 
 - [Codex fast mode](codex-fast-mode/README.md)
 - [Goal](goal/README.md)
+- [Codex Limits Status](codex-limits-status/README.md) — percentage used and a compact reset countdown for `openai-codex*` providers.
 
 ## Development
 
