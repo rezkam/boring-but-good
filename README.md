@@ -21,6 +21,7 @@ Skills that give coding agents the ability to interact with real engineering sys
 | [**code-review**](skills/code-review/) | Review PRs, branches, local changes, snapshots, or codebases for concrete, material defects without editing code. |
 | [**commit**](skills/commit/) | Stage and commit only the intended changes. |
 | [**handoff**](skills/handoff/) | Compact the current conversation into a handoff document for the next agent. |
+| [**install-skills**](skills/install-skills/) | Install, update, and remove skills so Claude Code, pi, and Codex share one directory: symlinks for your own skills, `npx skills` for everyone else's. |
 | [**perplexity**](skills/perplexity/) | Search, research, chat, and analyze files through Perplexity WebUI. |
 | [**pr-ready**](skills/pr-ready/) | Commit, push, open, and verify a merge-ready pull request without merging it. |
 | [**research**](skills/research/) | Research a question against primary sources in a background agent and save cited findings as Markdown. |
