@@ -14,7 +14,7 @@ header() { echo ""; printf "${BOLD}━━━ %s ━━━${RESET}\n" "$1"; }
 
 header "Browser Tools package consumers"
 
-for consumer in ai-chat finance perplexity; do
+for consumer in perplexity; do
     consumer_dir="${REPO_DIR}/skills/${consumer}"
 
     if node - "$consumer_dir" <<'NODE'
