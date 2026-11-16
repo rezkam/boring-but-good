@@ -90,8 +90,12 @@ export default function (pi: ExtensionAPI) {
 			return theme.fg("success", text);
 		};
 
-		const showLabels = [limits.primary, limits.secondary].filter((window) => usedPercent(window) !== undefined).length > 1;
-		const windows = [limits.primary, limits.secondary].flatMap((window, index) => {
+		const visibleWindows = [limits.primary, limits.secondary]
+			.map((window, index) => ({ window, index }))
+			.filter(({ window }) => usedPercent(window) !== undefined
+				&& !(window?.used_percent === 0 && typeof window.reset_at === "number" && window.reset_at <= Date.now() / 1000));
+		const showLabels = visibleWindows.length > 1;
+		const windows = visibleWindows.flatMap(({ window, index }) => {
 			const used = usedPercent(window);
 			if (used === undefined) return [];
 			const seconds = window?.limit_window_seconds;
@@ -160,15 +164,19 @@ export default function (pi: ExtensionAPI) {
 			const value = headers[name] ?? headers[name.toLowerCase()];
 			return Array.isArray(value) ? value[0] : value;
 		};
-		const primaryUsed = Number(header("x-codex-primary-used-percent"));
-		const secondaryUsed = Number(header("x-codex-secondary-used-percent"));
+		const numericHeader = (name: string): number => {
+			const value = header(name);
+			return value?.trim() ? Number(value) : NaN;
+		};
+		const primaryUsed = numericHeader("x-codex-primary-used-percent");
+		const secondaryUsed = numericHeader("x-codex-secondary-used-percent");
 		if (!Number.isFinite(primaryUsed) && !Number.isFinite(secondaryUsed)) return;
 
 		const updateWindow = (slot: "primary" | "secondary", used: number): CodexWindow | undefined => {
 			const previous = latestLimits?.[slot];
 			if (!Number.isFinite(used)) return previous;
-			const minutes = Number(header(`x-codex-${slot}-window-minutes`));
-			const resetAfter = Number(header(`x-codex-${slot}-reset-after-seconds`));
+			const minutes = numericHeader(`x-codex-${slot}-window-minutes`);
+			const resetAfter = numericHeader(`x-codex-${slot}-reset-after-seconds`);
 			return {
 				used_percent: used,
 				reset_at: Number.isFinite(resetAfter) && resetAfter >= 0

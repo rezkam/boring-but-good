@@ -40,6 +40,8 @@ pi -e ./extensions/codex-limits-status/index.ts
 - Supports weekly-only accounts without a missing five-hour placeholder.
   When multiple windows exist, labels distinguish them, for example:
   `Codex used 5h 20% (resets in 1h0m) · 7d 69% (resets in 2d3h10m)`.
+  Zero-usage windows whose reset time has passed are omitted. Active zero-usage
+  windows remain visible, and blank response headers are ignored.
 - Adds a reset countdown only when a reset time is available. It updates every
   minute without making extra network requests, rounds partial minutes up,
   and never becomes negative. After the deadline it shows `0m` until new usage

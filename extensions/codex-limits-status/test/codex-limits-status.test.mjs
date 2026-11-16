@@ -123,6 +123,45 @@ test("uses header window durations for weekly-only usage and preserves them on p
 	assert.equal(app.status, "Codex used 7d 82% · 7d 10%");
 });
 
+test("omits inactive zero-usage windows from payloads and headers", async (t) => {
+	t.mock.timers.enable({ apis: ["Date"], now: 1800000000000 });
+	const app = harness({ rate_limit: {
+		primary_window: { used_percent: 34, limit_window_seconds: 604800, reset_at: Date.now() / 1000 + 86400 },
+		secondary_window: { used_percent: 0, limit_window_seconds: 604800, reset_at: Date.now() / 1000 - 60 },
+	} });
+	await app.emit("session_start");
+	assert.equal(app.status, "Codex used 34% (resets in 1d0h0m)");
+	await app.emit("after_provider_response", { headers: {
+		"x-codex-secondary-used-percent": "0",
+		"x-codex-secondary-window-minutes": "10080",
+		"x-codex-secondary-reset-after-seconds": "0",
+	} });
+	assert.equal(app.status, "Codex used 34% (resets in 1d0h0m)");
+	await app.emit("after_provider_response", { headers: {
+		"x-codex-secondary-used-percent": "0",
+		"x-codex-secondary-reset-after-seconds": "600",
+	} });
+	assert.equal(app.status, "Codex used 7d 34% (resets in 1d0h0m) · 7d 0% (resets in 10m)");
+});
+
+test("blank headers neither invent windows nor replace known values", async (t) => {
+	t.mock.timers.enable({ apis: ["Date"], now: 1800000000000 });
+	const app = harness({ rate_limit: {
+		primary_window: { used_percent: 34, limit_window_seconds: 604800, reset_at: Date.now() / 1000 + 86400 },
+	} });
+	await app.emit("session_start");
+	await app.emit("after_provider_response", { headers: {
+		"x-codex-primary-used-percent": " ",
+		"x-codex-secondary-used-percent": "",
+	} });
+	assert.equal(app.status, "Codex used 34% (resets in 1d0h0m)");
+	await app.emit("after_provider_response", { headers: {
+		"x-codex-primary-used-percent": "35",
+		"x-codex-primary-reset-after-seconds": " ",
+	} });
+	assert.equal(app.status, "Codex used 35% (resets in 1d0h0m)");
+});
+
 test("clamps usage, keeps zero usage visible, and falls back to legacy window labels", async () => {
 	const app = harness({ rate_limit: {
 		primary_window: { used_percent: -3 },
