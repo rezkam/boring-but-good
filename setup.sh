@@ -12,7 +12,7 @@ CYAN=$'\033[0;36m'; BOLD=$'\033[1m'; DIM=$'\033[2m'; RESET=$'\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILLS_SRC="${SCRIPT_DIR}/skills"
-MOVED_SKILLS="ai-chat argocd commit dependency-track finance java-21-to-25-migration jenkins jira perplexity pr-ready skanetrafiken ship sonarqube tdd to-tasks verify"
+MOVED_SKILLS="argocd commit dependency-track jenkins jira perplexity pr-ready skanetrafiken ship sonarqube tdd to-tasks verify"
 LEGACY_WORKFLOW_TOOL_SKILLS="argocd dependency-track jenkins jira sonarqube"
 BORING_DIR="${HOME}/.boring"
 
@@ -390,12 +390,12 @@ banner() {
     printf "  %b\n" "${BLUE}                           __/ |${RESET}"
     printf "  %b\n" "${BLUE}                          |___/ ${RESET}"
     printf "\n"
-    printf "  %b\n" "${DIM}argocd · dependency-track · jenkins · jira · to-tasks · sonarqube · skanetrafiken · java-21-to-25-migration${RESET}"
+    printf "  %b\n" "${DIM}argocd · dependency-track · jenkins · jira · to-tasks · sonarqube · skanetrafiken${RESET}"
     printf "\n"
 }
 
 # ── Skill selection ─────────────────────────────────────────────────────────
-INSTALL_DTRACK=false; INSTALL_JENKINS=false; INSTALL_JIRA=false; INSTALL_TO_TASKS=false; INSTALL_SONAR=false; INSTALL_SKANE=false; INSTALL_JAVA_MIG=false; INSTALL_ARGOCD=false
+INSTALL_DTRACK=false; INSTALL_JENKINS=false; INSTALL_JIRA=false; INSTALL_TO_TASKS=false; INSTALL_SONAR=false; INSTALL_SKANE=false; INSTALL_ARGOCD=false
 INSTALL_DIR=""
 AGENT_HARNESS="claude-code"
 
@@ -409,14 +409,13 @@ select_skills() {
     printf "    %b  sonarqube               %b\n" "${BOLD}5${RESET}" "${DIM}— Code quality, coverage, security hotspots${RESET}"
     printf "    %b  skanetrafiken           %b\n" "${BOLD}6${RESET}" "${DIM}— Public transport in Skåne (no config needed)${RESET}"
     printf "    %b  argocd                  %b\n" "${BOLD}7${RESET}" "${DIM}— GitOps deployments: sync, status, rollback${RESET}"
-    printf "    %b  java-21-to-25-migration %b\n" "${BOLD}8${RESET}" "${DIM}— JDK 21→25 migration (no config needed)${RESET}"
     echo ""
 
     local selection
     ask selection "Skills to install" "all"
 
     if [ "$selection" = "all" ]; then
-        INSTALL_DTRACK=true; INSTALL_JENKINS=true; INSTALL_JIRA=true; INSTALL_TO_TASKS=true; INSTALL_SONAR=true; INSTALL_SKANE=true; INSTALL_ARGOCD=true; INSTALL_JAVA_MIG=true
+        INSTALL_DTRACK=true; INSTALL_JENKINS=true; INSTALL_JIRA=true; INSTALL_TO_TASKS=true; INSTALL_SONAR=true; INSTALL_SKANE=true; INSTALL_ARGOCD=true
     else
         for s in $selection; do
             case "$s" in
@@ -427,7 +426,6 @@ select_skills() {
                 5) INSTALL_SONAR=true     ;;
                 6) INSTALL_SKANE=true     ;;
                 7) INSTALL_ARGOCD=true    ;;
-                8) INSTALL_JAVA_MIG=true  ;;
                 *) warn "Unknown selection: $s (skipping)" ;;
             esac
         done
@@ -451,7 +449,6 @@ select_skills() {
     [ "$INSTALL_SONAR"     = "true" ] && count=$((count + 1))
     [ "$INSTALL_SKANE"    = "true" ] && count=$((count + 1))
     [ "$INSTALL_ARGOCD"   = "true" ] && count=$((count + 1))
-    [ "$INSTALL_JAVA_MIG" = "true" ] && count=$((count + 1))
 
     [ "$count" -eq 0 ] && { warn "No skills selected. Nothing to do."; exit 0; }
     info "Selected ${count} skill(s) to install."
@@ -468,9 +465,9 @@ detect_and_select_harness() {
     if [ "$has_claude" = "true" ] && [ "$has_pi" = "true" ]; then
         info "Detected both ${BOLD}Claude Code${RESET} (~/.claude) and ${BOLD}Pi${RESET} (~/.pi)."
         echo ""
-        printf "    %b  claude-code  %b\n" "${BOLD}1${RESET}" "${DIM}— java-21-to-25-migration as agent, rest as skills${RESET}"
+        printf "    %b  claude-code  %b\n" "${BOLD}1${RESET}" "${DIM}— install skills for Claude Code${RESET}"
         printf "    %b  pi           %b\n" "${BOLD}2${RESET}" "${DIM}— everything as skills${RESET}"
-        printf "    %b  both         %b\n" "${BOLD}3${RESET}" "${DIM}— java-21-to-25-migration as agent + skill, rest as skills${RESET}"
+        printf "    %b  both         %b\n" "${BOLD}3${RESET}" "${DIM}— install skills for both${RESET}"
         echo ""
         local choice
         ask choice "Agent harness" "1"
@@ -581,16 +578,6 @@ migrate_legacy_skill_links() {
         count=$((count + pi_count))
     fi
 
-    local agent_dest="" old_agent_target="" new_agent_target=""
-    if [ "$AGENT_HARNESS" = "claude-code" ] || [ "$AGENT_HARNESS" = "both" ]; then
-        agent_dest="${AGENT_DIR}/java-21-to-25-migration.md"
-        old_agent_target="${SCRIPT_DIR}/java-21-to-25-migration/SKILL.md"
-        new_agent_target="${SKILLS_SRC}/java-21-to-25-migration/SKILL.md"
-        if [ -L "$agent_dest" ] && [ "$(readlink "$agent_dest" 2>/dev/null || true)" = "$old_agent_target" ]; then
-            count=$((count + 1))
-        fi
-    fi
-
     [ "$count" -gt 0 ] || return 0
 
     header "Refresh Moved Skill Links"
@@ -604,9 +591,6 @@ migrate_legacy_skill_links() {
     _refresh_legacy_skill_links_in "$INSTALL_DIR"
     if [ "$AGENT_HARNESS" = "both" ]; then
         _refresh_legacy_skill_links_in "$PI_SKILLS_DIR"
-    fi
-    if [ -n "$agent_dest" ] && _refresh_legacy_link "$agent_dest" "$old_agent_target" "$new_agent_target"; then
-        success "Refreshed ${BOLD}java-21-to-25-migration${RESET} agent link at ${agent_dest}"
     fi
 }
 
@@ -653,56 +637,6 @@ install_skill() {
     _link_skill_to "$name" "$INSTALL_DIR"
     # In 'both' mode, also link to Pi's skills directory
     if [ "$AGENT_HARNESS" = "both" ]; then
-        _link_skill_to "$name" "$PI_SKILLS_DIR"
-    fi
-}
-
-# ── Install java-21-to-25-migration based on harness ───────────────────────
-install_java_migration() {
-    local name="java-21-to-25-migration"
-    local src="${SKILLS_SRC}/${name}"
-
-    if [ ! -d "$src" ]; then
-        warn "Source not found: ${src} — skipping"
-        return 1
-    fi
-
-    # For Claude Code: link SKILL.md → ~/.claude/agents/<name>.md (agent format)
-    if [ "$AGENT_HARNESS" = "claude-code" ] || [ "$AGENT_HARNESS" = "both" ]; then
-        local agent_dest="${AGENT_DIR}/${name}.md"
-        local agent_src="${src}/SKILL.md"
-
-        if [ -L "$agent_dest" ]; then
-            local current_target
-            current_target=$(readlink "$agent_dest" 2>/dev/null || true)
-            if [ "$current_target" = "$agent_src" ]; then
-                success "Already linked ${BOLD}${name}${RESET} → ${agent_dest} ${DIM}(agent)${RESET}"
-                return 0
-            else
-                rm -f "$agent_dest"
-            fi
-        elif [ -f "$agent_dest" ]; then
-            local overwrite
-            ask_yn overwrite "${name}.md already exists at ${agent_dest}. Replace with symlink?" "y"
-            if [ "$overwrite" != "true" ]; then
-                warn "Skipping ${name} agent link (kept existing file)"
-                return 0
-            fi
-            rm -f "$agent_dest"
-        fi
-
-        if ln -s "$agent_src" "$agent_dest"; then
-            success "Linked ${BOLD}${name}${RESET} → ${agent_dest} ${DIM}(agent)${RESET}"
-        else
-            warn "Failed to create symlink ${name} → ${agent_dest}"
-            return 1
-        fi
-    fi
-
-    # For Pi (or both): link directory → Pi's skills path
-    if [ "$AGENT_HARNESS" = "pi" ]; then
-        _link_skill_to "$name" "$INSTALL_DIR"
-    elif [ "$AGENT_HARNESS" = "both" ]; then
         _link_skill_to "$name" "$PI_SKILLS_DIR"
     fi
 }
@@ -1277,17 +1211,6 @@ print_summary() {
         [ "$INSTALL_SKANE"    = "true" ] && _summary_pi "skanetrafiken"
     fi
 
-    # java-21-to-25-migration: agent and/or skill
-    if [ "$INSTALL_JAVA_MIG" = "true" ]; then
-        if [ "$AGENT_HARNESS" = "claude-code" ] || [ "$AGENT_HARNESS" = "both" ]; then
-            printf "    %b %-26s → %s/java-21-to-25-migration.md %b\n" "${GREEN}✓${RESET}" "java-21-to-25-migration" "$AGENT_DIR" "${DIM}(agent)${RESET}"
-        fi
-        if [ "$AGENT_HARNESS" = "pi" ]; then
-            printf "    %b %-26s → %s/java-21-to-25-migration/ %b\n" "${GREEN}✓${RESET}" "java-21-to-25-migration" "$INSTALL_DIR" "${DIM}(skill)${RESET}"
-        elif [ "$AGENT_HARNESS" = "both" ]; then
-            printf "    %b %-26s → %s/java-21-to-25-migration/ %b\n" "${GREEN}✓${RESET}" "java-21-to-25-migration" "$PI_SKILLS_DIR" "${DIM}(skill)${RESET}"
-        fi
-    fi
     echo ""
 
     local has_configs=false
@@ -1320,7 +1243,7 @@ show_help() {
     echo "Usage: $0 [--help]"
     echo ""
     echo "Interactive installer for Boring Skills."
-    echo "Sets up: argocd, dependency-track, jenkins, jira, to-tasks, sonarqube, skanetrafiken, java-21-to-25-migration"
+    echo "Sets up: argocd, dependency-track, jenkins, jira, to-tasks, sonarqube, skanetrafiken"
     echo ""
     echo "Supports Claude Code and Pi agent harnesses."
     echo "Skills are symlinked — git pull updates them automatically."
@@ -1352,7 +1275,6 @@ main() {
     [ "$INSTALL_SONAR"     = "true" ] && remaining=$((remaining + 1))
     [ "$INSTALL_SKANE"    = "true" ] && remaining=$((remaining + 1))
     [ "$INSTALL_ARGOCD"   = "true" ] && remaining=$((remaining + 1))
-    [ "$INSTALL_JAVA_MIG" = "true" ] && remaining=$((remaining + 1))
     if [ "$remaining" -eq 0 ]; then
         echo ""
         warn "No skills remaining after dependency checks."
@@ -1368,7 +1290,6 @@ main() {
     [ "$INSTALL_SONAR"     = "true" ] && configure_sonar
     [ "$INSTALL_ARGOCD"   = "true" ] && configure_argocd
     [ "$INSTALL_SKANE"    = "true" ] && install_skill "skanetrafiken"      # no config needed
-    [ "$INSTALL_JAVA_MIG" = "true" ] && install_java_migration             # harness-aware install
 
     # Only offer connectivity tests if a service with remote config was installed
     local has_remote=false

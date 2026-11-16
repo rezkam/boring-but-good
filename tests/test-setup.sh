@@ -85,19 +85,25 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
-header "Setup: SKILL.md description length (java-21-to-25-migration)"
+header "Setup: Removed skills are not offered"
+
+if grep -qE 'ai-chat|finance|java-21-to-25-migration' "$SETUP"; then
+    fail "Installer references removed skills"
+else
+    pass "Installer does not reference removed skills"
+fi
+
+header "Setup: SKILL.md description length"
 # ═══════════════════════════════════════════════════════════════════════════════
 
-JAVA_MIG_DIR="${REPO_DIR}/skills/java-21-to-25-migration"
-SKILLMD="${JAVA_MIG_DIR}/SKILL.md"
-
-# Description length check (pi limit: 1024 chars)
-DESC_LEN=$(grep '^description:' "$SKILLMD" | sed 's/^description: //' | wc -c | tr -d ' ')
-if [ "$DESC_LEN" -le 1024 ]; then
-    pass "Description length ${DESC_LEN} chars (≤1024 pi limit)"
-else
-    fail "Description too long: ${DESC_LEN} chars (pi limit is 1024)"
-fi
+for SKILLMD in "${REPO_DIR}"/skills/*/SKILL.md; do
+    DESC_LEN=$(grep '^description:' "$SKILLMD" | sed 's/^description: //' | wc -c | tr -d ' ')
+    if [ "$DESC_LEN" -le 1024 ]; then
+        pass "$(basename "$(dirname "$SKILLMD")") description length ${DESC_LEN} chars (≤1024 pi limit)"
+    else
+        fail "Description too long in ${SKILLMD}: ${DESC_LEN} chars (pi limit is 1024)"
+    fi
+done
 
 # ═══════════════════════════════════════════════════════════════════════════════
 header "Setup: Sandbox legacy link migration (non-destructive)"
